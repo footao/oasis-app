@@ -116,8 +116,8 @@ with st.sidebar:
     st.subheader("3) レース条件")
     dist = st.selectbox("距離", DIST_OPTS, index=2)
     track = st.selectbox("馬場", TRACK_OPTS, index=0)
-    ground = st.selectbox("地面", GROUND_OPTS, index=0)
     topn = st.slider("ランキング表示数", 5, 40, 15)
+    st.caption("「地面」は解析ボタンの隣で選べます。")
 
     with st.expander("詳細（CSV・CO・ログ保存先）"):
         csv_path = st.text_input("別CSVのパス（任意）", value="",
@@ -126,11 +126,12 @@ with st.sidebar:
         bet_log_path = st.text_input("ベットログ保存先(CSV)", value="oasis_bet_log.csv")
 
 csv_resolved, _ = _resolve_read(csv_path) if csv_path else ("", False)
-settings = dict(dist=dist, track=track, ground=ground, topn=topn,
+settings = dict(dist=dist, track=track, ground=GROUND_OPTS[0], topn=topn,
                 bankroll=bankroll, kelly_fraction=kelly, max_risk_frac=risk,
                 edge_min=edge, csv_path=csv_resolved, carryover_rrc=(co_rrc or None),
                 unformed_sleeve=sleeve_on, unformed_max_units=sleeve_units,
                 unformed_p_min=sleeve_pmin, unformed_edge_min=0.30)
+# ground は解析ボタンの隣の selectbox で選び、解析直前に settings["ground"] に入れる。
 bet_log_resolved = _resolve_save(bet_log_path)
 
 
@@ -162,18 +163,37 @@ raw_text = st.text_area(
     height=200, value=ss.last_text,
     placeholder="=== 出走馬一覧 === … === 3連単オッズ === …")
 
-col_a, col_b = st.columns([1, 5])
+col_a, col_b, col_c = st.columns([1.2, 1.2, 3])
 with col_a:
     do_analyze = st.button("🎯 解析", type="primary", use_container_width=True)
+with col_b:
+    ground = st.selectbox("地面", GROUND_OPTS, index=0,
+                          help="このレースの地面状態。解析の直前にここで選びます。")
+settings["ground"] = ground
 
 if do_analyze:
-    if not (bundle and bundle.get("ok")):
-        st.error("モデル未学習です。サイドバーで学習してください。")
-    elif not raw_text.strip():
+    if not raw_text.strip():
         st.warning("レースデータを貼り付けてください。")
     else:
-        ss.last_text = raw_text
-        ss.result = oc.analyze(raw_text, bundle, settings)
+        # 未学習なら、まず学習してから解析する
+        if not (bundle and bundle.get("ok")):
+            if not log_found:
+                st.error(f"学習用ログが見つかりません: {log_resolved}\n"
+                         f"サイドバー「レースログのパス」を確認してください。")
+            else:
+                with st.spinner("モデル未学習のため学習中…（数秒）"):
+                    ss.bundle = oc.train_model(
+                        log_resolved, sigma_override=(sigma_override or None))
+                bundle = ss.bundle
+                if bundle and bundle.get("ok"):
+                    st.toast("モデルを自動学習しました。", icon="📚")
+                else:
+                    for m in (bundle.get("messages", []) if bundle else []):
+                        st.error(m)
+        # 学習済みになっていれば解析を実行
+        if bundle and bundle.get("ok"):
+            ss.last_text = raw_text
+            ss.result = oc.analyze(raw_text, bundle, settings)
 
 result = ss.result
 
