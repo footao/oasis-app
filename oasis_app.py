@@ -342,20 +342,33 @@ with lc2:
     pend_ids = sorted(set(log_df_now[log_df_now["status"] == "pending"]["race_id"].astype(str))) \
         if len(log_df_now) else []
     rid_settle = st.selectbox("精算するレースID", options=(pend_ids or ["(pendingなし)"]))
-    # 着順候補は「その精算対象レースで記録した買い目」から復元（直近解析に依存しない）
-    horses = betlog.race_horses(rid_settle) if pend_ids else []
-    if not horses:  # フォールバック: 直近解析レースの出走馬
-        horses = (result.get("horses_disp") if result and result.get("ok") else None) or []
+
+    # 着順候補: 記録済みの買い目に出る馬 ∪ 直近解析の全出走馬（できるだけ全頭そろえる）
+    horses = set(betlog.race_horses(rid_settle)) if pend_ids else set()
+    if result and result.get("ok"):
+        horses |= set(result.get("horses_disp") or [])
+    horses = sorted(horses)
+
+    manual = st.checkbox("候補にない馬を手入力する", value=False, key="settle_manual",
+                         help="賭けていない馬が着順に入った等で、プルダウンに無い馬を直接入力したいとき")
     cc = st.columns(3)
-    o1 = cc[0].selectbox("実1着", options=(horses or ["—"]), key="o1")
-    o2 = cc[1].selectbox("実2着", options=(horses or ["—"]), key="o2")
-    o3 = cc[2].selectbox("実3着", options=(horses or ["—"]), key="o3")
+    if manual:
+        o1 = cc[0].text_input("実1着", key="o1t")
+        o2 = cc[1].text_input("実2着", key="o2t")
+        o3 = cc[2].text_input("実3着", key="o3t")
+    else:
+        o1 = cc[0].selectbox("実1着", options=(horses or ["—"]), key="o1")
+        o2 = cc[1].selectbox("実2着", options=(horses or ["—"]), key="o2")
+        o3 = cc[2].selectbox("実3着", options=(horses or ["—"]), key="o3")
     if st.button("🏁 精算", disabled=not pend_ids, use_container_width=True):
-        if len({o1, o2, o3}) < 3:
+        o1s, o2s, o3s = (o1 or "").strip(), (o2 or "").strip(), (o3 or "").strip()
+        if not (o1s and o2s and o3s):
+            st.error("1〜3着すべてを入力してください。")
+        elif len({o1s, o2s, o3s}) < 3:
             st.error("1〜3着に同じ馬が選ばれています。")
         else:
             try:
-                cnt = betlog.settle(rid_settle, (o1, o2, o3))
+                cnt = betlog.settle(rid_settle, (o1s, o2s, o3s))
                 if cnt == 0:
                     st.warning(f"レース『{rid_settle}』に精算対象（pending）がありませんでした。")
                 else:
@@ -363,12 +376,12 @@ with lc2:
                     sub = df_after[df_after["race_id"].astype(str) == str(rid_settle)]
                     won = int((sub["status"] == "won").sum())
                     st.success(f"レース『{rid_settle}』を精算（{cnt}点中 的中{won}点）。"
-                               f"結果: {o1} → {o2} → {o3}")
+                               f"結果: {o1s} → {o2s} → {o3s}")
                     st.caption(f"保存先: {betlog.path}")
             except Exception as e:
                 st.error(f"保存に失敗しました: {e}\n保存先: {betlog.path}")
-    if pend_ids and not betlog.race_horses(rid_settle):
-        st.caption("着順候補は記録済みの買い目から復元します（このレースの記録が無い場合は直近解析の馬）。")
+    st.caption("候補は「記録済みの買い目＋直近解析の全出走馬」から作成。"
+               "賭けていない馬が入線した等で出てこない場合は、上のチェックで手入力できます。")
 
 rc1, rc2 = st.columns([1, 1])
 with rc1:
