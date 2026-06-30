@@ -14,6 +14,37 @@ import streamlit as st
 import oasis_core as oc
 
 
+def _disp_map(names):
+    """表示用: 同名馬（ベース名が同じ）を出現順に いぬ1/いぬ2… へ。単独馬はベース名のまま。
+    内部名（例 いぬ#3410）は一切変えず、画面表示のときだけ置き換えるための対応表を返す。"""
+    order = []
+    for n in names:
+        n = str(n)
+        if n not in order:
+            order.append(n)
+    groups = {}
+    for n in order:
+        groups.setdefault(oc.base_name(n), []).append(n)
+    m = {}
+    for base, lst in groups.items():
+        if len(lst) <= 1:
+            m[lst[0]] = base
+        else:
+            for i, n in enumerate(lst, 1):   # 出現（エントリー）順に 1,2,3…
+                m[n] = f"{base}{i}"
+    return m
+
+
+def _dname(name, m):
+    """1頭ぶんの内部名を表示名に。対応表に無ければそのまま。"""
+    return m.get(str(name).strip(), str(name))
+
+
+def _dcombo(combo, m):
+    """『A → B → C』形式の買い目を表示名に変換。"""
+    return ' → '.join(_dname(x, m) for x in str(combo).split('→'))
+
+
 def _app_dir():
     """アプリ（exeなら実行ファイル）のあるフォルダ。相対パスの基準にする。"""
     if getattr(sys, "frozen", False):
@@ -205,6 +236,9 @@ if result is not None:
         for m in result["messages"]:
             (st.warning if m.startswith("⚠") else st.info)(m)
 
+        # 表示用の同名馬ナンバリング（内部名は不変・画面表示だけ いぬ1/いぬ2…）
+        dmap = _disp_map(result.get("horses_disp") or [])
+
         # 推奨配分サマリ
         sm = result.get("summary")
         if sm:
@@ -229,7 +263,7 @@ if result is not None:
             rows = result["alloc_rows"]
             if any(r["mark"] == "✅" for r in rows):
                 df = pd.DataFrame([{
-                    "": r["mark"], "状態": r.get("flag", "成"), "買い目": r["combo"],
+                    "": r["mark"], "状態": r.get("flag", "成"), "買い目": _dcombo(r["combo"], dmap),
                     "的中率": f"{r['model_p']*100:.2f}%",
                     "表示od": (f"{r['disp_od']:.1f}" if r["disp_od"] else "—"),
                     "理論EV": (f"{r['theo_ev']:+,.0f}" if r["theo_ev"] is not None else "—"),
@@ -257,7 +291,7 @@ if result is not None:
             st.subheader("🎯 損益分岐オッズ表（CSV未指定）")
             st.caption("実オッズ > 必要オッズ なら +EV。")
             st.dataframe(pd.DataFrame([{
-                "買い目": r["combo"], "モデル的中率": f"{r['model_p']*100:.2f}%",
+                "買い目": _dcombo(r["combo"], dmap), "モデル的中率": f"{r['model_p']*100:.2f}%",
                 "必要オッズ": f"{r['need_od']:.1f}倍"} for r in result["breakeven_rows"]],
                 ), use_container_width=True, hide_index=True)
 
@@ -266,7 +300,7 @@ if result is not None:
         rk = result["ranking"]
         if result["ranking_pool_known"]:
             df = pd.DataFrame([{
-                "#": r["rank"], "買い目": r["combo"],
+                "#": r["rank"], "買い目": _dcombo(r["combo"], dmap),
                 "的中率": f"{r['model_p']*100:.2f}%",
                 "累積": f"{r['cum']*100:.1f}%", "状態": r["flag"],
                 "1口実効od": f"{r['eff1_od']:.1f}倍",
@@ -277,7 +311,7 @@ if result is not None:
                        "状態 未=未成立（自分が唯一なら全プール総取り＝高倍率。安定版では非推奨）。")
         else:
             df = pd.DataFrame([{
-                "#": r["rank"], "買い目": r["combo"],
+                "#": r["rank"], "買い目": _dcombo(r["combo"], dmap),
                 "的中率": f"{r['model_p']*100:.2f}%", "累積": f"{r['cum']*100:.1f}%",
                 "状態": r["flag"]} for r in rk])
             st.dataframe(df, use_container_width=True, hide_index=True)
@@ -288,19 +322,19 @@ if result is not None:
             sw = result["single_win"]
             if result.get("has_market"):
                 df = pd.DataFrame([{
-                    "馬": r["name"], "モデル": f"{r['model_p']*100:.1f}%",
+                    "馬": _dname(r["name"], dmap), "モデル": f"{r['model_p']*100:.1f}%",
                     "市場": (f"{r['market_p']*100:.1f}%" if r["market_p"] is not None else "—"),
                     "オッズ": (f"{r['odds']:.2f}" if r["odds"] else "—"),
                     "スタミナ": ("⚠不足" if r.get("below_cutoff") else "OK"),
                     "判定": r["tag"]} for r in sw])
             else:
                 df = pd.DataFrame([{
-                    "馬": r["name"], "モデル勝率": f"{r['model_p']*100:.1f}%",
+                    "馬": _dname(r["name"], dmap), "モデル勝率": f"{r['model_p']*100:.1f}%",
                     "スタミナ": ("⚠不足" if r.get("below_cutoff") else "OK"),
                     "フェアod": (f"{1/r['model_p']:.1f}倍" if r['model_p'] > 0.001 else "—")}
                     for r in sw])
             st.dataframe(df, use_container_width=True, hide_index=True)
-            st.caption(f"モデルの◎: 【{result['model_pick']}】"
+            st.caption(f"モデルの◎: 【{_dname(result['model_pick'], dmap)}】"
                        "／ スタミナ⚠不足=攻略本の必要最低スタミナ未満（スコア大幅減）")
 
 # ============================ ベットログ ============================
@@ -349,6 +383,10 @@ with lc2:
         horses |= set(result.get("horses_disp") or [])
     horses = sorted(horses)
 
+    # 表示用ナンバリング（選択の内部値は不変。解析中レースなら出現順を引き継ぐ）
+    _seed = (result.get("horses_disp") if (result and result.get("ok")) else None) or []
+    smap = _disp_map(list(_seed) + horses)
+
     manual = st.checkbox("候補にない馬を手入力する", value=False, key="settle_manual",
                          help="賭けていない馬が着順に入った等で、プルダウンに無い馬を直接入力したいとき")
     cc = st.columns(3)
@@ -357,9 +395,12 @@ with lc2:
         o2 = cc[1].text_input("実2着", key="o2t")
         o3 = cc[2].text_input("実3着", key="o3t")
     else:
-        o1 = cc[0].selectbox("実1着", options=(horses or ["—"]), key="o1")
-        o2 = cc[1].selectbox("実2着", options=(horses or ["—"]), key="o2")
-        o3 = cc[2].selectbox("実3着", options=(horses or ["—"]), key="o3")
+        o1 = cc[0].selectbox("実1着", options=(horses or ["—"]), key="o1",
+                              format_func=lambda x: _dname(x, smap))
+        o2 = cc[1].selectbox("実2着", options=(horses or ["—"]), key="o2",
+                              format_func=lambda x: _dname(x, smap))
+        o3 = cc[2].selectbox("実3着", options=(horses or ["—"]), key="o3",
+                              format_func=lambda x: _dname(x, smap))
     if st.button("🏁 精算", disabled=not pend_ids, use_container_width=True):
         o1s, o2s, o3s = (o1 or "").strip(), (o2 or "").strip(), (o3 or "").strip()
         if not (o1s and o2s and o3s):
@@ -376,7 +417,7 @@ with lc2:
                     sub = df_after[df_after["race_id"].astype(str) == str(rid_settle)]
                     won = int((sub["status"] == "won").sum())
                     st.success(f"レース『{rid_settle}』を精算（{cnt}点中 的中{won}点）。"
-                               f"結果: {o1s} → {o2s} → {o3s}")
+                               f"結果: {_dname(o1s, smap)} → {_dname(o2s, smap)} → {_dname(o3s, smap)}")
                     st.caption(f"保存先: {betlog.path}")
             except Exception as e:
                 st.error(f"保存に失敗しました: {e}\n保存先: {betlog.path}")
