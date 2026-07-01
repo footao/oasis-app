@@ -44,6 +44,52 @@ def _dcombo(combo, m):
     """『A → B → C』形式の買い目を表示名に変換。"""
     return ' → '.join(_dname(x, m) for x in str(combo).split('→'))
 
+def _render_win(result, dmap, settings):
+    """単勝モードの表示（推奨購入・購入リスト・全馬の勝率/オッズ）。"""
+    st.subheader("🎯 単勝モード 推奨")
+    if not result.get("has_market"):
+        st.info("単勝オッズが取得できていないため推奨できません（貼り付けデータに単勝オッズが必要）。")
+    else:
+        recs = result.get("win_recs") or []
+        edge_pct = settings.get("edge_min", 0.10) * 100
+        if not recs:
+            st.info(f"見送り: エッジ {edge_pct:.0f}% 以上の +EV 単勝がありません（無理に張りません）。")
+        else:
+            tu = sum(r["k"] for r in recs)
+            tc = sum(r["cost"] for r in recs)
+            tev = sum(r["ev"] for r in recs)
+            hit = min(1.0, sum(r["model_p"] for r in recs))
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("投資額", f"{tc:,} rrc")
+            c2.metric("推奨頭数 / 口数", f"{len(recs)}頭 / {tu}口")
+            c3.metric("実効EV合計", f"{tev:+,.0f} rrc")
+            c4.metric("いずれか的中", f"{hit*100:.0f}%")
+            df = pd.DataFrame([{
+                "": "✅", "馬": _dname(r["name"], dmap),
+                "モデル勝率": f"{r['model_p']*100:.1f}%", "予想実効オッズ": f"{r['odds']:.1f}倍",
+                "エッジ": f"{r['edge']*100:+.0f}%", "口数": f"{r['k']}口",
+                "投資額": f"{r['cost']:,}rrc", "実効EV": f"{r['ev']:+,.0f}",
+                "スタミナ": ("⚠不足" if r.get("below_cutoff") else "OK")} for r in recs])
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            with st.expander("📋 購入リスト（単勝・1行1口）"):
+                lines = []
+                for r in recs:
+                    for _ in range(r["k"]):
+                        lines.append(_dname(r["name"], dmap))
+                st.code("\n".join(lines) or "(なし)", language=None)
+            st.caption("単勝＝1着を当てる賭け。1口1,000rrc・1頭100口・1レース合計100口（3連単とは独立）。"
+                       "「予想実効オッズ」は現在の単勝オッズを使用（自分の投資でオッズが下がる分は未反映の近似。"
+                       "厳密化には単勝プール総額が必要）。")
+    sw = result.get("single_win") or []
+    with st.expander("🥇 全馬の単勝 勝率・オッズ・EV"):
+        df2 = pd.DataFrame([{
+            "馬": _dname(r["name"], dmap), "モデル勝率": f"{r['model_p']*100:.1f}%",
+            "単勝od": (f"{r['odds']:.1f}" if r.get("odds") else "—"),
+            "市場勝率": (f"{r['market_p']*100:.1f}%" if r.get("market_p") is not None else "—"),
+            "EV(1口)": (f"{(r['model_p']*r['odds']-1)*100:+.0f}%" if r.get("odds") else "—"),
+            "スタミナ": ("⚠不足" if r.get("below_cutoff") else "OK")} for r in sw])
+        st.dataframe(df2, use_container_width=True, hide_index=True)
+
 
 def _app_dir():
     """アプリ（exeなら実行ファイル）のあるフォルダ。相対パスの基準にする。"""
@@ -200,7 +246,11 @@ with col_a:
 with col_b:
     ground = st.selectbox("地面", GROUND_OPTS, index=0,
                           help="このレースの地面状態。解析の直前にここで選びます。")
+with col_c:
+    bet_mode = st.radio("賭け方", ["3連単", "単勝"], horizontal=True,
+                        help="単勝＝1着を当てる賭け。単勝モードでは単勝の推奨購入を表示します。")
 settings["ground"] = ground
+settings["bet_mode"] = bet_mode
 
 if do_analyze:
     if not raw_text.strip():
@@ -239,103 +289,106 @@ if result is not None:
         # 表示用の同名馬ナンバリング（内部名は不変・画面表示だけ いぬ1/いぬ2…）
         dmap = _disp_map(result.get("horses_disp") or [])
 
-        # 推奨配分サマリ
-        sm = result.get("summary")
-        if sm:
-            st.subheader("🎯 推奨配分（安定運用）")
-            for pm in result["pool_msgs"]:
-                st.caption("🔎 " + pm)
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("投資額", f"{sm['invest']:,} rrc", f"資金の {sm['invest_pct']:.1f}%")
-            split = (f"成{sm['n_formed']}+未{sm['n_unformed']}口"
-                     if sm.get('n_unformed') else f"{sm['total_units']}口")
-            c2.metric("推奨点数 / 口数", f"{sm['n_points']}点 / {split}")
-            c3.metric("実効EV合計", f"{sm['tev']:+,.0f} rrc")
-            c4.metric("いずれか的中", f"{sm['hit']*100:.0f}%", f"全外し {sm['miss']*100:.0f}%")
-            st.caption(f"プロファイル: 資金 {sm['bankroll']:,} / {sm['kelly_pct']}%ケリー / "
-                       f"1レース上限 {sm['risk_pct']:.0f}%(={sm['risk_units']}口) / "
-                       f"エッジ下限 {sm['edge_pct']:.0f}% / 払戻プール {sm['pool']:,} rrc")
-            if sm.get('n_unformed'):
-                st.warning(f"未成立スリーブ {sm['n_unformed']}口を含みます（各1口・全プール総取り狙い）。"
-                           "高EVですが高分散で、当たりは稀。モデルの的中率が正しい前提です"
-                           "（成績レポートで低確率帯の校正を確認してから）。")
-
-            rows = result["alloc_rows"]
-            if any(r["mark"] == "✅" for r in rows):
-                df = pd.DataFrame([{
-                    "": r["mark"], "状態": r.get("flag", "成"), "買い目": _dcombo(r["combo"], dmap),
-                    "的中率": f"{r['model_p']*100:.2f}%",
-                    "表示od": (f"{r['disp_od']:.1f}" if r["disp_od"] else "—"),
-                    "理論EV": (f"{r['theo_ev']:+,.0f}" if r["theo_ev"] is not None else "—"),
-                    "口数": (f"{r['k']}口" if r["k"] else ""),
-                    "実効od": (f"{r['eff_od']:.1f}" if r["eff_od"] else ""),
-                    "実効EV": (f"{r['eff_ev']:+,.0f}" if r["eff_ev"] is not None else ""),
-                } for r in rows])
-                st.dataframe(df, use_container_width=True, hide_index=True)
-                st.caption("✅=購入推奨（状態 成=成立 / 未=未成立スリーブ） / "
-                           "△=+理論EVだが安定ルールで見送り")
-                if result.get("bare_used"):
-                    st.caption("※ 一部は素名フォールバックで照合（同名別個体を合算）。")
-                if result.get("unmatched_names"):
-                    st.warning("画面に無い馬: " + ", ".join(result["unmatched_names"]))
-
-                # 購入リスト（コピー用）
-                with st.expander("📋 購入リスト（コピー用・1行1口）"):
-                    st.code("\n".join(result["purchase_lines"]) or "(なし)", language=None)
-            else:
-                st.info(f"見送り: エッジ {sm['edge_pct']:.0f}% 以上の成立買い目がありません"
-                        "（安定運用では無理に張りません）。")
-
-        # 損益分岐（CSV未指定時）
-        elif result.get("breakeven_rows"):
-            st.subheader("🎯 損益分岐オッズ表（CSV未指定）")
-            st.caption("実オッズ > 必要オッズ なら +EV。")
-            st.dataframe(pd.DataFrame([{
-                "買い目": _dcombo(r["combo"], dmap), "モデル的中率": f"{r['model_p']*100:.2f}%",
-                "必要オッズ": f"{r['need_od']:.1f}倍"} for r in result["breakeven_rows"]],
-                ), use_container_width=True, hide_index=True)
-
-        # 的中確率ランキング
-        st.subheader("🏆 的中確率ランキング（1口購入時の実効オッズ付き）")
-        rk = result["ranking"]
-        if result["ranking_pool_known"]:
-            df = pd.DataFrame([{
-                "#": r["rank"], "買い目": _dcombo(r["combo"], dmap),
-                "的中率": f"{r['model_p']*100:.2f}%",
-                "累積": f"{r['cum']*100:.1f}%", "状態": r["flag"],
-                "1口実効od": f"{r['eff1_od']:.1f}倍",
-                "1口EV": f"{r['ev1']:+,.0f}",
-                "+EV": ("◎" if r["plus_ev"] else "")} for r in rk])
-            st.dataframe(df, use_container_width=True, hide_index=True)
-            st.caption(f"上位{len(rk)}点でモデル確率の {result['ranking_cover']*100:.1f}% をカバー。"
-                       "状態 未=未成立（自分が唯一なら全プール総取り＝高倍率。安定版では非推奨）。")
+        if bet_mode == "単勝":
+            _render_win(result, dmap, settings)
         else:
-            df = pd.DataFrame([{
-                "#": r["rank"], "買い目": _dcombo(r["combo"], dmap),
-                "的中率": f"{r['model_p']*100:.2f}%", "累積": f"{r['cum']*100:.1f}%",
-                "状態": r["flag"]} for r in rk])
-            st.dataframe(df, use_container_width=True, hide_index=True)
-            st.caption("プール未取得のため実効odは算出不可。")
+            # 推奨配分サマリ
+            sm = result.get("summary")
+            if sm:
+                st.subheader("🎯 推奨配分（安定運用）")
+                for pm in result["pool_msgs"]:
+                    st.caption("🔎 " + pm)
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("投資額", f"{sm['invest']:,} rrc", f"資金の {sm['invest_pct']:.1f}%")
+                split = (f"成{sm['n_formed']}+未{sm['n_unformed']}口"
+                         if sm.get('n_unformed') else f"{sm['total_units']}口")
+                c2.metric("推奨点数 / 口数", f"{sm['n_points']}点 / {split}")
+                c3.metric("実効EV合計", f"{sm['tev']:+,.0f} rrc")
+                c4.metric("いずれか的中", f"{sm['hit']*100:.0f}%", f"全外し {sm['miss']*100:.0f}%")
+                st.caption(f"プロファイル: 資金 {sm['bankroll']:,} / {sm['kelly_pct']}%ケリー / "
+                           f"1レース上限 {sm['risk_pct']:.0f}%(={sm['risk_units']}口) / "
+                           f"エッジ下限 {sm['edge_pct']:.0f}% / 払戻プール {sm['pool']:,} rrc")
+                if sm.get('n_unformed'):
+                    st.warning(f"未成立スリーブ {sm['n_unformed']}口を含みます（各1口・全プール総取り狙い）。"
+                               "高EVですが高分散で、当たりは稀。モデルの的中率が正しい前提です"
+                               "（成績レポートで低確率帯の校正を確認してから）。")
 
-        # 単勝（参考）
-        with st.expander("🥇 単勝 勝率：モデル vs 市場（参考・3連単EVには未使用）"):
-            sw = result["single_win"]
-            if result.get("has_market"):
+                rows = result["alloc_rows"]
+                if any(r["mark"] == "✅" for r in rows):
+                    df = pd.DataFrame([{
+                        "": r["mark"], "状態": r.get("flag", "成"), "買い目": _dcombo(r["combo"], dmap),
+                        "的中率": f"{r['model_p']*100:.2f}%",
+                        "表示od": (f"{r['disp_od']:.1f}" if r["disp_od"] else "—"),
+                        "理論EV": (f"{r['theo_ev']:+,.0f}" if r["theo_ev"] is not None else "—"),
+                        "口数": (f"{r['k']}口" if r["k"] else ""),
+                        "実効od": (f"{r['eff_od']:.1f}" if r["eff_od"] else ""),
+                        "実効EV": (f"{r['eff_ev']:+,.0f}" if r["eff_ev"] is not None else ""),
+                    } for r in rows])
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                    st.caption("✅=購入推奨（状態 成=成立 / 未=未成立スリーブ） / "
+                               "△=+理論EVだが安定ルールで見送り")
+                    if result.get("bare_used"):
+                        st.caption("※ 一部は素名フォールバックで照合（同名別個体を合算）。")
+                    if result.get("unmatched_names"):
+                        st.warning("画面に無い馬: " + ", ".join(result["unmatched_names"]))
+
+                    # 購入リスト（コピー用）
+                    with st.expander("📋 購入リスト（コピー用・1行1口）"):
+                        st.code("\n".join(result["purchase_lines"]) or "(なし)", language=None)
+                else:
+                    st.info(f"見送り: エッジ {sm['edge_pct']:.0f}% 以上の成立買い目がありません"
+                            "（安定運用では無理に張りません）。")
+
+            # 損益分岐（CSV未指定時）
+            elif result.get("breakeven_rows"):
+                st.subheader("🎯 損益分岐オッズ表（CSV未指定）")
+                st.caption("実オッズ > 必要オッズ なら +EV。")
+                st.dataframe(pd.DataFrame([{
+                    "買い目": _dcombo(r["combo"], dmap), "モデル的中率": f"{r['model_p']*100:.2f}%",
+                    "必要オッズ": f"{r['need_od']:.1f}倍"} for r in result["breakeven_rows"]],
+                    ), use_container_width=True, hide_index=True)
+
+            # 的中確率ランキング
+            st.subheader("🏆 的中確率ランキング（1口購入時の実効オッズ付き）")
+            rk = result["ranking"]
+            if result["ranking_pool_known"]:
                 df = pd.DataFrame([{
-                    "馬": _dname(r["name"], dmap), "モデル": f"{r['model_p']*100:.1f}%",
-                    "市場": (f"{r['market_p']*100:.1f}%" if r["market_p"] is not None else "—"),
-                    "オッズ": (f"{r['odds']:.2f}" if r["odds"] else "—"),
-                    "スタミナ": ("⚠不足" if r.get("below_cutoff") else "OK"),
-                    "判定": r["tag"]} for r in sw])
+                    "#": r["rank"], "買い目": _dcombo(r["combo"], dmap),
+                    "的中率": f"{r['model_p']*100:.2f}%",
+                    "累積": f"{r['cum']*100:.1f}%", "状態": r["flag"],
+                    "1口実効od": f"{r['eff1_od']:.1f}倍",
+                    "1口EV": f"{r['ev1']:+,.0f}",
+                    "+EV": ("◎" if r["plus_ev"] else "")} for r in rk])
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                st.caption(f"上位{len(rk)}点でモデル確率の {result['ranking_cover']*100:.1f}% をカバー。"
+                           "状態 未=未成立（自分が唯一なら全プール総取り＝高倍率。安定版では非推奨）。")
             else:
                 df = pd.DataFrame([{
-                    "馬": _dname(r["name"], dmap), "モデル勝率": f"{r['model_p']*100:.1f}%",
-                    "スタミナ": ("⚠不足" if r.get("below_cutoff") else "OK"),
-                    "フェアod": (f"{1/r['model_p']:.1f}倍" if r['model_p'] > 0.001 else "—")}
-                    for r in sw])
-            st.dataframe(df, use_container_width=True, hide_index=True)
-            st.caption(f"モデルの◎: 【{_dname(result['model_pick'], dmap)}】"
-                       "／ スタミナ⚠不足=攻略本の必要最低スタミナ未満（スコア大幅減）")
+                    "#": r["rank"], "買い目": _dcombo(r["combo"], dmap),
+                    "的中率": f"{r['model_p']*100:.2f}%", "累積": f"{r['cum']*100:.1f}%",
+                    "状態": r["flag"]} for r in rk])
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                st.caption("プール未取得のため実効odは算出不可。")
+
+            # 単勝（参考）
+            with st.expander("🥇 単勝 勝率：モデル vs 市場（参考・3連単EVには未使用）"):
+                sw = result["single_win"]
+                if result.get("has_market"):
+                    df = pd.DataFrame([{
+                        "馬": _dname(r["name"], dmap), "モデル": f"{r['model_p']*100:.1f}%",
+                        "市場": (f"{r['market_p']*100:.1f}%" if r["market_p"] is not None else "—"),
+                        "オッズ": (f"{r['odds']:.2f}" if r["odds"] else "—"),
+                        "スタミナ": ("⚠不足" if r.get("below_cutoff") else "OK"),
+                        "判定": r["tag"]} for r in sw])
+                else:
+                    df = pd.DataFrame([{
+                        "馬": _dname(r["name"], dmap), "モデル勝率": f"{r['model_p']*100:.1f}%",
+                        "スタミナ": ("⚠不足" if r.get("below_cutoff") else "OK"),
+                        "フェアod": (f"{1/r['model_p']:.1f}倍" if r['model_p'] > 0.001 else "—")}
+                        for r in sw])
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                st.caption(f"モデルの◎: 【{_dname(result['model_pick'], dmap)}】"
+                           "／ スタミナ⚠不足=攻略本の必要最低スタミナ未満（スコア大幅減）")
 
 # ============================ ベットログ ============================
 st.divider()
