@@ -27,7 +27,7 @@ RANK_MAP = {'🥇': 1, '🥈': 2, '🥉': 3}
 DUP_MARK = '\u2009#'                     # 同名馬の内部マーカー（薄スペース+#）
 
 STAKE_UNIT        = 10000    # 1口 = 10,000 rrc（ゲーム仕様で固定）
-MAX_UNITS         = 20       # 1組あたり上限口数
+MAX_UNITS         = 10       # 1組あたり上限口数（ゲーム仕様）
 MAX_TOTAL_UNITS   = 20       # 1レース合計口数の上限（ゲーム仕様）
 N_SIM             = 200000   # モンテカルロ試行数
 SIM_SEED          = 42       # 再現性のための固定シード
@@ -101,17 +101,33 @@ def _owner(s):
     return s.strip().rstrip('\r') if s else 'unknown'
 
 
+# 英語パッシブコード → 日本語ラベル（API/旧ブックマークレットが生コードを返しても拾えるように）
+PASSIVE_CODE_ALIAS = {
+    'speed_star': 'スピードスター', 'speed_l': 'スピード大アップ', 'speed_s': 'スピード小アップ',
+    'power_l': 'パワー大アップ', 'power_s': 'パワー小アップ', 'stamina_l': 'スタミナ大アップ',
+    'stamina_s': 'スタミナ小アップ', 'muscle_head': '脳筋', 'long_special': '長距離得意',
+    'middle_special': '中距離得意', 'mile_special': 'マイル得意', 'short_special': '短距離得意',
+    'turf_specialist': '芝得意', 'dirt_specialist': 'ダート得意', 'jack_of_all': '器用貧乏',
+    'my_pace': 'マイペース', 'steady_runner': 'マイペース', 'gambler': '勝負師',
+    'same_kind_boost': '同族嫌悪', 'none': 'なし',
+}
+
+
 def normalize_passive(s):
     """パッシブ名を絵文字非依存のキーに正規化する。
     bot とブックマークレットで先頭の絵文字が違っても（例 '🏃\u200d♂️ 中距離得意' と
     '🐎 中距離得意'）、日本語テキスト部分（'中距離得意'）で一致させる。
-    英語コード（'middle_special' 等）は日本語を持たないためそのまま残り、未学習として
-    警告される（＝ブックマークレット側でラベル変換が必要なサイン）。"""
+    英語コード（'steady_runner' 等）は PASSIVE_CODE_ALIAS で日本語ラベルに変換する。"""
     if s is None:
         return 'なし'
     s = str(s).strip()
     if s in ('', 'なし', 'None', 'nan'):
         return 'なし'
+    # 日本語を含まない＝英語コードの可能性 → エイリアスで変換
+    if not re.search(r'[\u3040-\u30ff\u4e00-\u9fff]', s):
+        code = re.sub(r'[^a-z_]', '', s.lower().replace(' ', '_'))
+        if code in PASSIVE_CODE_ALIAS:
+            return PASSIVE_CODE_ALIAS[code]
     m = re.search(r'[\u3040-\u30ff\u4e00-\u9fff]', s)   # 最初の仮名/漢字の位置
     return s[m.start():].strip() if m else s
 
