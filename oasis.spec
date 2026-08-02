@@ -30,6 +30,7 @@ datas += [("oasis_app.py", "."), ("oasis_core.py", ".")]
 
 # --- 不足しがちな隠しimport ---
 hiddenimports += [
+    "sklearn.linear_model", "sklearn.linear_model._ridge",
     "sklearn.ensemble", "sklearn.tree", "sklearn.tree._utils",
     "sklearn.utils._typedefs", "sklearn.utils._heap",
     "sklearn.neighbors._partition_nodes",

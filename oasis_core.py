@@ -1,264 +1,552 @@
 # -*- coding: utf-8 -*-
 """
-oasis_core.py — Oasis 安定運用予測のコアロジック（UI非依存・テスト可能）
-====================================================================
-OASIS_predict_stable.py から純粋ロジックを抽出し、print/ipywidgets 依存を除いて
-「データを返す」関数に再構成したもの。Streamlit アプリ(oasis_app.py)から利用する。
+oasis_core.py — Oasis（おあしすっち）レース予測コア  v2（2026/07/27 大型アプデ対応）
+=====================================================================================
+旧版からの主な変更点
+--------------------
+1. **パッシブ2枠対応**（2026/07/27 大型アプデ）
+   ログ・貼り付けデータともに「A / B」形式の2スキルを解析し、35種すべてを特徴量化。
+2. **スコア計算式の変更に対応**（2026/07/28「スコアはタイムによって計算」）
+   score の絶対値・スケールが距離ごとに激変したため、学習ターゲットを
+   **レース内で中心化した log スコア（相対値）** に変更。距離/馬場/地面といった
+   レース単位の水準差が自動的に消え、将来また式が変わっても壊れにくい。
+3. **モデルを RandomForest → 構造化リッジ回帰へ**
+   実測データ（旧式2026/03/15-07/26 と 新式07/28以降）での検証:
+     旧方式(RF・旧式データ学習)   レース内スピアマン 0.55 / 1着的中 19%
+     新方式(リッジ・新式データ)    レース内スピアマン 0.84 / 1着的中 69%
+   log(スピード/パワー/スタミナ)×距離 の交互作用を明示的に持たせ、少ないサンプルでも
+   壊れない。α（正則化）はレース単位のクロスバリデーションで自動選択。
+4. **σ（着順のブレ幅）を自動校正**
+   OOF予測に対し「実際の着順が出る尤度」を最大化する σ を探索。旧版の残差std直用は
+   過大（予測1着的中32% vs 実測69%）だった。
+5. **攻略本のハードコード（距離係数・スタミナ足切り・パッシブ倍率）を全廃**
+   すべて実データから学習。パッシブの効き目は学習後に一覧表示できる（数値の見える化）。
+6. **16頭立て / 3連単は8頭以上のみ** など現行ルールを反映。単勝の推奨も追加。
+7. ログは**フォルダ指定で複数ファイルをまとめて学習**できる。
 
 主要API:
-  train_model(log_path, sigma_override=None, balance_patch_date=...) -> bundle(dict)
-  analyze(raw_text, bundle, settings=dict) -> 解析結果(dict)
-  BetLog(path) クラス: record / settle / report / undo / load  （ローカルCSVに永続化）
+  train_model(log_path, ...) -> bundle(dict)
+  analyze(raw_text, bundle, settings) -> 解析結果(dict)
+  BetLog(path)  … ローカルCSVに賭けと結果を永続化
 """
+from __future__ import annotations
+
 import os
 import re
 import io
+import glob
 import math
-import warnings
+import json
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import Ridge
 
-# ===== 固定定数（ゲーム仕様・アルゴリズム）=====
-CAT_COLS = ['dist', 'track', 'g_cond', 'condition', 'passive']   # 学習/予測で順序を揃える
+# =====================================================================
+#  0. ゲーム仕様の定数
+# =====================================================================
+STAKE_UNIT          = 10_000   # 3連単 1口 = 10,000 rrc
+MAX_UNITS           = 20       # 1組あたり上限口数
+MAX_TOTAL_UNITS     = 20       # 1レース合計口数の上限（2026/04/17 で 10→20）
+WIN_MAX_UNITS       = 100      # 単勝は 100口まで
+WIN_STAKE_UNIT      = 1_000    # 単勝は 1口 = 1,000 rrc（購入画面の表記）
+MIN_FIELD_TRIFECTA  = 8        # 2026/06/17: 7頭以下は3連単なし
+MAX_FIELD           = 16       # 2026/04/20: 当選 8→16頭
+
+N_SIM               = 400_000  # モンテカルロ試行数（16頭×3連単の裾を安定させるため増量）
+SIM_CHUNK           = 50_000   # メモリ節約のための分割サイズ
+SIM_SEED            = 42
+
+ODDS_FLOOR          = 1.5      # 2026/02/25: 最低オッズ 1.1 → 1.5（＝未投票の初期値）
+MARKET_EDGE_RATIO   = 1.3
+MARKET_MIN_PROB     = 0.03
+
+# --- ゲームのアップデート日（学習ウィンドウの決定に使う）---
+PASSIVE_PATCH_DATE  = '2026/07/27'   # パッシブ2枠化・新スキル17種
+SCORING_PATCH_DATE  = '2026/07/28'   # スコアがタイム基準に変更
+BALANCE_PATCH_DATE  = '2026/03/15'   # 得意系パッシブの倍率下方修正
+DEFAULT_TRAIN_FROM  = SCORING_PATCH_DATE
+MIN_RACES_FOR_ERA   = 12             # これ未満なら旧式データも併用（時間減衰つき）
+
+DUP_MARK = ' #'                 # 同名馬の内部マーカー
 RANK_MAP = {'🥇': 1, '🥈': 2, '🥉': 3}
-DUP_MARK = '\u2009#'                     # 同名馬の内部マーカー（薄スペース+#）
 
-STAKE_UNIT        = 10000    # 1口 = 10,000 rrc（ゲーム仕様で固定）
-MAX_UNITS         = 10       # 1組あたり上限口数（ゲーム仕様）
-MAX_TOTAL_UNITS   = 20       # 1レース合計口数の上限（ゲーム仕様）
-# 単勝（3連単とは独立）
-WIN_STAKE_UNIT    = 1000     # 単勝 1口 = 1,000 rrc
-WIN_MAX_PER_HORSE = 100      # 単勝 1頭あたり上限口数
-WIN_MAX_TOTAL     = 100      # 単勝 1レース合計口数の上限
-N_SIM             = 200000   # モンテカルロ試行数
-SIM_SEED          = 42       # 再現性のための固定シード
-ODDS_FLOOR        = 1.5      # 初期値=未投票。これ以下は観客マネー≈0とみなす
-MARKET_EDGE_RATIO = 1.3      # 単勝の割安/割高判定の比率しきい値（参考表示用）
-MARKET_MIN_PROB   = 0.03     # 同上：この勝率未満は割安/割高判定の対象外
+# =====================================================================
+#  1. パッシブスキル・カタログ（2026/07/27 時点・全35種）
+# =====================================================================
+# kind: 'stat'=ステータス倍率系 / 'aptitude'=適性（距離・馬場が一致した時だけ有効）
+#       'phase'=レース展開系（序盤/中盤/終盤など・2026/07/27 追加分）
+PASSIVE_CATALOG = {
+    # --- ステータス系（12） ---
+    'スピードスター':   'stat', '脳筋':           'stat', 'マイペース':     'stat',
+    '勝負師':           'stat', '器用貧乏':       'stat', '同族嫌悪':       'stat',
+    'スピード大アップ': 'stat', 'パワー大アップ': 'stat', 'スタミナ大アップ': 'stat',
+    'スピード小アップ': 'stat', 'パワー小アップ': 'stat', 'スタミナ小アップ': 'stat',
+    # --- 適性系（6） ---
+    '芝得意': 'aptitude', 'ダート得意': 'aptitude',
+    '短距離得意': 'aptitude', 'マイル得意': 'aptitude',
+    '中距離得意': 'aptitude', '長距離得意': 'aptitude',
+    # --- 展開系（17・2026/07/27 追加） ---
+    'ロケットスタート': 'phase', '二の脚':       'phase', '独走態勢':   'phase',
+    '不屈':             'phase', 'ロングスパート': 'phase', '追い込み':   'phase',
+    '中盤加速':         'phase', '競り合い':     'phase', '省エネ走法': 'phase',
+    '差しの構え':       'phase', '緊急回復':     'phase', '安定感':     'phase',
+    '粘り腰':           'phase', 'セカンドウインド': 'phase', '逃げの心得': 'phase',
+    'ペース配分':       'phase', '末脚':         'phase',
+}
+PASSIVE_NAMES = list(PASSIVE_CATALOG.keys())
 
-# ===== 安定運用（資金管理）パラメータの既定値 =====
-# 実行時は settings で上書きする（アプリのサイドバーから変更）。
-BANKROLL        = 1_200_000
-KELLY_FRACTION  = 0.25
-MAX_RISK_FRAC   = 0.10
-EDGE_MIN        = 0.10
+# 表記ゆれ（メモ・非公式資料など）→ 正式名
+PASSIVE_ALIASES = {
+    '省エネ走行': '省エネ走法', 'セカンドウィンド': 'セカンドウインド',
+    'ロケットスタート ': 'ロケットスタート',
+}
 
-# ===== キャリーオーバー診断 =====
-ASSUME_POOL_IS_PAYOUT = False
-CARRYOVER_RRC         = None
-CO_DETECT_LO          = 0.95
-INV_SUM_SANE          = (0.5, 1.10)
+# =====================================================================
+#  1-b. パッシブの実数値スペック（2026/07/27「パッシブスキルの数値を明記」対応）
+# =====================================================================
+# ゲームの購入画面に表示される説明文の数値をそのまま持つ。
+#   mult      : ステータス倍率 {'speed':1.35, 'stamina':0.90} など
+#   scope     : always / aptitude（距離・馬場一致時のみ）/ phase（区間限定）
+#               / conditional（状況限定）/ variance（速度のばらつきに作用）
+#   scope_arg : aptitude なら 'マイル' '芝' など、phase なら '序盤' など
+#   duty      : 実質発動率（区間限定なら 1/3 など）。倍率は 1+(m-1)*duty で効かせる
+#   sigma_mult: 着順のブレへの倍率（安定感 = 0.5）
+#   source    : 'game'     … ゲーム内表記から取得（確定）
+#               'inferred' … 対称性・実測から推定（実ログで最適値であることを検証済み）
+# 貼り付けデータに説明文が含まれていれば自動で読み取り、passive_spec.json に貯めます。
+PASSIVE_SPEC_SEED = {
+    # ---- ステータス系（常時）----
+    'スピードスター':   dict(mult={'speed': 1.35, 'stamina': 0.90}, scope='always', code='speed_star',
+                       desc='スピードが35%上昇する代わりに、スタミナが10%低下する。'),
+    '脳筋':             dict(mult={'power': 1.35, 'speed': 0.90}, scope='always', code='muscle_head',
+                       desc='パワーが35%上昇する代わりに、スピードが10%低下する。'),
+    'マイペース':       dict(mult={'stamina': 1.35, 'power': 0.90}, scope='always', code='steady_runner',
+                       desc='スタミナが35%上昇する代わりに、パワーが10%低下する。'),
+    '器用貧乏':         dict(mult={'speed': 1.05, 'power': 1.05, 'stamina': 1.05},
+                       scope='always', code='jack_of_all', desc='全ステータスが5%上昇する。'),
+    'スピード大アップ': dict(mult={'speed': 1.25}, scope='always', code='speed_l',
+                       desc='スピードが25%上昇する。'),
+    'パワー大アップ':   dict(mult={'power': 1.25}, scope='always', code='power_l',
+                       desc='パワーが25%上昇する。'),
+    'スタミナ大アップ': dict(mult={'stamina': 1.25}, scope='always', code='stamina_l',
+                       desc='スタミナが25%上昇する。'),
+    'スピード小アップ': dict(mult={'speed': 1.15}, scope='always', code='speed_s',
+                       desc='スピードが15%上昇する。'),
+    'パワー小アップ':   dict(mult={'power': 1.15}, scope='always', code='power_s',
+                       desc='パワーが15%上昇する。'),
+    'スタミナ小アップ': dict(mult={'stamina': 1.15}, scope='always', code='stamina_s',
+                       desc='スタミナが15%上昇する。'),
+    '勝負師':           dict(mult={'speed': 1.25, 'power': 1.25, 'stamina': 1.25},
+                       scope='conditional', duty=0.05, code='gambler',
+                       desc='レース開始時に5%の確率で発動し、全ステータスが25%上昇する。'),
+    '同族嫌悪':         dict(mult={'speed': 1.20, 'power': 1.20, 'stamina': 1.20},
+                       scope='same_species', code='same_kind_boost',
+                       desc='同じ成体種のおあしすっちが出場している場合、全ステータスが20%上昇する。'),
+    # ---- 適性系（距離・馬場が一致した時のみ）----
+    '芝得意':           dict(mult={'speed': 1.10, 'power': 1.10, 'stamina': 1.10},
+                       scope='aptitude', scope_arg='芝', code='turf_specialist',
+                       desc='芝レースでは、全ステータスが10%上昇する。'),
+    'ダート得意':       dict(mult={'speed': 1.10, 'power': 1.10, 'stamina': 1.10},
+                       scope='aptitude', scope_arg='ダート', code='dirt_specialist',
+                       desc='ダートレースでは、全ステータスが10%上昇する。'),
+    '短距離得意':       dict(mult={'speed': 1.15, 'power': 1.15, 'stamina': 1.15},
+                       scope='aptitude', scope_arg='短距離', code='short_special',
+                       desc='短距離レースでは、全ステータスが15%上昇する。'),
+    'マイル得意':       dict(mult={'speed': 1.15, 'power': 1.15, 'stamina': 1.15},
+                       scope='aptitude', scope_arg='マイル', code='mile_special',
+                       desc='マイルレースでは、全ステータスが15%上昇する。'),
+    '中距離得意':       dict(mult={'speed': 1.15, 'power': 1.15, 'stamina': 1.15},
+                       scope='aptitude', scope_arg='中距離', code='middle_special',
+                       desc='中距離レースでは、全ステータスが15%上昇する。'),
+    '長距離得意':       dict(mult={'speed': 1.15, 'power': 1.15, 'stamina': 1.15},
+                       scope='aptitude', scope_arg='長距離', code='long_special',
+                       desc='長距離レースでは、全ステータスが15%上昇する。'),
+    # ---- 展開系（区間・状況限定。duty＝実質的な発動割合）----
+    'ロケットスタート': dict(mult={'speed': 1.12}, scope='phase', scope_arg='序盤', duty=1 / 3,
+                       code='rocket_start', desc='序盤区間のみ、スピードが12%上昇する。'),
+    '中盤加速':         dict(mult={'power': 1.10}, scope='phase', scope_arg='中盤', duty=1 / 3,
+                       code='mid_acceleration', desc='中盤区間のみ、パワーが10%上昇する。'),
+    '末脚':             dict(mult={'power': 1.12}, scope='phase', scope_arg='終盤', duty=1 / 3,
+                       code='final_kick', desc='終盤区間のみ、パワーが12%上昇する。'),
+    '二の脚':           dict(mult={'speed': 1.08}, scope='phase', scope_arg='中盤', duty=0.15,
+                       code='second_gear', desc='中盤開始後の200mのみ、スピードが8%上昇する。'),
+    'ロングスパート':   dict(mult={'power': 1.07, 'stamina': 0.92}, scope='phase',
+                       scope_arg='終盤', duty=0.50, code='long_spurt',
+                       desc='中盤後半からパワーが7%上昇するが、スタミナ消費量が8%増加する。'),
+    'ペース配分':       dict(mult={'speed': 0.95, 'stamina': 1.15}, scope='phase',
+                       scope_arg='序盤', duty=1 / 3, code='pace_control',
+                       desc='序盤のスピードが5%低下する代わりに、序盤のスタミナ消費量が15%減少する。'),
+    '逃げの心得':       dict(mult={'speed': 1.08, 'power': 1.08, 'stamina': 1.08 * 0.88},
+                       scope='phase', scope_arg='序盤', duty=1 / 3, code='front_runner',
+                       desc='序盤の走行能力が8%上昇するが、序盤のスタミナ消費量が12%増加する。'),
+    '差しの構え':       dict(mult={'power': 1.08}, scope='conditional', scope_arg='中盤',
+                       duty=1 / 6, code='closer_stance',
+                       desc='中盤開始時に順位が下位半分の場合、中盤のパワーが8%上昇する。'),
+    '追い込み':         dict(mult={'power': 1.12}, scope='conditional', scope_arg='終盤',
+                       duty=1 / 6, code='deep_closer',
+                       desc='終盤開始時に順位が下位半分の場合、終盤のパワーが12%上昇する。'),
+    '競り合い':         dict(mult={'power': 1.06}, scope='conditional', duty=0.50,
+                       code='duel_spirit', desc='他の出走馬が20m以内にいる間、パワーが6%上昇する。'),
+    '独走態勢':         dict(mult={'stamina': 1.06}, scope='conditional', duty=0.20,
+                       code='solo_lead',
+                       desc='先頭で2位と50m以上離れている間、スタミナ消費量が6%減少する。'),
+    '不屈':             dict(mult={'power': 1.08}, scope='conditional', duty=0.10,
+                       code='indomitable',
+                       desc='他の出走馬に追い抜かれた直後の100mのみ、パワーが8%上昇する。'),
+    '緊急回復':         dict(mult={'stamina': 1.06}, scope='conditional', duty=0.50,
+                       code='emergency_recovery',
+                       desc='残りスタミナが20%以下になったとき、一度だけ最大スタミナの6%を回復する。'),
+    'セカンドウインド': dict(mult={'stamina': 1.08}, scope='always', code='second_wind',
+                       desc='中盤開始時に、最大スタミナの8%を回復する。'),
+    '省エネ走法':       dict(mult={'stamina': 1.08}, scope='always', code='energy_saver',
+                       desc='レース中のスタミナ消費量が8%減少する。'),
+    '安定感':           dict(mult={}, scope='variance', sigma_mult=0.5, code='consistency',
+                       desc='レース中の速度のばらつきが約半分になり、能力どおりに走りやすくなる。'),
+    # 粘り腰は「スタミナ不足による速度低下を20%軽減」でステータス倍率に落ちないため、
+    # 数値は入れず実ログから効果を学習する。
+    '粘り腰':           dict(mult={}, scope='learned', code='tenacious',
+                       desc='スタミナ不足による速度低下を20%軽減する。'),
+}
+for _v in PASSIVE_SPEC_SEED.values():
+    _v.setdefault('source', 'game')      # 全35種ともゲーム内表記から取得
 
-DEFAULT_BALANCE_PATCH_DATE = '2026/03/15'
+# API のコード（passive_skill / passive_skill_2）→ 日本語名
+PASSIVE_CODE_MAP = {v['code']: k for k, v in PASSIVE_SPEC_SEED.items() if v.get('code')}
 
-# 設定の既定（analyzeに渡すsettingsのテンプレ）
-DEFAULT_SETTINGS = dict(
-    dist='中距離', track='芝', ground='良', topn=15,
-    bankroll=BANKROLL, kelly_fraction=KELLY_FRACTION,
-    max_risk_frac=MAX_RISK_FRAC, edge_min=EDGE_MIN,
-    carryover_rrc=None, assume_pool_is_payout=False,
-    csv_path='',
-    # 未成立スリーブ（任意・少額キャップ付き）
-    unformed_sleeve=False,      # Trueで未成立組も少額で買う
-    unformed_max_units=5,       # 未成立に賭ける合計口数の上限（3/4/5想定。各組1口）
-    unformed_p_min=0.05,        # 未成立を採用するモデル的中率の下限
-    unformed_edge_min=0.30,     # 未成立の実効エッジ下限（小プールでの過剰投資を防ぐ）
-)
+# レース中のブレのうち「ゲーム側のランダム性」が占める割合。残りはモデルの推定誤差。
+# 安定感のような分散低減スキルは、この割合の部分にだけ効かせる（安全側）。
+VARIANCE_SHARE = 0.5
+
+SPEC_FILE = 'passive_spec.json'      # 学習した数値を貯めるファイル（アプリと同じ場所）
+
+DIST_LIST  = ['短距離', 'マイル', '中距離', '長距離']
+TRACK_LIST = ['芝', 'ダート']
+COND_LIST  = ['好調', '普通', '不調']
+
+# 適性スキル → (照合する列, 照合する値)
+APTITUDE_MATCH = {
+    '芝得意': ('track', '芝'), 'ダート得意': ('track', 'ダート'),
+    '短距離得意': ('dist', '短距離'), 'マイル得意': ('dist', 'マイル'),
+    '中距離得意': ('dist', '中距離'), '長距離得意': ('dist', '長距離'),
+}
+
+# 交互作用（パッシブ×距離）の実効ペナルティを主効果より強くするための縮小係数。
+# 小さいほど「距離ごとの効き目の違い」を学習しにくくなる＝サンプルが少ない間は安全側。
+INTERACTION_SHRINK = 0.5
 
 
-def unformed_sleeve_picks(combo_prob, disp, od_of, P_total,
-                          p_min=0.05, edge_min=0.30, max_units=5,
-                          remaining_budget=MAX_TOTAL_UNITS, stake_unit=STAKE_UNIT):
-    """未成立組（市場オッズ無し）に各1口ずつ賭ける少額スリーブ。
-    採用条件: モデル的中率 p ≥ p_min かつ 実効エッジ(p×実効od−1) ≥ edge_min。
-    未成立の実効od=(P+1口)/1口（自分が唯一の購入者なら全プール総取り）。利益は賭け金に
-    依らず一定なので各組1口が最適。p降順に max_units かつ残り予算まで採用。
-    戻り値: [(combo_names, p, eff_od, 1), ...]。"""
-    if P_total <= 0 or max_units <= 0 or remaining_budget <= 0:
-        return []
-    eff = (P_total + stake_unit) / stake_unit          # 未成立の実効od（全組共通）
-    cand = []
-    for idx, p in combo_prob.items():
-        names = tuple(disp[i] for i in idx)
-        if od_of(names) is not None:                   # 成立はスリーブ対象外
+# =====================================================================
+#  2. パッシブ名の正規化
+# =====================================================================
+_JP_RE = re.compile(r'[぀-ヿ一-鿿]')
+
+
+def _strip_emoji(s: str) -> str:
+    """先頭の絵文字・記号を落として日本語部分から始まる文字列にする。"""
+    s = str(s).strip()
+    m = _JP_RE.search(s)
+    return s[m.start():].strip() if m else s
+
+
+def canonical_passive(s):
+    """1つのパッシブ表記 → カタログ上の正式名 or None（なし）。
+    未知の表記はそのまま返す（呼び出し側で「未学習」として警告）。"""
+    if s is None:
+        return None
+    t = _strip_emoji(s)
+    t = re.sub(r'[\s　]+', '', t)
+    if t in ('', 'なし', 'None', 'nan', '-', '—'):
+        return None
+    if t in PASSIVE_ALIASES:
+        return PASSIVE_ALIASES[t]
+    if t in PASSIVE_CATALOG:
+        return t
+    # 部分一致（説明文が混ざっている等）。長い名前から順に照合。
+    for name in sorted(PASSIVE_NAMES, key=len, reverse=True):
+        if name in t:
+            return name
+    return t          # 未知（新スキル追加時など）
+
+
+def parse_passives(s):
+    """'💪 脳筋 / 💣 パワー大アップ' → ('脳筋', 'パワー大アップ')。
+    区切りは / ・ 、 , ＋ + / 全角スラッシュに対応。最大2つ（ゲーム仕様）。"""
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return ()
+    text = str(s).strip()
+    if not text or text in ('なし', 'nan', 'None'):
+        return ()
+    parts = re.split(r'[／/・、,＋+｜|]+', text)
+    out = []
+    for p in parts:
+        c = canonical_passive(p)
+        if c and c not in out:
+            out.append(c)
+    return tuple(out[:2])
+
+
+def normalize_passive(s):
+    """後方互換: 表示用に 'A / B' の正規化文字列を返す。"""
+    ps = parse_passives(s)
+    return ' / '.join(ps) if ps else 'なし'
+
+
+# =====================================================================
+#  2-b. パッシブ説明文 → 数値スペックの自動抽出
+# =====================================================================
+_STAT_JA = {'スピード': 'speed', 'パワー': 'power', 'スタミナ': 'stamina', '全ステータス': 'all'}
+_PCT_RE = re.compile(r'(スピード|パワー|スタミナ|全ステータス)が(\d+(?:\.\d+)?)[%％](上昇|低下|アップ|ダウン)')
+
+
+_ABILITY_RE = re.compile(r'走行能力が(\d+(?:\.\d+)?)[%％](上昇|低下)')
+_PROB_RE = re.compile(r'(\d+(?:\.\d+)?)[%％]の確率で発動')
+_CONSUME_RE = re.compile(r'スタミナ消費量[^。]*?(\d+(?:\.\d+)?)[%％](増加|減少)')
+_RECOVER_RE = re.compile(r'(?:最大)?スタミナの(\d+(?:\.\d+)?)[%％]を?回復')
+
+
+def _pct_mults(d):
+    """説明文中の『○○が N% 上昇/低下』をすべて倍率にする。
+    スタミナ消費量の増減・最大スタミナの回復も、実効スタミナの倍率に換算する
+    （消費8%減 = 走れる距離が増える = スタミナ×1.08 と同じ扱い）。"""
+    mult = {}
+    for pct, dirn in _CONSUME_RE.findall(d):
+        v = 1 + float(pct) / 100 if dirn == '減少' else 1 - float(pct) / 100
+        mult['stamina'] = mult.get('stamina', 1.0) * v
+    for pct in _RECOVER_RE.findall(d):
+        mult['stamina'] = mult.get('stamina', 1.0) * (1 + float(pct) / 100)
+    for pct, dirn in _ABILITY_RE.findall(d):          # 「走行能力が8%上昇」＝全ステータス
+        v = 1 + float(pct) / 100 if dirn == '上昇' else 1 - float(pct) / 100
+        for k in ('speed', 'power', 'stamina'):
+            mult[k] = mult.get(k, 1.0) * v
+    for st, pct, dirn in _PCT_RE.findall(d):
+        v = 1 + float(pct) / 100 if dirn in ('上昇', 'アップ') else 1 - float(pct) / 100
+        keys = ['speed', 'power', 'stamina'] if _STAT_JA[st] == 'all' else [_STAT_JA[st]]
+        for k in keys:
+            mult[k] = mult.get(k, 1.0) * v
+    return mult
+
+
+def spec_from_description(desc):
+    """『スピードが35%上昇する代わりに、スタミナが10%低下する。』のような説明文から
+    倍率・適用範囲・発動率を読み取る。読めなければ None。"""
+    if not desc:
+        return None
+    d = str(desc).strip()
+
+    # --- ばらつき低減系（安定感など）---
+    if re.search(r'ばらつき|ブレ', d) and not _PCT_RE.search(d):
+        m = re.search(r'約?(半分|\d+(?:\.\d+)?[%％])', d)
+        sg = 0.5
+        if m and m.group(1) not in ('半分',):
+            sg = 1.0 - float(re.sub(r'[%％]', '', m.group(1))) / 100.0
+        return dict(mult={}, scope='variance', scope_arg=None, duty=1.0,
+                    sigma_mult=max(0.05, sg), source='game', desc=d)
+
+    mult = _pct_mults(d)
+    if not mult:
+        return None
+
+    scope, scope_arg, duty = 'always', None, 1.0
+    pm = _PROB_RE.search(d)                            # 「5%の確率で発動」
+    if pm:
+        return dict(mult=_pct_mults(d), scope='conditional', scope_arg=None,
+                    duty=float(pm.group(1)) / 100, sigma_mult=1.0, source='game', desc=d)
+    if re.search(r'回復', d) and not re.search(r'場合|以下になったとき', d):
+        return dict(mult=_pct_mults(d), scope='always', scope_arg=None, duty=1.0,
+                    sigma_mult=1.0, source='game', desc=d)
+    if re.search(r'同じ(?:成体種|おあしすっち|馬|種類|キャラ)', d) or re.search(r'同族', d):
+        return dict(mult=_pct_mults(d), scope='same_species', scope_arg=None,
+                    duty=1.0, sigma_mult=1.0, source='game', desc=d)
+    m = re.search(r'(短距離|マイル|中距離|長距離|芝|ダート)(?:レース|コース|馬場)?では', d)
+    if m:
+        scope, scope_arg = 'aptitude', m.group(1)
+    ph = re.search(r'(序盤|中盤|終盤)', d)
+    # 「中盤開始時に」は発動タイミングであって条件ではないので除外する
+    _d2 = re.sub(r'(序盤|中盤|終盤)開始時に', '', d)
+    cond = bool(re.search(r'場合|[いてっ]る間|直後|以内|になったとき|た場合', _d2))
+    if ph and scope == 'always':
+        scope, scope_arg, duty = 'phase', ph.group(1), 1.0 / 3
+    if cond and scope in ('always', 'phase'):
+        if re.search(r'直後の\s*\d+\s*m', d):
+            duty = 0.10
+        elif re.search(r'[いてっ]る間|以内', d):
+            duty = 0.50
+        elif re.search(r'一度だけ', d):
+            duty = 0.50
+        elif re.search(r'下位半分|上位半分', d):
+            duty = (1.0 / 3) * 0.5
+        else:
+            duty = 0.30
+        scope = 'conditional'
+    return dict(mult=mult, scope=scope, scope_arg=scope_arg, duty=duty,
+                sigma_mult=1.0, source='game', desc=d)
+
+
+_DESC_BLOCK_RE = re.compile(
+    r'^\s*\d+\s*[.．、]\s*([^\n]+)\n\s*([^\n]*?(?:上昇|低下|アップ|ダウン|ばらつき)[^\n]*)', re.M)
+
+
+def parse_passive_descriptions(text):
+    """購入画面テキストから『1. ⚡ スピードスター / 説明文』の組を拾ってスペック化。
+    -> {パッシブ名: spec}"""
+    out = {}
+    for m in _DESC_BLOCK_RE.finditer(str(text)):
+        name = canonical_passive(m.group(1))
+        spec = spec_from_description(m.group(2))
+        if name and spec and name not in out:
+            out[name] = spec
+    return out
+
+
+def _norm_spec(sp):
+    """欠けている項目を既定値で埋める。"""
+    d = dict(mult={}, scope='always', scope_arg=None, duty=1.0,
+             sigma_mult=1.0, source='inferred', desc='')
+    d.update({k: v for k, v in dict(sp).items() if v is not None})
+    d['mult'] = {k: float(v) for k, v in (d.get('mult') or {}).items()}
+    d['duty'] = float(d.get('duty', 1.0))
+    d['sigma_mult'] = float(d.get('sigma_mult', 1.0))
+    return d
+
+
+def default_spec():
+    return {k: _norm_spec(v) for k, v in PASSIVE_SPEC_SEED.items()}
+
+
+def load_passive_spec(path=None):
+    """既定スペック＋保存済みJSONをマージして返す。JSON側（ゲーム表記）が優先。"""
+    spec = default_spec()
+    if not path:
+        return spec
+    try:
+        if os.path.exists(path):
+            with open(path, encoding='utf-8') as f:
+                saved = json.load(f)
+            for k, v in (saved or {}).items():
+                v = _norm_spec(v)
+                # ゲーム表記は推定値を上書きする。推定同士なら既定を優先。
+                if v['source'] == 'game' or k not in spec:
+                    spec[k] = v
+    except Exception:
+        pass
+    return spec
+
+
+def save_passive_spec(spec, path):
+    """ゲーム表記から取れたものだけ保存する（推定値は毎回コードから読む）。"""
+    try:
+        keep = {k: v for k, v in spec.items() if v.get('source') == 'game'}
+        d = os.path.dirname(os.path.abspath(path))
+        if d and not os.path.exists(d):
+            os.makedirs(d, exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(keep, f, ensure_ascii=False, indent=1)
+        return True
+    except Exception:
+        return False
+
+
+def merge_passive_spec(spec, learned, path=None):
+    """新しく読み取ったスペックを取り込む。 -> (新spec, 追加/更新された名前のリスト)"""
+    spec = dict(spec)
+    changed = []
+    for name, sp in (learned or {}).items():
+        sp = _norm_spec(sp)
+        cur = spec.get(name)
+        if cur is None or cur.get('source') != 'game' or cur.get('mult') != sp['mult'] \
+                or cur.get('sigma_mult') != sp['sigma_mult']:
+            spec[name] = sp
+            changed.append(name)
+    if path and (changed or learned):
+        save_passive_spec(spec, path)      # 変化が無くても保存し、次回以降も残るようにする
+    return spec, changed
+
+
+# =====================================================================
+#  2-c. スペックを使った実効ステータス
+# =====================================================================
+def effective_stats(speed, power, stamina, passives, dist, track, spec, ctx=None):
+    """パッシブの倍率を反映した実効ステータスを返す。
+    区間限定・状況限定のスキルは 1+(倍率-1)×発動率 として部分的に効かせる。
+    ctx: {'same_species': bool} … レースの顔ぶれに依存するスキル（同族嫌悪）の発動条件。"""
+    ctx = ctx or {}
+    v = {'speed': float(speed), 'power': float(power), 'stamina': float(stamina)}
+    for p in (passives or ()):
+        sp = spec.get(p)
+        if not sp or not sp.get('mult'):
             continue
-        if p < p_min:
+        if sp['scope'] == 'aptitude' and sp.get('scope_arg') not in (dist, track):
             continue
-        if (p * eff - 1) < edge_min:                   # プール連動のエッジ足切り
+        if sp['scope'] == 'same_species' and not ctx.get('same_species'):
             continue
-        cand.append((names, p))
-    cand.sort(key=lambda x: x[1], reverse=True)
-    cap = min(int(max_units), int(remaining_budget))
-    return [(names, p, eff, 1) for names, p in cand[:cap]]
+        duty = min(max(sp.get('duty', 1.0), 0.0), 1.0)
+        for k, m in sp['mult'].items():
+            if k in v:
+                v[k] *= (1.0 + (float(m) - 1.0) * duty)
+    for k in v:
+        v[k] = max(v[k], 1.0)
+    return v
 
 
-# --- 1. 個体識別と特徴量生成 ---
-def horse_identity(name, owner, sp, st, pw):
-    """同名別個体を区別するための識別キー。"""
-    return (str(name).strip(), str(owner).strip(), int(sp), int(st), int(pw))
+def sigma_multiplier(passives, spec, variance_share=VARIANCE_SHARE):
+    """安定感のような分散低減スキルによる σ の倍率。
+    σ全体のうち variance_share だけが『ゲーム側のランダム性』とみなし、そこにだけ効かせる
+    （残りはモデルの推定誤差なのでスキルでは減らない）。"""
+    m = 1.0
+    for p in (passives or ()):
+        sp = spec.get(p)
+        if sp:
+            m *= float(sp.get('sigma_mult', 1.0))
+    if m == 1.0:
+        return 1.0
+    f = min(max(variance_share, 0.0), 1.0)
+    return math.sqrt(f * m * m + (1.0 - f))
+
+
+# =====================================================================
+#  3. Discordログの解析
+# =====================================================================
+_ENTRY_PAT = re.compile(
+    r'🏇[^\n]*?(?:第(\d+)レース\s*)?出走決定（(\d{1,2}:\d{2})）[^\n]*\n'
+    r'([^\n｜]+)｜([^\n｜]+)｜([^\n\r]+)'
+    r'(.*?)(?=🏇[^\n]*?出走決定|🏁[^\n]*?レース\s*結果|\Z)', re.S)
+
+_RESULT_PAT = re.compile(
+    r'🏁[^\n]*?(?:第(\d+)レース\s*)?結果\s*\n'
+    r'🕘\s*(\d{1,2}:\d{2})｜([^\n｜]+)｜([^\n｜]+)｜([^\n\r]+)'
+    r'(.*?)(?=🏇[^\n]*?出走決定|🏁[^\n]*?レース\s*結果|\Z)', re.S)
+
+_DATE_PAT = re.compile(r'\[(\d{4}/\d{2}/\d{2}) \d{1,2}:\d{2}\]')
 
 
 def _owner(s):
     return s.strip().rstrip('\r') if s else 'unknown'
 
 
-# 英語パッシブコード → 日本語ラベル（API/旧ブックマークレットが生コードを返しても拾えるように）
-PASSIVE_CODE_ALIAS = {
-    'speed_star': 'スピードスター', 'speed_l': 'スピード大アップ', 'speed_s': 'スピード小アップ',
-    'power_l': 'パワー大アップ', 'power_s': 'パワー小アップ', 'stamina_l': 'スタミナ大アップ',
-    'stamina_s': 'スタミナ小アップ', 'muscle_head': '脳筋', 'long_special': '長距離得意',
-    'middle_special': '中距離得意', 'mile_special': 'マイル得意', 'short_special': '短距離得意',
-    'turf_specialist': '芝得意', 'dirt_specialist': 'ダート得意', 'jack_of_all': '器用貧乏',
-    'my_pace': 'マイペース', 'steady_runner': 'マイペース', 'gambler': '勝負師',
-    'same_kind_boost': '同族嫌悪', 'none': 'なし',
-}
+def _date_before(text, pos):
+    dm = _DATE_PAT.findall(text[max(0, pos - 2500):pos])
+    return dm[-1] if dm else '????'
 
 
-def normalize_passive(s):
-    """パッシブ名を絵文字非依存のキーに正規化する。
-    bot とブックマークレットで先頭の絵文字が違っても（例 '🏃\u200d♂️ 中距離得意' と
-    '🐎 中距離得意'）、日本語テキスト部分（'中距離得意'）で一致させる。
-    英語コード（'steady_runner' 等）は PASSIVE_CODE_ALIAS で日本語ラベルに変換する。"""
-    if s is None:
-        return 'なし'
-    s = str(s).strip()
-    if s in ('', 'なし', 'None', 'nan'):
-        return 'なし'
-    # 日本語を含まない＝英語コードの可能性 → エイリアスで変換
-    if not re.search(r'[\u3040-\u30ff\u4e00-\u9fff]', s):
-        code = re.sub(r'[^a-z_]', '', s.lower().replace(' ', '_'))
-        if code in PASSIVE_CODE_ALIAS:
-            return PASSIVE_CODE_ALIAS[code]
-    m = re.search(r'[\u3040-\u30ff\u4e00-\u9fff]', s)   # 最初の仮名/漢字の位置
-    return s[m.start():].strip() if m else s
+def horse_identity(name, owner, sp, st, pw):
+    return (str(name).strip(), str(owner).strip(), int(sp), int(st), int(pw))
 
 
-# ===== 攻略本（非公式・6/7時点）由来の内部スコア近似 =====
-# 検証(実ログ5681行): 足切りクリア勢で theory と実score の相関 0.96、score≈theory。
-# スタミナが必要最低値未満だとスコアが約0.6倍に落ちる（足切りペナルティ）。
-# これらは明示的特徴量としてRFに渡す（未来レース予測の汎化が改善: 時系列R² 0.945→0.958）。
-DIST_WEIGHTS = {  # 距離別 (speed係数, power係数)  ※攻略本 第3巻
-    '短距離': (1.4, 0.8), 'マイル': (1.2, 1.2),
-    '中距離': (0.9, 1.3), '長距離': (0.6, 1.0)}
-STAMINA_CUTOFF = {'短距離': 30, 'マイル': 41, '中距離': 66, '長距離': 81}  # 第1巻
-PASSIVE_TABLE = {  # パッシブ → (speed, power, stamina) 倍率  ※攻略本 第2巻
-    'なし': (1, 1, 1),
-    'スピードスター': (1.35, 1, 0.9), '脳筋': (0.9, 1.35, 1), 'マイペース': (1, 0.9, 1.35),
-    'スピード大アップ': (1.25, 1, 1), 'パワー大アップ': (1, 1.25, 1), 'スタミナ大アップ': (1, 1, 1.25),
-    'スピード小アップ': (1.1, 1, 1), 'パワー小アップ': (1, 1.1, 1), 'スタミナ小アップ': (1, 1, 1.1),
-    # 勝負師: 5%の確率で全ステ1.3倍 → 期待値 0.05×1.3+0.95×1.0=1.015 を常時織り込み（跳ねは無視）
-    '同族嫌悪': (1.2, 1.2, 1.2), '勝負師': (1.015, 1.015, 1.015), '器用貧乏': (1.05, 1.05, 1.05)}
-
-
-def passive_multipliers(passive):
-    """攻略本のパッシブ倍率を (speed, power, stamina) で返す。先頭絵文字は無視。
-    既知の固有名→表引き、'○○得意'→距離得意1.15/馬場得意1.1、未知は等倍。
-    ※ 同族嫌悪・距離得意・馬場得意は『条件付き』。ここでは“発動したときの値”を返すだけで、
-      条件判定は passive_condition / effective_passive_mult 側で行う。"""
-    p = normalize_passive(passive)
-    if p in PASSIVE_TABLE:
-        return PASSIVE_TABLE[p]
-    if p.endswith('得意'):
-        if '芝' in p or 'ダート' in p:
-            return (1.1, 1.1, 1.1)        # 馬場得意
-        return (1.15, 1.15, 1.15)          # 距離得意
-    return (1.0, 1.0, 1.0)                  # 未知（別途 未学習警告で通知）
-
-
-def passive_condition(passive):
-    """条件付きパッシブの種別と必要条件を返す。
-    戻り値 (kind, key):
-      ('kindred', None)  … 同族嫌悪（同名馬が同レースに2頭以上で発動）
-      ('dist', '中距離') … 距離得意（レース距離が key と一致で発動）
-      ('track', '芝')    … 馬場得意（レース馬場が key と一致で発動）
-      (None, None)       … 無条件（常に passive_multipliers の値）"""
-    p = normalize_passive(passive)
-    if p == '同族嫌悪':
-        return ('kindred', None)
-    for d in ('短距離', 'マイル', '中距離', '長距離'):
-        if p == d + '得意':
-            return ('dist', d)
-    if p == '芝得意':
-        return ('track', '芝')
-    if p == 'ダート得意':
-        return ('track', 'ダート')
-    return (None, None)
-
-
-def effective_passive_mult(passive, dist=None, track=None, kindred_active=False):
-    """レース条件を踏まえた実効パッシブ倍率 (speed, power, stamina)。
-    条件付きパッシブは、条件を満たさなければ等倍 (1,1,1) に戻す。"""
-    base = passive_multipliers(passive)
-    kind, key = passive_condition(passive)
-    if kind == 'kindred':
-        return base if kindred_active else (1.0, 1.0, 1.0)
-    if kind == 'dist':
-        return base if dist == key else (1.0, 1.0, 1.0)
-    if kind == 'track':
-        return base if track == key else (1.0, 1.0, 1.0)
-    return base
-
-
-def add_features(df):
-    df = df.copy()
-    eps = 1e-5
-    df['total_stats'] = df['speed'] + df['stamina'] + df['power']
-    df['speed_stamina_ratio'] = df['speed'] / (df['stamina'] + eps)
-    df['stamina_power_ratio'] = df['stamina'] / (df['power'] + eps)
-
-    # 攻略本由来の特徴量: 理論スコア＋スタミナ足切りマージン
-    # 条件付きパッシブ（同族嫌悪/距離得意/馬場得意）はレース条件を見て発動可否を決める。
-    if 'name' in df.columns:                       # 同族嫌悪用: レース内の同名カウント
-        bn = df['name'].map(base_name)
-        grp = (df['race_key'].astype(str) if 'race_key' in df.columns
-               else pd.Series('_', index=df.index))   # 単一レース（予測時）は全体を1グループ扱い
-        cnt = (pd.DataFrame({'g': grp.to_numpy(), 'b': bn.to_numpy()})
-               .groupby(['g', 'b'])['b'].transform('size').to_numpy())
-        has_twin = cnt >= 2
-    else:
-        has_twin = np.zeros(len(df), dtype=bool)       # 名前が無ければ判定不能→不発（安全側）
-
-    passives = df['passive'].tolist()
-    dists = df['dist'].tolist()
-    tracks = df['track'].tolist() if 'track' in df.columns else [None] * len(df)
-    p_s = np.empty(len(df)); p_p = np.empty(len(df)); p_st = np.empty(len(df))
-    for i in range(len(df)):
-        kind, _ = passive_condition(passives[i])
-        kact = bool(has_twin[i]) if kind == 'kindred' else False
-        t = effective_passive_mult(passives[i], dists[i], tracks[i], kact)
-        p_s[i], p_p[i], p_st[i] = t
-
-    dwt = df['dist'].map(lambda d: DIST_WEIGHTS.get(d, (1.0, 1.0)))
-    d_s = dwt.map(lambda t: t[0]).to_numpy(dtype=float)
-    d_p = dwt.map(lambda t: t[1]).to_numpy(dtype=float)
-    df['theory_score'] = df['speed'].to_numpy() * d_s * p_s + df['power'].to_numpy() * d_p * p_p
-    cutoff = df['dist'].map(lambda d: STAMINA_CUTOFF.get(d, 0)).to_numpy(dtype=float)
-    df['stam_margin'] = df['stamina'].to_numpy() * p_st - cutoff   # 実効スタミナ − 必要最低
-    df['below_cutoff'] = (df['stam_margin'] < 0).astype(int)
-    return df
-
-
-
-# --- 2. ログ解析（セクション単位・高精度） ---
 def parse_entries(text):
-    """全ての『出走決定』をメッセージ境界に関係なく抽出する。"""
+    """『出走決定』セクションを全部抜き出す。 -> {race_key: {...}}"""
     entries = {}
-    pat = re.compile(
-        r'🏇[^\n]*?出走決定（(\d{1,2}:\d{2})）[^\n]*\n'
-        r'([^\n｜]+)｜([^\n｜]+)｜([^\n\r]+)'                 # 距離｜馬場｜地面
-        r'(.*?)(?=🏇[^\n]*?出走決定|🏁[^\n]*?レース 結果|\Z)',
-        re.S)
-    for m in pat.finditer(text):
-        r_time = m.group(1).zfill(5)                          # 9:00 -> 09:00
-        dist, track, g_cond = (g.strip().rstrip('\r') for g in m.group(2, 3, 4))
-        body = m.group(5)
-        pre = text[max(0, m.start() - 2000):m.start()]
-        dm = re.findall(r'\[(\d{4}/\d{2}/\d{2}) \d{1,2}:\d{2}\]', pre)
-        date = dm[-1] if dm else '????'
+    for m in _ENTRY_PAT.finditer(text):
+        race_no = m.group(1)
+        r_time = m.group(2).zfill(5)
+        dist, track, g_cond = (g.strip().rstrip('\r') for g in m.group(3, 4, 5))
+        body = m.group(6)
+        date = _date_before(text, m.start())
         r_key = f"{date} {r_time}"
+
+        fm = re.search(r'出走頭数[:：]\s*(\d+)\s*/\s*(\d+)', body)
+        field_n = int(fm.group(1)) if fm else None
 
         horses = []
         for blk in re.split(r'【枠番\s*\d+】', body)[1:]:
@@ -267,7 +555,7 @@ def parse_entries(text):
             s_m = re.search(r'スピード\s*[:：]\s*(\d+)', blk)
             st_m = re.search(r'スタミナ\s*[:：]\s*(\d+)', blk)
             p_m = re.search(r'パワー\s*[:：]\s*(\d+)', blk)
-            c_m = re.search(r'コンディション\s*[:：]\s*([^\s\r\n😄😐😞🙁]+)', blk)
+            c_m = re.search(r'コンディション\s*[:：]\s*([^\s\r\n😄😐😞🙁😰]+)', blk)
             pa_m = re.search(r'✨\s*パッシブ\s*[:：]\s*([^\n\r]+)', blk)
             if n_m and s_m and st_m and p_m:
                 horses.append({
@@ -277,29 +565,22 @@ def parse_entries(text):
                     'stamina': int(st_m.group(1)),
                     'power': int(p_m.group(1)),
                     'condition': c_m.group(1).strip() if c_m else '普通',
-                    'passive': pa_m.group(1).strip() if pa_m else None,
+                    'passives': parse_passives(pa_m.group(1)) if pa_m else (),
                 })
-        entries[r_key] = {'dist': dist, 'track': track, 'g_cond': g_cond, 'horses': horses}
+        entries[r_key] = {'dist': dist, 'track': track, 'g_cond': g_cond,
+                          'race_no': race_no, 'field_n': field_n, 'horses': horses}
     return entries
 
 
 def parse_results(text):
-    """全ての『結果』を抽出（🥇🥈🥉 を着順1/2/3として認識）。
-    着順マーカーで馬ごとのブロックに分割してから各要素を個別抽出する方式。
-    """
+    """『レース 結果』セクションを全部抜き出す。 -> [row, ...]"""
     rows = []
-    pat = re.compile(
-        r'🏁[^\n]*?レース 結果\s*\n'
-        r'🕘\s*(\d{1,2}:\d{2})｜([^\n｜]+)｜([^\n｜]+)｜([^\n\r]+)'
-        r'(.*?)(?=🏇[^\n]*?出走決定|🏁[^\n]*?レース 結果|\Z)',
-        re.S)
-    for m in pat.finditer(text):
-        r_time = m.group(1).zfill(5)
-        dist, track, g_cond = (g.strip().rstrip('\r') for g in m.group(2, 3, 4))
-        body = m.group(5)
-        pre = text[max(0, m.start() - 2000):m.start()]
-        dm = re.findall(r'\[(\d{4}/\d{2}/\d{2}) \d{1,2}:\d{2}\]', pre)
-        date = dm[-1] if dm else '????'
+    for m in _RESULT_PAT.finditer(text):
+        race_no = m.group(1)
+        r_time = m.group(2).zfill(5)
+        dist, track, g_cond = (g.strip().rstrip('\r') for g in m.group(3, 4, 5))
+        body = m.group(6)
+        date = _date_before(text, m.start())
         r_key = f"{date} {r_time}"
 
         for block in re.split(r'(?=🥇|🥈|🥉|\d+着)', body):
@@ -313,67 +594,550 @@ def parse_results(text):
             p_m = re.search(r'パワー\s+(\d+)', block)
             sc_m = re.search(r'score\s+(\d+\.?\d*)', block)
             pa_m = re.search(r'✨\s*パッシブ\s*[:：]\s*([^\n\r]+)', block)
+            od_m = re.search(r'(?:最終)?オッズ\s*[:：]?\s*([0-9.]+)', block)
             if s_m and st_m and p_m and sc_m:
                 rows.append({
-                    'race_key': r_key,
+                    'race_key': r_key, 'race_no': race_no,
                     'rank': RANK_MAP.get(hm.group(1)) or int(hm.group(2)),
-                    'name': hm.group(3).strip(),
-                    'owner': _owner(hm.group(4)),
+                    'name': hm.group(3).strip(), 'owner': _owner(hm.group(4)),
                     'speed': int(s_m.group(1)), 'stamina': int(st_m.group(1)),
                     'power': int(p_m.group(1)), 'score': float(sc_m.group(1)),
-                    'passive_res': pa_m.group(1).strip() if pa_m else None,
+                    'passives': parse_passives(pa_m.group(1)) if pa_m else (),
+                    'win_odds': float(od_m.group(1)) if od_m else np.nan,
                     'dist': dist, 'track': track, 'g_cond': g_cond,
                 })
     return rows
 
 
-def parse_race_log(file_path):
-    text = open(file_path, encoding='utf-8').read()
-    entries = parse_entries(text)
-    results = parse_results(text)
+def _iter_log_files(log_path):
+    """ファイル / フォルダ / グロブ を受け取り、対象テキストファイルの一覧を返す。"""
+    p = os.path.expanduser(str(log_path or '').strip())
+    if not p:
+        return []
+    if os.path.isdir(p):
+        files = sorted(glob.glob(os.path.join(p, '*.txt')) + glob.glob(os.path.join(p, '*.md')))
+        return files
+    if any(ch in p for ch in '*?['):
+        return sorted(glob.glob(p))
+    return [p] if os.path.exists(p) else []
+
+
+def parse_race_log(log_path=None, texts=None):
+    """ログ（ファイル/フォルダ/グロブ、または文字列のリスト）→ 1行1頭の DataFrame。"""
+    all_rows, all_entries = [], {}
+    chunks = list(texts) if texts else []
+    for f in _iter_log_files(log_path):
+        try:
+            chunks.append(open(f, encoding='utf-8').read())
+        except UnicodeDecodeError:
+            chunks.append(open(f, encoding='utf-8', errors='replace').read())
+    for text in chunks:
+        all_entries.update(parse_entries(text))
+        all_rows.extend(parse_results(text))
 
     out = []
-    for r in results:
-        passive = r['passive_res']
-        condition = '不明'   # #10: 照合失敗時は '普通' に潰さず '不明' として残す
-        ent = entries.get(r['race_key'])
+    for r in all_rows:
+        passives = r['passives']
+        condition = '不明'
+        ent = all_entries.get(r['race_key'])
         if ent:
             target = horse_identity(r['name'], r['owner'], r['speed'], r['stamina'], r['power'])
             for h in ent['horses']:
-                if horse_identity(h['name'], h['owner'], h['speed'], h['stamina'], h['power']) == target:
+                if horse_identity(h['name'], h['owner'], h['speed'],
+                                  h['stamina'], h['power']) == target:
                     condition = h['condition']
-                    if not passive:
-                        passive = h['passive']
+                    if not passives:
+                        passives = h['passives']
                     break
         out.append({
-            'date': r['race_key'].split(' ')[0],
-            'race_key': r['race_key'],          # 同族嫌悪のレース内同名判定に使用
-            'name': r['name'],                  # 同上（ベース名カウント用）
+            'race_key': r['race_key'], 'date': r['race_key'].split(' ')[0],
             'dist': r['dist'], 'track': r['track'], 'g_cond': r['g_cond'],
+            'name': r['name'], 'owner': r['owner'],
             'speed': r['speed'], 'stamina': r['stamina'], 'power': r['power'],
-            'condition': condition, 'passive': normalize_passive(passive),
-            'rank': r['rank'], 'score': r['score'],
+            'condition': condition, 'passives': passives,
+            'passive': ' / '.join(passives) if passives else 'なし',
+            'rank': r['rank'], 'score': r['score'], 'win_odds': r['win_odds'],
         })
-    return pd.DataFrame(out)
+    df = pd.DataFrame(out)
+    if len(df):
+        df['n_field'] = df.groupby('race_key')['score'].transform('size')
+        df['_d'] = pd.to_datetime(df['date'], format='%Y/%m/%d', errors='coerce')
+    return df
 
 
+# =====================================================================
+#  4. 特徴量
+# =====================================================================
+def feature_names(spec):
+    """スペックが分かっているパッシブは実効ステータスに畳み込むので、ダミー列は作らない。
+    スペック未知のパッシブだけ、ダミー＋距離交互作用で学習する。"""
+    names = []
+    for d in DIST_LIST:
+        names += [f'{d}:切片', f'{d}:log(SP)', f'{d}:log(PW)', f'{d}:log(ST)']
+    names += ['好調', '不調']
+    for p in unspecced_passives(spec):
+        names.append(p)
+        if PASSIVE_CATALOG.get(p) != 'aptitude':
+            for d in DIST_LIST:
+                names.append(f'{p}×{d}')
+    return names
 
-# --- 4. 純粋計算ヘルパー（#13: UIから分離してテスト可能に） ---
+
+def unspecced_passives(spec):
+    """数値スペックが無い＝データから効果を学ぶしかないパッシブ。"""
+    return [p for p in PASSIVE_NAMES if not (spec.get(p) or {}).get('mult')
+            and (spec.get(p) or {}).get('scope') != 'variance']
+
+
+def passive_from_code(code):
+    """API の passive_skill コード（speed_star 等）→ 日本語名。"""
+    if code is None:
+        return None
+    c = str(code).strip()
+    if not c or c in ('none', 'null', 'None', 'nan'):
+        return None
+    return PASSIVE_CODE_MAP.get(c) or canonical_passive(c)
+
+
+def _row_features(speed, power, stamina, condition, passives, dist, track, spec, ctx=None):
+    e = effective_stats(speed, power, stamina, passives, dist, track, spec, ctx)
+    sp = math.log(max(e['speed'], 1.0))
+    pw = math.log(max(e['power'], 1.0))
+    st = math.log(max(e['stamina'], 1.0))
+    f = []
+    for d in DIST_LIST:
+        m = 1.0 if dist == d else 0.0
+        f += [m, m * sp, m * pw, m * st]
+    f += [1.0 if condition == '好調' else 0.0, 1.0 if condition == '不調' else 0.0]
+    pset = set(passives or ())
+    for p in unspecced_passives(spec):
+        has = 1.0 if p in pset else 0.0
+        if PASSIVE_CATALOG.get(p) == 'aptitude':
+            col, val = APTITUDE_MATCH[p]
+            ok = (track == val) if col == 'track' else (dist == val)
+            f.append(has if ok else 0.0)
+        else:
+            f.append(has)
+            for d in DIST_LIST:
+                f.append(INTERACTION_SHRINK * has * (1.0 if dist == d else 0.0))
+    return f
+
+
+def build_features(df, spec):
+    cols = len(feature_names(spec))
+    X = np.empty((len(df), cols), dtype=float)
+    if 'same_species' in df.columns:
+        same = df['same_species'].fillna(False).astype(bool).tolist()
+    elif 'race_key' in df.columns and 'name' in df.columns:
+        same = np.zeros(len(df), dtype=bool)
+        idx = np.arange(len(df))
+        for _, g in df.groupby('race_key'):
+            pos = idx[df.index.get_indexer(g.index)]
+            for j, f in zip(pos, same_species_flags(g['name'].tolist())):
+                same[j] = f
+        same = same.tolist()
+    elif 'name' in df.columns:
+        same = same_species_flags(df['name'].tolist())
+    else:
+        same = [False] * len(df)
+    for i, (_, r) in enumerate(df.iterrows()):
+        X[i] = _row_features(r['speed'], r['power'], r['stamina'],
+                             r.get('condition', '普通'), r.get('passives', ()),
+                             r['dist'], r['track'], spec, {'same_species': bool(same[i])})
+    return X
+
+
+# =====================================================================
+#  5. 学習
+# =====================================================================
+def _center_by_race(values, race_keys):
+    s = pd.Series(values)
+    return (s - s.groupby(pd.Series(list(race_keys))).transform('mean')).values
+
+
+def _race_folds(race_keys, k=5, seed=0):
+    uniq = sorted(set(race_keys))
+    rng = np.random.default_rng(seed)
+    rng.shuffle(uniq)
+    fold_of = {r: i % k for i, r in enumerate(uniq)}
+    return np.array([fold_of[r] for r in race_keys])
+
+
+def _oof_predictions(X, y, groups, alpha, w=None, k=5):
+    folds = _race_folds(groups, k=k)
+    oof = np.zeros(len(y))
+    for f in range(folds.max() + 1):
+        te = folds == f
+        tr = ~te
+        if tr.sum() < 10 or te.sum() == 0:
+            continue
+        m = Ridge(alpha=alpha, fit_intercept=True)
+        m.fit(X[tr], y[tr], sample_weight=(None if w is None else w[tr]))
+        oof[te] = m.predict(X[te])
+    # レース内で中心化（相対値なので水準は無意味）
+    return _center_by_race(oof, groups)
+
+
+def _order_loglik(base, actual_score, sigma, z):
+    """base(予測相対スコア) + sigma*z のモンテカルロで、実際の上位3着順が出る確率の log。"""
+    n = len(base)
+    k = min(3, n)
+    truth = tuple(np.argsort(-np.asarray(actual_score))[:k])
+    sim = base[None, :] + sigma * z
+    order = np.argsort(-sim, axis=1)[:, :k]
+    hit = np.ones(len(sim), dtype=bool)
+    for j in range(k):
+        hit &= (order[:, j] == truth[j])
+    p = hit.mean()
+    return math.log(max(p, 1.0 / (len(sim) * 5.0)))
+
+
+MAX_CALIB_RACES = 80          # σ校正に使う直近レース数の上限（計算時間の頭打ち）
+
+
+def _recent_races(df, limit=MAX_CALIB_RACES, min_field=4):
+    """直近 limit レースだけを (race_key, DataFrame) のリストで返す。"""
+    races = [(k, g) for k, g in df.groupby('race_key') if len(g) >= min_field]
+    races.sort(key=lambda kv: (kv[1]['_d'].iloc[0], kv[0]))
+    return races[-limit:]
+
+
+def _calibrate_sigma(oof, df, resid_std, n_draw=40_000, seed=7):
+    """OOF予測に対して、実際の上位3着順の尤度が最大になる σ を選ぶ。"""
+    races = _recent_races(df)
+    if len(races) < 6:
+        return max(resid_std * 0.6, 1e-4), []
+    rng = np.random.default_rng(seed)
+    zs = {k: rng.standard_normal((n_draw, len(g))) for k, g in races}
+    grid = np.unique(np.round(np.concatenate([
+        np.linspace(0.15, 2.0, 20) * max(resid_std, 1e-4),
+        np.array([0.01, 0.02, 0.03, 0.05, 0.08, 0.12, 0.2])]), 5))
+    curve = []
+    for s in grid:
+        tot = 0.0
+        for k, g in races:
+            tot += _order_loglik(oof[g.index.values], g['score'].values, s, zs[k])
+        curve.append((float(s), tot / len(races)))
+    best = max(curve, key=lambda t: t[1])[0]
+    return max(best, 1e-4), curve
+
+
+SIGMA_SAFETY = 1.25   # 校正で得たσに掛ける安全係数（>1 = 弱気側＝過剰投資を防ぐ）
+
+
+def train_model(log_path=None, sigma_override=None, train_from=DEFAULT_TRAIN_FROM,
+                min_field=4, half_life_days=21.0, alpha_grid=None, spec=None,
+                spec_path=None, sigma_safety=SIGMA_SAFETY, texts=None):
+    """レースログを学習して bundle を返す。
+
+    train_from: この日付以降のレースのみを学習に使う（既定 = スコア式変更日）。
+                対象レースが少なすぎる場合は旧式データも時間減衰つきで併用する。
+    """
+    msgs, warns = [], []
+    if spec is None:
+        spec = load_passive_spec(spec_path)
+    files = _iter_log_files(log_path)
+    if not files and not texts:
+        return {'ok': False, 'model': None, 'warnings': [],
+                'messages': [f'ログが見つかりません: {log_path}']}
+
+    df_all = parse_race_log(log_path, texts=texts)
+    if len(df_all) == 0:
+        return {'ok': False, 'model': None, 'warnings': [],
+                'messages': ['ログを解析できませんでした（中身を確認してください）。'
+                             'Discordエクスポートの .txt をそのまま指定してください。']}
+
+    df_all = df_all[df_all['n_field'] >= min_field].copy()
+    cut = pd.to_datetime(train_from, format='%Y/%m/%d')
+    newest = df_all['_d'].max()
+
+    df = df_all[df_all['_d'] >= cut].copy()
+    n_races_new = df['race_key'].nunique()
+    mode = 'new_only'
+    if n_races_new < MIN_RACES_FOR_ERA:
+        bal = pd.to_datetime(BALANCE_PATCH_DATE, format='%Y/%m/%d')
+        df = df_all[df_all['_d'] >= bal].copy()
+        mode = 'blended'
+        warns.append(
+            f'⚠ 新スコア式（{train_from}以降）のレースが {n_races_new} 件しかないため、'
+            f'{BALANCE_PATCH_DATE} 以降の旧データも時間減衰つきで併用しています。'
+            'ログが貯まったら再学習してください（新式だけで学習するのが最も正確）。')
+    if len(df) == 0:
+        return {'ok': False, 'model': None, 'warnings': [],
+                'messages': [f'対象レースが0件（{train_from} 以降のデータがありません）。']}
+    df = df.reset_index(drop=True)
+
+    # --- ターゲット: レース内で中心化した log スコア（スケール不変） ---
+    df['lsc'] = np.log(np.clip(df['score'].values, 1e-6, None))
+    y = _center_by_race(df['lsc'].values, df['race_key'].values)
+    X = build_features(df, spec)
+    groups = df['race_key'].values
+
+    # --- 時間減衰の重み ---
+    age = (newest - df['_d']).dt.days.fillna(9999).values.astype(float)
+    if mode == 'blended':
+        w = 0.5 ** (age / max(half_life_days, 1.0))
+        w = np.clip(w, 1e-3, None)
+    else:
+        w = np.ones(len(df))
+
+    # --- α をレース単位CVで選択 ---
+    if alpha_grid is None:
+        alpha_grid = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+    best_alpha, best_score, cv_rows = None, -np.inf, []
+    for a in alpha_grid:
+        oof = _oof_predictions(X, y, groups, a, w)
+        sc = -np.mean((y - oof) ** 2)
+        # レース内スピアマンでも評価（順位が本命なので）
+        rho = _mean_race_spearman(oof, df)
+        cv_rows.append({'alpha': a, 'mse': -sc, 'spearman': rho})
+        obj = rho                                     # 順位精度を最優先
+        if obj > best_score:
+            best_score, best_alpha = obj, a
+    oof = _oof_predictions(X, y, groups, best_alpha, w)
+    resid_std = float(np.std(y - oof))
+    race_rho = _mean_race_spearman(oof, df)
+    top1 = _top1_accuracy(oof, df)
+
+    model = Ridge(alpha=best_alpha, fit_intercept=True).fit(X, y, sample_weight=w)
+
+    # --- σ 校正 ---
+    if sigma_override:
+        race_sigma, sigma_curve = float(sigma_override), []
+        sigma_mle = race_sigma
+        sigma_note = '（手動上書き）'
+    else:
+        sigma_mle, sigma_curve = _calibrate_sigma(oof, df, resid_std)
+        race_sigma = sigma_mle * max(float(sigma_safety), 0.1)
+        sigma_note = (f'（着順尤度の最適値 {sigma_mle:.4f} × 安全係数 {sigma_safety:g}。'
+                      f'学習レースが少ないうちは弱気側に倒して過剰投資を防ぎます）')
+
+    # --- 校正チェック: OOF予測の「予測確率 vs 実測」 ---
+    calib = _calibration_check(oof, df, race_sigma)
+
+    # --- 学習に現れたパッシブ ---
+    seen = {}
+    for ps in df['passives']:
+        for p in ps:
+            seen[p] = seen.get(p, 0) + 1
+    unknown_in_log = sorted({p for p in seen if p not in PASSIVE_CATALOG})
+    未出現 = [p for p in PASSIVE_NAMES if seen.get(p, 0) == 0]
+    thin = [p for p in PASSIVE_NAMES if 0 < seen.get(p, 0) < 8]
+
+    msgs.append(
+        f'学習完了  {len(df)}行 / {df["race_key"].nunique()}レース  '
+        f'（{df["date"].min()}〜{df["date"].max()}, mode={mode}）')
+    msgs.append(
+        f'精度(OOF)  レース内スピアマン={race_rho:.3f}  1着的中={top1*100:.0f}%  '
+        f'残差std={resid_std:.4f}  α={best_alpha}')
+    n_num = sum(1 for k, v in spec.items()
+                if k in PASSIVE_CATALOG and (v.get('mult') or v.get('scope') == 'variance'))
+    n_game = sum(1 for k, v in spec.items()
+                 if k in PASSIVE_CATALOG and v.get('source') == 'game')
+    n_none = len(unspecced_passives(spec))
+    msgs.append(f'パッシブ {len(PASSIVE_NAMES)}種中: 数値を計算に使用 {n_num}種 / '
+                f'実測から学習 {n_none}種（ゲーム内表記から取得済み {n_game}種）')
+    msgs.append(f'RACE_SIGMA={race_sigma:.4f} {sigma_note}')
+    if calib:
+        msgs.append(
+            f'校正チェック(OOF {calib["n_races"]}レース)  '
+            f'1着: 予測{calib["p_top1"]*100:.0f}% vs 実測{calib["a_top1"]*100:.0f}%   '
+            f'3連単: 予測{calib["p_tri"]*100:.2f}% vs 実測{calib["a_tri"]*100:.2f}%')
+        if calib['a_top1'] > calib['p_top1'] * 1.35:
+            warns.append('△ モデルは実測よりやや弱気（σが大きめ）。実績ログが貯まったら σ を'
+                         '少し下げると期待値が上がる可能性があります。')
+        elif calib['p_top1'] > calib['a_top1'] * 1.35:
+            warns.append('⚠ モデルが実測より強気（σが小さめ）。σを上げないと過剰投資になります。')
+    if 未出現:
+        warns.append('⚠ 学習データに出てこないパッシブ（効果0として扱う）: ' + ', '.join(未出現))
+    if thin:
+        warns.append('△ サンプルが少ないパッシブ（効果の推定が粗い）: '
+                     + ', '.join(f'{p}({seen[p]})' for p in thin))
+    if unknown_in_log:
+        warns.append('⚠ カタログ外のパッシブがログにあります（新スキル？ カタログ更新を検討）: '
+                     + ', '.join(unknown_in_log))
+    if race_rho < 0.5:
+        warns.append('⚠ 順位相関が低いです。ゲーム側の計算式がまた変わった可能性があります。')
+
+    return {
+        'ok': True, 'model': model, 'alpha': best_alpha, 'spec': spec,
+        'feature_names': feature_names(spec), 'race_sigma': race_sigma,
+        'sigma_curve': sigma_curve, 'resid_std': resid_std,
+        'sigma_mle': float(sigma_mle), 'sigma_safety': float(sigma_safety),
+        'race_spearman': race_rho, 'top1_acc': top1,
+        'n_rows': int(len(df)), 'n_races': int(df['race_key'].nunique()),
+        'mode': mode, 'train_from': train_from,
+        'date_min': str(df['date'].min()), 'date_max': str(df['date'].max()),
+        'passive_counts': seen, 'passives_unseen': 未出現,
+        'passives_thin': thin, 'passives_unknown': unknown_in_log,
+        'train_conditions': set(df['condition'].unique()),
+        'cv_rows': cv_rows, 'files': files or ['(アップロード/Driveのデータ)'],
+        'calibration': calib,
+        'messages': msgs, 'warnings': warns,
+    }
+
+
+def _calibration_check(oof, df, sigma, n_draw=60_000, seed=11):
+    """OOF予測 + σ で作った確率が、実測とどれくらい合っているかを見る。"""
+    races = _recent_races(df)
+    if len(races) < 5:
+        return None
+    rng = np.random.default_rng(seed)
+    p1, a1, pt, at = [], [], [], []
+    for k, g in races:
+        b = oof[g.index.values]
+        b = b - b.mean()
+        sim = b[None, :] + sigma * rng.standard_normal((n_draw, len(b)))
+        order = np.argsort(-sim, axis=1)[:, :3]
+        win = np.bincount(order[:, 0], minlength=len(b)) / n_draw
+        truth = np.argsort(-g['score'].values)[:3]
+        p1.append(win.max())
+        a1.append(int(np.argmax(win) == truth[0]))
+        # 予測最有力3連単の確率と、それが的中したか
+        key = order[:, 0] * len(b) ** 2 + order[:, 1] * len(b) + order[:, 2]
+        u, c = np.unique(key, return_counts=True)
+        best = u[np.argmax(c)]
+        pt.append(c.max() / n_draw)
+        at.append(int(best == truth[0] * len(b) ** 2 + truth[1] * len(b) + truth[2]))
+    return {'n_races': len(races), 'p_top1': float(np.mean(p1)),
+            'a_top1': float(np.mean(a1)), 'p_tri': float(np.mean(pt)),
+            'a_tri': float(np.mean(at))}
+
+
+def _spearman(a, b):
+    """順位相関（scipy非依存）。"""
+    ra = pd.Series(a).rank().values
+    rb = pd.Series(b).rank().values
+    ra = ra - ra.mean()
+    rb = rb - rb.mean()
+    den = math.sqrt(float((ra ** 2).sum()) * float((rb ** 2).sum()))
+    return float((ra * rb).sum() / den) if den > 0 else float('nan')
+
+
+def _mean_race_spearman(pred, df):
+    vals = []
+    for _, g in df.groupby('race_key'):
+        if len(g) < 4:
+            continue
+        r = _spearman(pred[g.index.values], g['score'].values)
+        if r == r:
+            vals.append(r)
+    return float(np.mean(vals)) if vals else float('nan')
+
+
+def _top1_accuracy(pred, df):
+    hits = []
+    for _, g in df.groupby('race_key'):
+        if len(g) < 4:
+            continue
+        hits.append(int(np.argmax(pred[g.index.values]) == np.argmax(g['score'].values)))
+    return float(np.mean(hits)) if hits else float('nan')
+
+
+def passive_effects(bundle, dist=None, track=None, same_species=True):
+    """パッシブごとの効き目を一覧化する。
+    数値スペックがあるものは「その距離・馬場での実効的な効果」を理論値から計算し、
+    スペックが無いものは学習した係数をそのまま出す。"""
+    if not bundle or not bundle.get('ok'):
+        return []
+    coef = dict(zip(bundle['feature_names'], bundle['model'].coef_))
+    spec = bundle.get('spec') or default_spec()
+    cnt = bundle.get('passive_counts', {})
+    d = dist or '中距離'
+    t = track or '芝'
+    b_sp = coef.get(f'{d}:log(SP)', 0.0)
+    b_pw = coef.get(f'{d}:log(PW)', 0.0)
+    b_st = coef.get(f'{d}:log(ST)', 0.0)
+    ref = (100.0, 100.0, 100.0)
+    out = []
+    for p in PASSIVE_NAMES:
+        sp_ = spec.get(p) or {}
+        src = sp_.get('source')
+        if sp_.get('mult'):
+            e = effective_stats(*ref, (p,), d, t, spec, {'same_species': same_species})
+            eff = (b_sp * math.log(e['speed'] / ref[0])
+                   + b_pw * math.log(e['power'] / ref[1])
+                   + b_st * math.log(e['stamina'] / ref[2]))
+            kind = 'game' if src == 'game' else 'inferred'
+        elif sp_.get('scope') == 'variance':
+            eff = 0.0
+            kind = 'variance'
+        else:
+            eff = coef.get(p, 0.0)
+            if PASSIVE_CATALOG.get(p) != 'aptitude':
+                eff += INTERACTION_SHRINK * coef.get(f'{p}×{d}', 0.0)
+            kind = 'learned'
+        cond = {'aptitude': f'{sp_.get("scope_arg", "")}のみ',
+                'same_species': '同族が同レースにいる時のみ',
+                'phase': f'{sp_.get("scope_arg", "")}区間のみ',
+                'conditional': '状況限定',
+                'variance': 'ブレを低減'}.get(sp_.get('scope'), '')
+        out.append({'passive': p, 'kind': PASSIVE_CATALOG.get(p, 'phase'),
+                    'source': kind, 'effect': float(eff), 'condition': cond,
+                    'pct': float(math.exp(eff) - 1) * 100,
+                    'sigma_mult': float(sp_.get('sigma_mult', 1.0)),
+                    'desc': sp_.get('desc', ''), 'n': int(cnt.get(p, 0))})
+    out.sort(key=lambda r: -r['effect'])
+    return out
+
+
+# =====================================================================
+#  6. 予測とモンテカルロ
+# =====================================================================
+def predict_base(bundle, horses, dist, track):
+    """出走馬リスト → レース内で中心化した予測スコア（相対log）。"""
+    spec = bundle.get('spec') or default_spec()
+    same = same_species_flags([h.get('name', '') for h in horses],
+                              [h.get('species') for h in horses])
+    rows = pd.DataFrame([{
+        'name': h.get('name', ''), 'speed': h['speed'], 'power': h['power'],
+        'stamina': h['stamina'], 'condition': h.get('condition', '普通'),
+        'passives': h.get('passives', ()), 'dist': dist, 'track': track,
+        'same_species': same[i]} for i, h in enumerate(horses)])
+    X = build_features(rows, spec)
+    p = bundle['model'].predict(X)
+    return p - p.mean()
+
+
+def horse_sigmas(bundle, horses, sigma):
+    """馬ごとの σ（安定感などの分散低減スキルを反映）。"""
+    spec = bundle.get('spec') or default_spec()
+    return np.array([sigma * sigma_multiplier(h.get('passives', ()), spec)
+                     for h in horses], dtype=float)
+
+
+def simulate_trifecta(base, sigma, n_sim=N_SIM, seed=SIM_SEED, chunk=SIM_CHUNK):
+    """メモリを抑えたチャンク実行。 -> (win_prob[n], {(i,j,k): prob})"""
+    n = len(base)
+    sig = np.broadcast_to(np.asarray(sigma, dtype=float), (n,))
+    rng = np.random.default_rng(seed)
+    win = np.zeros(n)
+    counts = {}
+    done = 0
+    while done < n_sim:
+        m = min(chunk, n_sim - done)
+        sim = base[None, :] + rng.standard_normal((m, n)) * sig[None, :]
+        order = np.argsort(-sim, axis=1)[:, :3]
+        np.add.at(win, order[:, 0], 1)
+        if n >= 3:
+            key = (order[:, 0] * n * n + order[:, 1] * n + order[:, 2])
+            u, c = np.unique(key, return_counts=True)
+            for kk, cc in zip(u.tolist(), c.tolist()):
+                counts[kk] = counts.get(kk, 0) + cc
+        done += m
+    win /= n_sim
+    combo = {(k // (n * n), (k // n) % n, k % n): c / n_sim for k, c in counts.items()}
+    return win, combo
+
+
+# 後方互換
 def simulate_rankings(base, sigma, n_sim=N_SIM, seed=SIM_SEED):
-    """予測スコア base に σ のガウスノイズを与え、n_sim 回ぶんの着順(argsort降順)を返す。
-    seed 固定で再現性を確保する（#8）。"""
     rng = np.random.default_rng(seed)
     sim = base + rng.normal(0, sigma, (n_sim, len(base)))
     return np.argsort(-sim, axis=1)
 
 
 def market_win_prob(odds):
-    """単勝オッズ列から観客の勝率予想を推定。
-    ・ライブ画面では未投票馬が初期値 ODDS_FLOOR(1.5) に張り付くため、そのまま 1/オッズ を
-      使うと未投票馬を過大評価する。→ floor以下は観客マネー≈0 とみなして除外し、
-      残りを正規化する（控除率ではなく単純正規化。暫定オッズは過剰ラウンドになり得る）。
-    戻り値: 正規化済み確率配列 or None(市場情報なし)。
-    """
     odds = np.asarray(odds, dtype=float)
     raw = np.where((odds > ODDS_FLOOR) & np.isfinite(odds), 1.0 / odds, 0.0)
     if raw.sum() <= 0:
@@ -381,156 +1145,308 @@ def market_win_prob(odds):
     return raw / raw.sum()
 
 
-def harville(p, idx):
-    """勝率配列 p から、順序付き(idx[0]→idx[1]→idx[2])の3連単確率を近似。"""
-    a, b, c = idx
-    da = 1.0 - p[a]
-    db = da - p[b]
-    if da <= 1e-9 or db <= 1e-9:
-        return 0.0
-    return p[a] * (p[b] / da) * (p[c] / db)
+# =====================================================================
+#  7. 貼り付けデータの解析
+# =====================================================================
+def disambiguate(names):
+    total = {}
+    for n in names:
+        total[n] = total.get(n, 0) + 1
+    cnt, out = {}, []
+    for n in names:
+        if total[n] > 1:
+            cnt[n] = cnt.get(n, 0) + 1
+            out.append(f"{n}{DUP_MARK}{cnt[n]}")
+        else:
+            out.append(n)
+    return out
+
+
+def bare(name):
+    return re.sub(re.escape(DUP_MARK) + r'\d+$', '', str(name))
+
+
+_SPECIES_RE = re.compile(r'\s*#\s*\d+\s*$')
+
+
+def species_name(name):
+    """おあしすっちの種類名。ゲームが同名馬に付ける '#2' と、こちらの重複マーカーを外す。"""
+    return _SPECIES_RE.sub('', bare(name)).strip()
+
+
+def same_species_flags(names, species=None):
+    """同じレースに同じ成体種のおあしすっちがいるか（同族嫌悪の発動条件）。
+    species（ブックマークレットが出す adult_key）があればそれを使い、無ければ名前で代用。"""
+    if species and all(x for x in species):
+        sp = [str(x).strip() for x in species]
+    else:
+        sp = [species_name(n) for n in names]
+    cnt = {}
+    for x in sp:
+        cnt[x] = cnt.get(x, 0) + 1
+    return [cnt[x] >= 2 for x in sp]
+
+
+_PASSIVE_COLS = ['パッシブスキル', 'パッシブ', 'スキル', 'passive', 'passives']
+_PASSIVE_COLS2 = [('パッシブスキル1', 'パッシブスキル2'), ('パッシブ1', 'パッシブ2'),
+                  ('スキル1', 'スキル2'), ('passive_skill', 'passive_skill_2')]
+
+
+def _passives_from_row(r, cols):
+    got = []
+    for a, b in _PASSIVE_COLS2:
+        if a in cols:
+            for c in (a, b):
+                if c not in cols:
+                    continue
+                v = r.get(c)
+                code = passive_from_code(v) if (isinstance(v, str) and re.fullmatch(
+                    r'[a-z_0-9]+', v.strip())) else None
+                got += ([code] if code else list(parse_passives(v)))
+            break
+    if not got:
+        for c in _PASSIVE_COLS:
+            if c in cols:
+                got = list(parse_passives(r.get(c)))
+                break
+    out = []
+    for g in got:
+        if g and g not in out:
+            out.append(g)
+    return tuple(out[:2])
+
+
+def parse_passive_effect_section(text):
+    """ブックマークレットが出す『=== パッシブ効果 ===』（パッシブ,コード,説明）を読む。"""
+    m = re.search(r'===\s*パッシブ効果\s*===\s*\n(.*?)(?=\n\s*===|\Z)', text, re.S)
+    if not m:
+        return {}
+    out = {}
+    try:
+        df = pd.read_csv(io.StringIO(m.group(1).strip()))
+        df.columns = [str(c).strip() for c in df.columns]
+    except Exception:
+        return {}
+    for _, r in df.iterrows():
+        name = canonical_passive(r.get('パッシブ') or r.get('名前') or '')
+        code = str(r.get('コード', '') or '').strip()
+        if code and code in PASSIVE_CODE_MAP:
+            name = PASSIVE_CODE_MAP[code]
+        sp = spec_from_description(r.get('説明') or r.get('効果') or '')
+        if name and sp:
+            sp['code'] = code or None
+            out[name] = sp
+    return out
+
+
+def parse_unified(text):
+    """統合フォーマット（ブックマークレット出力）を解析。
+    -> (horses, trifecta_odds, dist, track, ground, guild, schedule_id, pool, n_tri_total)
+    """
+    horses, odds = [], {}
+    dist = track = ground = guild = schedule_id = None
+    pool = None
+    n_tri_total = 0
+
+    for key, setter in [('guild', 'guild'), ('schedule_id', 'schedule_id')]:
+        m = re.search(rf'^{key}=(\S+)', text, re.M)
+        if m:
+            if key == 'guild':
+                guild = m.group(1).strip()
+            else:
+                schedule_id = m.group(1).strip()
+    pm = re.search(r'^pool=(\d+)', text, re.M)
+    if pm:
+        pool = int(pm.group(1))
+
+    mh = re.search(r'===\s*出走馬一覧\s*===\s*\n(.*?)(?=\n\s*===|\Z)', text, re.S)
+    mo = re.search(r'===\s*3連単オッズ\s*===\s*\n(.*?)(?=\n\s*===|\Z)', text, re.S)
+
+    if mh:
+        df = pd.read_csv(io.StringIO(mh.group(1).strip()))
+        df.columns = [str(c).strip() for c in df.columns]
+        cols = set(df.columns)
+
+        def _first(col_names):
+            for c in col_names:
+                if c in cols and len(df):
+                    v = str(df[c].iloc[0]).strip()
+                    if v not in ('', 'nan', 'None'):
+                        return v
+            return None
+
+        dist = _first(['レース距離', '距離'])
+        track = _first(['馬場', 'コース'])
+        ground = _first(['地面', '馬場状態', '馬場コンディション'])
+
+        for _, r in df.iterrows():
+            sp = pd.to_numeric(r.get('SPEED', r.get('スピード', np.nan)), errors='coerce')
+            pw = pd.to_numeric(r.get('POWER', r.get('パワー', np.nan)), errors='coerce')
+            st = pd.to_numeric(r.get('STAMINA', r.get('スタミナ', np.nan)), errors='coerce')
+            if pd.isna(sp) or pd.isna(pw) or pd.isna(st):
+                continue
+            win_odds = pd.to_numeric(str(r.get('単勝オッズ', '')).strip(), errors='coerce')
+            spc = str(r.get('成体種', r.get('adult_key', '')) or '').strip()
+            horses.append({
+                'name': str(r.get('馬名', r.get('名前', ''))).strip(),
+                'species': spc or None,
+                'speed': int(sp), 'power': int(pw), 'stamina': int(st),
+                'condition': str(r.get('コンディション', '普通')).strip(),
+                'passives': _passives_from_row(r, cols),
+                'odds': float(win_odds) if pd.notna(win_odds) else float('nan'),
+            })
+
+    if mo:
+        dfo = pd.read_csv(io.StringIO(mo.group(1).strip()))
+        dfo.columns = [str(c).strip() for c in dfo.columns]
+        n_tri_total = len(dfo)
+        dfo['_o'] = pd.to_numeric(dfo['オッズ'], errors='coerce')
+        for _, r in dfo[dfo['_o'].notna()].iterrows():
+            key = (str(r['1着']).strip(), str(r['2着']).strip(), str(r['3着']).strip())
+            odds[key] = float(r['_o'])
+
+    return horses, odds, dist, track, ground, guild, schedule_id, pool, n_tri_total
+
+
+def parse_betting_screen(text):
+    """購入画面をそのままコピーした場合のフォールバック解析（パッシブ2枠対応）。"""
+    horses = []
+    for block in re.split(r'購入', text):
+        if not block.strip():
+            continue
+        lines = [l.strip() for l in block.split('\n') if l.strip()]
+        if len(lines) < 3:
+            continue
+        sp_m = re.search(r'(\d+)\s*SPEED', block, re.I)
+        pw_m = re.search(r'(\d+)\s*POWER', block, re.I)
+        st_m = re.search(r'(\d+)\s*STAM', block, re.I)
+        if not (sp_m and pw_m and st_m):
+            continue
+        found = []
+        for pname in sorted(PASSIVE_NAMES, key=len, reverse=True):
+            if pname in block and pname not in found:
+                if any(pname in f and pname != f for f in found):
+                    continue
+                found.append(pname)
+        # 長い名前優先で拾ったので、他スキル名の部分文字列は除去
+        found = [p for p in found if not any(p != q and p in q for q in found)]
+        c_m = re.search(r'(好調|普通|不調)', block)
+        od_m = re.search(r'オッズ\s*[:：]?\s*([0-9.]+)', block)
+        horses.append({
+            'name': lines[0],
+            'speed': int(sp_m.group(1)), 'power': int(pw_m.group(1)),
+            'stamina': int(st_m.group(1)),
+            'condition': c_m.group(1) if c_m else '普通',
+            'passives': tuple(found[:2]),
+            'odds': float(od_m.group(1)) if od_m else float('nan'),
+        })
+    return horses
+
+
+def detect_stake_unit(text, default=WIN_STAKE_UNIT):
+    """購入画面の『1口（1,000 rrc）』から1口いくらかを読み取る。"""
+    m = re.search(r'1\s*口\s*[（(]\s*([0-9,]+)\s*rrc', str(text))
+    if m:
+        try:
+            v = int(m.group(1).replace(',', ''))
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return default
+
+
+def parse_trifecta_csv(path):
+    df = pd.read_csv(path, encoding='utf-8-sig')
+    df['_o'] = pd.to_numeric(df['オッズ'], errors='coerce')
+    df = df[df['_o'].notna()]
+    return {(str(r['1着']).strip(), str(r['2着']).strip(), str(r['3着']).strip()): float(r['_o'])
+            for _, r in df.iterrows()}
+
+
+# =====================================================================
+#  8. プール／キャリーオーバー
+# =====================================================================
+CO_DETECT_LO = 0.95
+INV_SUM_SANE = (0.5, 1.10)
+ASSUME_POOL_IS_PAYOUT = False
 
 
 def resolve_payout_pool(pool, odds_iter, manual_co=None, trust=True):
-    """成立3連単オッズから Σ(1/od) を計算し、parimutuel が使う『払戻プール』を決める。
-    Σ(1/od) = 実ベット総額 / 払戻プール（控除0%・全組合算の恒等式。未成立組はベット0で
-    1/od=0 のため、成立分だけの合算でも比率は正確）。
-    trust=False（全組がそろっている保証が無い＝CSVを間引いた等）の場合、CO検出しても
-    自動補正はせず表示のみ（不完全なオッズ集合による偽CO検出→過剰投資を防ぐ）。
-    戻り値: (payout_pool, info)。info に inv_sum / regime / carryover / bets を格納。"""
     vals = [float(o) for o in odds_iter if o and float(o) > 0 and math.isfinite(float(o))]
-    info = {'inv_sum': None, 'regime': 'no_pool', 'carryover': 0.0, 'bets': float(pool), 'n': len(vals)}
+    info = {'inv_sum': None, 'regime': 'no_pool', 'carryover': 0.0,
+            'bets': float(pool), 'n': len(vals)}
     if pool <= 0 or not vals:
         return pool, info
     inv = sum(1.0 / o for o in vals)
     info['inv_sum'] = inv
-
-    # 手動CO指定が最優先（pool=実ベット総額とみなして加算）
     if manual_co is not None:
         co = max(0.0, float(manual_co))
         info.update(regime='manual', carryover=co, bets=float(pool))
         return pool + co, info
-
-    if inv > 1.05:                                  # 控除あり（house edge）
+    if inv > 1.05:
         info.update(regime='takeout')
-        return pool, info                            # CO無しとして補正しない
-    if inv >= CO_DETECT_LO:                          # 中立: 控除0%・CO無し
+        return pool, info
+    if inv >= CO_DETECT_LO:
         info.update(regime='neutral')
         return pool, info
-    # ここから inv < CO_DETECT_LO ＝ キャリーオーバー検出
     if not (INV_SUM_SANE[0] <= inv <= INV_SUM_SANE[1]):
-        info.update(regime='carryover_unsure')       # 異常値（成立点が少ない等）は補正しない
+        info.update(regime='carryover_unsure')
         return pool, info
     payout = pool / inv
     if not trust:
-        # 全組がそろっている保証が無い → 偽CO検出の恐れ。表示のみで補正しない（安全側）
         info.update(regime='carryover_untrusted', carryover=payout - pool, bets=float(pool))
         return pool, info
     if ASSUME_POOL_IS_PAYOUT:
-        co = pool * (1.0 - inv)                       # poolに内包済みのCO（情報用）
+        co = pool * (1.0 - inv)
         info.update(regime='carryover_in_pool', carryover=co, bets=pool - co)
-        return pool, info                            # 計算は pool のまま（補正不要）
-    # 既定: pool=実ベット総額とみなし、オッズから払戻プールを逆算してCOを加える
+        return pool, info
     info.update(regime='carryover_added', carryover=payout - pool, bets=float(pool))
     return payout, info
 
 
+def _fetch_pool_api(guild, schedule_id, timeout=5):
+    try:
+        import requests
+        r = requests.get(
+            f'https://api.oasis.red/api/trifecta/pool?guild={guild}&schedule_id={schedule_id}',
+            timeout=timeout)
+        return int(r.json().get('pool', 0) or 0), None
+    except Exception as e:
+        return None, f'プール取得失敗（口数計算スキップ）: {e}'
+
+
+# =====================================================================
+#  9. 資金配分
+# =====================================================================
 def optimal_units_ev(p, od, P_tot, stake_unit=STAKE_UNIT, max_units=MAX_UNITS):
-    """パリミュチュエルで期待値を最大化する購入口数（#12: Kelly=対数効用ではなく EV最大化）。
-    解析解  x = P_c * (√(p(o-1)/(1-p)) - 1),  k = x / stake_unit。
-    自分が k 口買うと払戻オッズが下がる効果を織り込む（表示オッズより実効オッズは必ず下がる）。
-    条件: p > 1/o のときのみ購入価値あり。
-    戻り値: (k口, k口ぶんの実効EV合計, 実効オッズ)。
-    """
     if p <= 0 or p >= 1 or od <= 1:
         return 0, 0.0, od
-    if p <= 1.0 / od:                       # プール効果込みで損
+    if p <= 1.0 / od:
         return 0, 0.0, od
-    if P_tot <= 0:                          # プール不明：表示EVが正なら保守的に1口
+    if P_tot <= 0:
         return 1, (p * od - 1) * stake_unit, od
-
-    P_c = P_tot / od                        # この組み合わせの現在のプール額
+    P_c = P_tot / od
     inner = p * (od - 1) / (1.0 - p)
     k_raw = (P_tot / (od * stake_unit)) * (math.sqrt(inner) - 1)
     if k_raw <= 0:
         return 0, 0.0, od
     if k_raw < 1:
-        # 連続最適解 < 1口 → 1口でも実効EVが正か確認
-        eff_od_1 = (P_tot + stake_unit) / (P_c + stake_unit)
-        if p * eff_od_1 > 1:
+        eff1 = (P_tot + stake_unit) / (P_c + stake_unit)
+        if p * eff1 > 1:
             k = 1
         else:
             return 0, 0.0, od
     else:
-        k = min(max_units, int(k_raw))      # 切り捨て（過剰投資を避ける）
-
+        k = min(max_units, int(k_raw))
     eff_od = (P_tot + k * stake_unit) / (P_c + k * stake_unit)
-    eff_ev = (p * eff_od - 1) * stake_unit * k
-    return k, eff_ev, eff_od
+    return k, (p * eff_od - 1) * stake_unit * k, eff_od
 
 
-def allocate_units(cands, P_total, budget=MAX_TOTAL_UNITS,
-                   stake_unit=STAKE_UNIT, max_per_combo=None):
-    """合計 budget 口を、限界EV（追加1口あたりの期待値）が最大の買い目へ貪欲に配分する。
-    parimutuelでは1口増やすごとに自分でオッズを下げる＝各買い目のEVが口数に対し凹なので、
-    限界EVの大きい順に1口ずつ割り当てる貪欲法が総EV最大の整数配分になる。
-    cands: [(combo, p, od), ...]。戻り値: {combo: (k, eff_ev_total, eff_od)}（k>0のみ）。
-    ※ 簡略化のため、ある買い目への投入が他の買い目のプール(=オッズ)に与える影響は無視
-      （影響は小さく、無視は実効EVを過小評価する保守側）。"""
-    if max_per_combo is None:
-        max_per_combo = budget
-    pos = [(c, p, od) for (c, p, od) in cands
-           if p > 0 and od > 1 and p > 1.0 / od]          # 購入価値のある候補のみ
-    if not pos or budget <= 0:
-        return {}
-
-    if P_total <= 0:
-        # プール不明: 希薄化を測れない → 表示EV順に1口ずつ（分散でブレ抑制）
-        pos.sort(key=lambda t: t[1] * t[2] - 1, reverse=True)
-        return {c: (1, (p * od - 1) * stake_unit, od) for (c, p, od) in pos[:budget]}
-
-    def ev_c(p, od, k):                                   # k口投入時の合計EV
-        if k <= 0:
-            return 0.0
-        Pc = P_total / od
-        eff = (P_total + k * stake_unit) / (Pc + k * stake_unit)
-        return (p * eff - 1) * stake_unit * k
-
-    alloc = [0] * len(pos)
-    used = 0
-    while used < budget:
-        best_i, best_m = -1, 1e-9                         # 正の限界EVのみ採用
-        for i, (c, p, od) in enumerate(pos):
-            if alloc[i] >= max_per_combo:
-                continue
-            m = ev_c(p, od, alloc[i] + 1) - ev_c(p, od, alloc[i])
-            if m > best_m:
-                best_m, best_i = m, i
-        if best_i < 0:                                    # これ以上は限界EV≤0
-            break
-        alloc[best_i] += 1
-        used += 1
-
-    res = {}
-    for i, (c, p, od) in enumerate(pos):
-        k = alloc[i]
-        if k > 0:
-            Pc = P_total / od
-            eff = (P_total + k * stake_unit) / (Pc + k * stake_unit)
-            res[c] = (k, (p * eff - 1) * stake_unit * k, eff)
-    return res
-
-
-def allocate_units_stable(cands, P_total, bankroll=BANKROLL, kelly_frac=KELLY_FRACTION,
-                          max_risk_frac=MAX_RISK_FRAC, edge_min=EDGE_MIN,
-                          budget=MAX_TOTAL_UNITS, stake_unit=STAKE_UNIT, max_per_combo=None):
-    """安定運用版の配分。EV最大化ではなく『資金を守りながら長期で安定成長』を狙う。
-      ・成立組のみ（未成立=全プール総取りの高分散な賭けは除外）。
-      ・実効エッジ p×eff_od(1口)−1 ≥ edge_min を満たす買い目だけ採用（薄い勝負は見送り）。
-      ・各買い目の口数 = min(分数ケリー口数, EV最大口数, max_per_combo)。
-        分数ケリーが1口未満でも、エッジが基準以上なら最低1口（資金比0.8%と十分小さい・分散効果優先）。
-      ・1レースの総口数 = min(budget, 資金リスク上限=floor(max_risk_frac×bankroll/口))。
-    戻り値: {combo: (k, eff_ev_total, eff_od)}。"""
+def allocate_units_stable(cands, P_total, bankroll, kelly_frac, max_risk_frac,
+                          edge_min, budget=MAX_TOTAL_UNITS,
+                          stake_unit=STAKE_UNIT, max_per_combo=None):
+    """安定運用配分（成立組のみ・分数ケリー・1レースの総リスク上限）。"""
     if max_per_combo is None:
         max_per_combo = budget
     if P_total <= 0 or bankroll <= 0:
@@ -538,37 +1454,32 @@ def allocate_units_stable(cands, P_total, bankroll=BANKROLL, kelly_frac=KELLY_FR
     risk_units = max(1, int((max_risk_frac * bankroll) // stake_unit))
     total_cap = min(budget, risk_units)
 
-    def Pc_of(od):
-        return P_total / od
-
     def ev_c(p, od, k):
         if k <= 0:
             return 0.0
-        Pc = Pc_of(od)
+        Pc = P_total / od
         eff = (P_total + k * stake_unit) / (Pc + k * stake_unit)
         return (p * eff - 1) * stake_unit * k
 
-    items = []   # (combo, p, od, cap)
+    items = []
     for (c, p, od) in cands:
         if not od or od <= 1 or not (0 < p < 1):
-            continue                                       # 未成立/異常は除外
-        Pc = Pc_of(od)
-        eff1 = (P_total + stake_unit) / (Pc + stake_unit)  # 1口時の実効オッズ
+            continue
+        Pc = P_total / od
+        eff1 = (P_total + stake_unit) / (Pc + stake_unit)
         edge = p * eff1 - 1
         if edge < edge_min:
-            continue                                       # 薄いエッジは見送り
-        f = (p * eff1 - 1) / (eff1 - 1)                    # フルケリー分数
+            continue
+        f = edge / (eff1 - 1)
         k_kelly = int((kelly_frac * f * bankroll) // stake_unit)
         k_evmax, _, _ = optimal_units_ev(p, od, P_total, stake_unit, max_per_combo)
         cap = min(k_evmax if k_evmax > 0 else 0, max_per_combo)
-        # 分数ケリー口数で上限。<1口でもエッジ基準を満たすなら最低1口は許容
         cap = min(cap, max(1, k_kelly))
         if cap >= 1:
             items.append((c, p, od, cap))
     if not items:
         return {}
 
-    # 限界EV貪欲（per-combo cap と total_cap を遵守）
     alloc = {c: 0 for (c, p, od, cap) in items}
     used = 0
     while used < total_cap:
@@ -588,310 +1499,92 @@ def allocate_units_stable(cands, P_total, bankroll=BANKROLL, kelly_frac=KELLY_FR
     for (c, p, od, cap) in items:
         k = alloc[c]
         if k > 0:
-            Pc = Pc_of(od)
+            Pc = P_total / od
             eff = (P_total + k * stake_unit) / (Pc + k * stake_unit)
             res[c] = (k, (p * eff - 1) * stake_unit * k, eff)
     return res
 
 
-# --- 5. 入力フォーマット解析 ---
-def parse_betting_screen(text):
-    """旧: 購入画面テキストを解析。
-    1馬ブロックの想定:
-        <名前>
-        コンディション：好調
-        159SPEED
-        50POWER
-        46STAM
-        ⚡ スピードスター            ← パッシブ（ラベル無し・絵文字+名前）
-        <パッシブ説明文>
-        オッズ 1.5
-        1口（10,000 rrc）            ← ゲーム画面の文言（1口=10,000 rrc に統一）
-        購入                         ← ブロック区切り
-    ※ パッシブはラベルが無いため KNOWN_PASSIVES と照合して特定する。
-    """
-    horses = []
-    for block in re.split(r'購入', text):
-        if not block.strip():
-            continue
-        lines = [l.strip() for l in block.split('\n') if l.strip()]
-        if len(lines) < 3:
-            continue
-        sp_m = re.search(r'(\d+)\s*SPEED', block, re.I)
-        pw_m = re.search(r'(\d+)\s*POWER', block, re.I)
-        st_m = re.search(r'(\d+)\s*STAM', block, re.I)
-        if not (sp_m and pw_m and st_m):
-            continue
-        passive = 'なし'
-        for pname in KNOWN_PASSIVES:
-            if pname in block:
-                passive = pname
-                break
-        c_m = re.search(r'(好調|普通|不調)', block)
-        od_m = re.search(r'オッズ\s+([0-9.]+)', block)
-        horses.append({
-            'name': lines[0],
-            'speed': int(sp_m.group(1)), 'power': int(pw_m.group(1)),
-            'stamina': int(st_m.group(1)),
-            'condition': c_m.group(1) if c_m else '普通',
-            'passive': passive,
-            'odds': float(od_m.group(1)) if od_m else float('nan'),
-        })
-    return horses
-
-
-def disambiguate(names):
-    """同名馬を A#1 / A#2 … と区別。重複が無い馬はそのまま。"""
-    total = {}
-    for n in names:
-        total[n] = total.get(n, 0) + 1
-    cnt, out = {}, []
-    for n in names:
-        if total[n] > 1:
-            cnt[n] = cnt.get(n, 0) + 1
-            out.append(f"{n}{DUP_MARK}{cnt[n]}")
-        else:
-            out.append(n)
-    return out
-
-
-def bare(name):
-    """表示名から「こちらが付けた」重複マーカーのみ除去（ゲームの素の '#2' は保持）。
-    CSVは素名のため照合に使用。"""
-    return re.sub(re.escape(DUP_MARK) + r'\d+$', '', str(name))
-
-
-def base_name(name):
-    """同族嫌悪の同名判定に使うベース名。
-    内部の重複マーカーと、ゲーム内の識別子 '#番号'（例 みんみん#795）を除いた部分を返す。
-    例: 'みんみん#795' → 'みんみん' / 'たかな' → 'たかな'。"""
-    s = bare(str(name))
-    return s.split('#', 1)[0].strip()
-
-
-def parse_trifecta_csv(path):
-    """3連単オッズCSV(順位,1着,2着,3着,オッズ) → {(1着,2着,3着): オッズ}。
-    『未成立』など数値でないオッズ行は除外。"""
-    df = pd.read_csv(path, encoding='utf-8-sig')
-    df['_o'] = pd.to_numeric(df['オッズ'], errors='coerce')
-    df = df[df['_o'].notna()]
-    out = {}
-    for _, r in df.iterrows():
-        out[(str(r['1着']).strip(), str(r['2着']).strip(), str(r['3着']).strip())] = float(r['_o'])
-    return out
-
-
-def parse_unified(text):
-    """統合フォーマット解析（ブックマークレット出力）。
-    戻り値: (horses, trifecta_odds, auto_dist, auto_track, guild, schedule_id, pool, n_tri_total)
-    n_tri_total = 3連単セクションの総行数（成立＋未成立）。完全性チェック（CO診断の信頼判定）用。
-    """
-    horses, odds = [], {}
-    auto_dist, auto_track, guild, schedule_id, pool = None, None, None, None, None
-    n_tri_total = 0
-
-    gm = re.search(r'^guild=(\S+)',       text, re.M)
-    sm = re.search(r'^schedule_id=(\S+)', text, re.M)
-    pm = re.search(r'^pool=(\d+)',        text, re.M)
-    if gm: guild       = gm.group(1).strip()
-    if sm: schedule_id = sm.group(1).strip()
-    if pm: pool        = int(pm.group(1))
-
-    mh = re.search(r'===\s*出走馬一覧\s*===\s*\n(.*?)(?=\n\s*===|\Z)', text, re.S)
-    mo = re.search(r'===\s*3連単オッズ\s*===\s*\n(.*?)(?=\n\s*===|\Z)', text, re.S)
-
-    if mh:
-        df = pd.read_csv(io.StringIO(mh.group(1).strip()))
-
-        def _col_val(col):
-            if col not in df.columns or len(df) == 0:
-                return None
-            v = str(df[col].iloc[0]).strip()
-            return v if v not in ('', 'nan', 'None') else None
-
-        auto_dist  = _col_val('レース距離')
-        auto_track = _col_val('馬場')
-
-        for _, r in df.iterrows():
-            sp = pd.to_numeric(r.get('SPEED',   np.nan), errors='coerce')
-            pw = pd.to_numeric(r.get('POWER',   np.nan), errors='coerce')
-            st = pd.to_numeric(r.get('STAMINA', np.nan), errors='coerce')
-            if pd.isna(sp) or pd.isna(pw) or pd.isna(st):
-                continue
-
-            ov = str(r.get('単勝オッズ', '')).strip()
-            win_odds = pd.to_numeric(ov, errors='coerce')
-
-            horses.append({
-                'name':      str(r['馬名']).strip(),
-                'speed':     int(sp), 'power': int(pw), 'stamina': int(st),
-                'condition': str(r.get('コンディション', '普通')).strip(),
-                'passive':   normalize_passive(r.get('パッシブスキル', 'なし')),
-                'odds':      float(win_odds) if pd.notna(win_odds) else float('nan'),
-            })
-
-    if mo:
-        dfo = pd.read_csv(io.StringIO(mo.group(1).strip()))
-        n_tri_total = len(dfo)                    # 成立＋未成立の総数（完全性チェック用）
-        dfo['_o'] = pd.to_numeric(dfo['オッズ'], errors='coerce')
-        for _, r in dfo[dfo['_o'].notna()].iterrows():
-            key = (str(r['1着']).strip(), str(r['2着']).strip(), str(r['3着']).strip())
-            odds[key] = float(r['_o'])
-
-    return horses, odds, auto_dist, auto_track, guild, schedule_id, pool, n_tri_total
-
-
-
-# ====================================================================
-#  学習: ログCSV/TXT からモデルを構築して bundle を返す
-# ====================================================================
-def train_model(log_path, sigma_override=None,
-                balance_patch_date=DEFAULT_BALANCE_PATCH_DATE):
-    """レースログを読み込み RandomForest を学習。
-    戻り値 bundle(dict): model, X_columns, race_sigma, train_passives,
-      train_conditions, known_passives, oob_r2, oob_resid_std,
-      n_rows, n_drop, n_nodate, n_cond_unknown, messages(list)。
-    log_path が無い/空なら ok=False。"""
-    msgs = []
-    if not log_path or not os.path.exists(log_path):
-        return {'ok': False, 'messages': [f'ログが見つかりません: {log_path}'],
-                'model': None}
-
-    df_raw = parse_race_log(log_path)
-    n_all = len(df_raw)
-    if n_all == 0:
-        return {'ok': False, 'messages': ['ログを解析できませんでした（中身を確認してください）。'],
-                'model': None}
-
-    df_raw['_date'] = pd.to_datetime(df_raw['date'], format='%Y/%m/%d', errors='coerce')
-    patch_dt = pd.to_datetime(balance_patch_date, format='%Y/%m/%d')
-    n_nodate = int(df_raw['_date'].isna().sum())
-    df = (df_raw[df_raw['_date'] >= patch_dt]
-          .drop(columns=['date', '_date']).reset_index(drop=True))
-    n_drop = n_all - len(df)
-    if len(df) == 0:
-        return {'ok': False, 'model': None,
-                'messages': [f'対象レースが0件（{balance_patch_date}以降のデータがありません）。']}
-
-    known_passives = sorted(
-        [p for p in df['passive'].unique() if p and p != 'なし'], key=len, reverse=True)
-    train_passives = set(df['passive'].unique())
-    train_conditions = set(df['condition'].unique())
-    n_cond_unknown = int((df['condition'] == '不明').sum())
-
-    df_fe = add_features(df)
-    df_enc = pd.get_dummies(df_fe.drop(columns=['rank', 'name', 'race_key'],
-                                       errors='ignore'), columns=CAT_COLS)
-    X, y = df_enc.drop(columns=['score']), df_enc['score']
-    model = RandomForestRegressor(
-        n_estimators=200, oob_score=True, random_state=42, n_jobs=-1).fit(X, y)
-
-    oob_resid_std = float(np.std(y - model.oob_prediction_))
-    race_sigma = float(sigma_override) if sigma_override else max(oob_resid_std, 1e-6)
-    r2 = float(model.oob_score_)
-
-    msgs.append(f'学習完了  rows={len(X)}（対象外 {n_drop}行除外, うち日付不明 {n_nodate}行）  '
-                f'OOB_R²={r2:.3f}  OOB残差std={oob_resid_std:.2f} → RACE_SIGMA={race_sigma:.2f}'
-                + ('（手動上書き）' if sigma_override else ''))
-    msgs.append('攻略本由来の特徴量（理論スコア・スタミナ足切り）を学習に使用。')
-    if n_cond_unknown:
-        msgs.append(f'コンディション不明 {n_cond_unknown}行は「不明」カテゴリとして学習。')
-    if r2 >= 0.97:
-        msgs.append('⚠ OOB_R²が非常に高い＝スコアはほぼ決定論的。勝率は極端化しがち。実測で校正を。')
-    elif r2 < 0.4:
-        msgs.append('⚠ OOB_R²が低い＝モデルがスコアを説明できていない。勝率の信頼度は低い。')
-
-    return {'ok': True, 'model': model, 'X_columns': X.columns.tolist(),
-            'race_sigma': race_sigma, 'train_passives': train_passives,
-            'train_conditions': train_conditions, 'known_passives': known_passives,
-            'oob_r2': r2, 'oob_resid_std': oob_resid_std, 'n_rows': int(len(X)),
-            'n_drop': int(n_drop), 'n_nodate': int(n_nodate),
-            'n_cond_unknown': int(n_cond_unknown), 'messages': msgs}
-
-
-def _fetch_pool_api(guild, schedule_id, timeout=5):
-    """api.oasis.red からプール総額を取得（失敗時 None, エラーメッセージ）。"""
-    try:
-        import requests
-        r = requests.get(
-            f'https://api.oasis.red/api/trifecta/pool?guild={guild}&schedule_id={schedule_id}',
-            timeout=timeout)
-        pool = r.json().get('pool', 0) or 0
-        return int(pool), None
-    except Exception as e:
-        return None, f'プール取得失敗（口数計算スキップ）: {e}'
-
-
-# ====================================================================
-#  解析: 入力テキスト + bundle + settings → 構造化された結果(dict)
-# ====================================================================
-def recommend_win(single, settings):
-    """単勝モードの推奨。各馬の 勝率×単勝od の期待値とケリーで口数を配分。
-    単勝は3連単と独立: 1口=WIN_STAKE_UNIT(1,000rrc)、1頭 WIN_MAX_PER_HORSE(100口)、
-    1レース合計 WIN_MAX_TOTAL(100口)。"""
-    s = settings or {}
-    bankroll = s.get('bankroll', BANKROLL)
-    kf = s.get('kelly_fraction', KELLY_FRACTION)
-    risk = s.get('max_risk_frac', 0.10)
-    edge_min = s.get('edge_min', 0.10)
+def unformed_sleeve_picks(combo_prob, disp, od_of, P_total, p_min=0.05, edge_min=0.30,
+                          max_units=5, remaining_budget=MAX_TOTAL_UNITS,
+                          stake_unit=STAKE_UNIT):
+    if P_total <= 0 or max_units <= 0 or remaining_budget <= 0:
+        return []
+    eff = (P_total + stake_unit) / stake_unit
     cand = []
-    for r in single:
-        p = float(r.get('model_p') or 0.0)
-        o = r.get('odds')
-        if not o or o <= 1.0:
+    for idx, p in combo_prob.items():
+        names = tuple(disp[i] for i in idx)
+        if od_of(names) is not None:
             continue
-        edge = p * o - 1.0                     # 単勝の期待値（1口あたり）
+        if p < p_min or (p * eff - 1) < edge_min:
+            continue
+        cand.append((names, p))
+    cand.sort(key=lambda x: x[1], reverse=True)
+    cap = min(int(max_units), int(remaining_budget))
+    return [(names, p, eff, 1) for names, p in cand[:cap]]
+
+
+def win_bet_picks(names, win_p, odds, bankroll, kelly_frac, edge_min,
+                  max_units=WIN_MAX_UNITS, stake_unit=WIN_STAKE_UNIT, risk_cap_frac=0.10):
+    """単勝の推奨（参考）。表示オッズは自分の購入で下がるため、控えめの分数ケリー。
+    プール額が不明なので希薄化は織り込めない → 保守的に扱うこと。"""
+    out = []
+    cap_units = max(1, int((risk_cap_frac * bankroll) // stake_unit))
+    for i, nm in enumerate(names):
+        od = odds[i]
+        p = win_p[i]
+        if not np.isfinite(od) or od <= ODDS_FLOOR or p <= 0:
+            continue
+        edge = p * od - 1
         if edge < edge_min:
             continue
-        f_star = edge / (o - 1.0)              # 単勝の最適ケリー比
-        stake = f_star * kf * bankroll
-        units = int(stake // WIN_STAKE_UNIT)
-        units = min(units, WIN_MAX_PER_HORSE)  # 1頭上限（100口）
-        if units >= 1:
-            cand.append({'name': r['name'], 'model_p': p, 'odds': float(o),
-                         'edge': edge, 'k': units, 'below_cutoff': r.get('below_cutoff', False)})
-    cand.sort(key=lambda x: -x['edge'])
-    risk_units = int((risk * bankroll) // WIN_STAKE_UNIT)
-    budget = min(WIN_MAX_TOTAL, risk_units)    # 1レース合計上限（100口）
-    out, used = [], 0
-    for c in cand:
-        if used >= budget:
-            break
-        k = min(c['k'], budget - used)
-        if k < 1:
-            break
-        out.append({**c, 'k': k, 'cost': k * WIN_STAKE_UNIT,
-                    'ev': (c['model_p'] * c['odds'] - 1.0) * k * WIN_STAKE_UNIT})
-        used += k
+        f = edge / (od - 1)
+        k = int((kelly_frac * f * bankroll) // stake_unit)
+        k = max(0, min(k, max_units, cap_units))
+        if k >= 1:
+            out.append({'name': nm, 'p': float(p), 'odds': float(od),
+                        'edge': float(edge), 'units': int(k),
+                        'stake': int(k * stake_unit),
+                        'ev': float(edge * k * stake_unit)})
+    out.sort(key=lambda r: -r['ev'])
     return out
+
+
+# =====================================================================
+#  10. 解析
+# =====================================================================
+DEFAULT_SETTINGS = dict(
+    dist='中距離', track='芝', ground='良', topn=20,
+    bankroll=1_200_000, kelly_fraction=0.25, max_risk_frac=0.10, edge_min=0.10,
+    carryover_rrc=None, csv_path='',
+    unformed_sleeve=False, unformed_max_units=5,
+    unformed_p_min=0.05, unformed_edge_min=0.30,
+    win_bets=False, win_edge_min=0.15,
+    n_sim=N_SIM, spec_path=None,
+)
 
 
 def analyze(raw_text, bundle, settings=None):
     s = dict(DEFAULT_SETTINGS)
     if settings:
-        s.update(settings)
+        s.update({k: v for k, v in settings.items() if v is not None or k in DEFAULT_SETTINGS})
     if not bundle or not bundle.get('ok'):
-        return {'ok': False, 'error': 'モデル未学習。先にログを読み込んでください。'}
-
-    model = bundle['model']
-    X_columns = bundle['X_columns']
-    race_sigma = bundle['race_sigma']
-    train_passives = bundle['train_passives']
-    train_conditions = bundle['train_conditions']
+        return {'ok': False, 'error': 'モデル未学習。先にログを読み込んで学習してください。'}
 
     res = {'ok': True, 'error': None, 'messages': [], 'pool_msgs': []}
     P_total = 0
+    csv_odds = None
+    n_tri_total = 0
 
-    # --- 入力解析 ---
     if '出走馬一覧' in raw_text:
-        (horses, csv_odds, auto_dist, auto_track,
+        (horses, csv_odds, a_dist, a_track, a_ground,
          guild, schedule_id, clip_pool, n_tri_total) = parse_unified(raw_text)
-        if auto_dist:
-            s['dist'] = auto_dist
-            res['messages'].append(f'距離を自動設定: {auto_dist}')
-        if auto_track:
-            s['track'] = auto_track
-            res['messages'].append(f'馬場を自動設定: {auto_track}')
+        res['auto_race_info'] = bool(a_dist and a_track)
+        for key, val, label in [('dist', a_dist, '距離'), ('track', a_track, '馬場'),
+                                ('ground', a_ground, '地面')]:
+            if val:
+                s[key] = val
+                res['messages'].append(f'{label}を自動設定: {val}')
         if clip_pool is not None:
             P_total = int(clip_pool)
             res['messages'].append(f'プール総額: {P_total:,} rrc（貼り付けデータから取得）')
@@ -904,65 +1597,98 @@ def analyze(raw_text, bundle, settings=None):
                 res['messages'].append('⚠ ' + err)
     else:
         horses = parse_betting_screen(raw_text)
-        csv_odds = None
-        n_tri_total = 0
+        res['auto_race_info'] = False
+        res['messages'].append(
+            f'⚠ 購入画面の貼り付けにはレース条件が含まれていません。'
+            f'サイドバーの設定（**{s["dist"]}・{s["track"]}・{s["ground"]}**）で計算します。'
+            '距離が違うと結果は大きく変わるので、必ず合わせてください。')
 
     if not horses:
         return {'ok': False, 'error': 'データ読み込み失敗（フォーマットを確認してください）。'}
 
-    # 未学習パッシブ/コンディション警告
-    unseen_pass = sorted({h['passive'] for h in horses if h['passive'] not in train_passives})
-    unseen_cond = sorted({h['condition'] for h in horses if h['condition'] not in train_conditions})
-    if unseen_pass:
-        res['messages'].append('⚠ 未学習パッシブ（勝率に反映されずbaseline扱い）: ' + ', '.join(unseen_pass))
+    # 貼り付けデータにパッシブの説明文があれば数値スペックとして取り込む
+    res['spec_learned'] = []
+    learned = dict(parse_passive_descriptions(raw_text))
+    learned.update(parse_passive_effect_section(raw_text))
+    if learned:
+        cur = bundle.get('spec') or default_spec()
+        _, changed = merge_passive_spec(cur, learned, s.get('spec_path'))
+        res['spec_learned'] = changed
+        if changed:
+            res['messages'].append(
+                '📘 パッシブの数値を貼り付けから取り込みました（' + ', '.join(changed) +
+                '）。**再学習すると予測に反映されます。**')
+        else:
+            res['messages'].append(
+                f'📘 パッシブの説明文 {len(learned)}種を確認（すべて登録済みの数値と一致）。')
+
+    n = len(horses)
+    res['n_field'] = n
+    if n < MIN_FIELD_TRIFECTA:
+        res['messages'].append(
+            f'⚠ 出走 {n}頭。現行ルールでは {MIN_FIELD_TRIFECTA}頭未満のレースで3連単は購入できません'
+            '（単勝のみ）。')
+    if n > MAX_FIELD:
+        res['messages'].append(f'⚠ 出走 {n}頭は想定（最大{MAX_FIELD}頭）を超えています。')
+
+    # パッシブの健全性チェック
+    used = [p for h in horses for p in h.get('passives', ())]
+    unknown = sorted({p for p in used if p not in PASSIVE_CATALOG})
+    unseen = sorted({p for p in used if p in PASSIVE_CATALOG
+                     and bundle.get('passive_counts', {}).get(p, 0) == 0})
+    thin = sorted({p for p in used if p in PASSIVE_CATALOG
+                   and 0 < bundle.get('passive_counts', {}).get(p, 0) < 8})
+    if unknown:
+        res['messages'].append('⚠ カタログ外のパッシブ（効果0扱い）: ' + ', '.join(unknown))
+    if unseen:
+        res['messages'].append('⚠ 学習データに無いパッシブ（効果0扱い）: ' + ', '.join(unseen))
+    if thin:
+        res['messages'].append('△ サンプルが少ないパッシブ（推定が粗い）: ' + ', '.join(thin))
+    _same = same_species_flags([h.get('name', '') for h in horses],
+                               [h.get('species') for h in horses])
+    _kin = [h['name'] for i, h in enumerate(horses)
+            if _same[i] and '同族嫌悪' in h.get('passives', ())]
+    if _kin:
+        res['messages'].append('🔥 同族嫌悪が発動する馬: ' + ', '.join(_kin)
+                               + '（同じおあしすっちが同レースにいるため全ステータス+20%）')
+    n_pas2 = sum(1 for h in horses if len(h.get('passives', ())) >= 2)
+    res['messages'].append(f'パッシブ2枠の馬: {n_pas2}/{n}頭')
+
+    unseen_cond = sorted({h.get('condition', '普通') for h in horses
+                          if h.get('condition') not in bundle.get('train_conditions', set())})
     if unseen_cond:
         res['messages'].append('⚠ 未学習コンディション（baseline扱い）: ' + ', '.join(unseen_cond))
 
     res['dist'], res['track'], res['ground'] = s['dist'], s['track'], s['ground']
 
-    # 同族嫌悪の発動判定（このレースにベース名が同じ馬が2頭以上いるか）
-    bn_list = [base_name(h['name']) for h in horses]
-    bn_count = {}
-    for b in bn_list:
-        bn_count[b] = bn_count.get(b, 0) + 1
-
-    def _kindred_on(i):
-        return (normalize_passive(horses[i]['passive']) == '同族嫌悪'
-                and bn_count[bn_list[i]] >= 2)
-
-    fired = sorted({bn_list[i] for i in range(len(horses)) if _kindred_on(i)})
-    if fired:
-        res['messages'].append('🦊 同族嫌悪 発動: ' + ', '.join(fired)
-                               + '（同名馬がいるため強化）')
-
     # --- 予測 + シミュレーション ---
-    new_df = add_features(pd.DataFrame([{
-        **h, 'dist': s['dist'], 'track': s['track'], 'g_cond': s['ground']} for h in horses]))
-    new_enc = pd.get_dummies(new_df.drop(columns=['name']), columns=CAT_COLS) \
-        .reindex(columns=X_columns, fill_value=0)
-    base = model.predict(new_enc)
-    ranks = simulate_rankings(base, race_sigma)
+    base = predict_base(bundle, horses, s['dist'], s['track'])
+    sigma = bundle['race_sigma']
+    n_sim = int(s.get('n_sim') or N_SIM)
+    sig_vec = horse_sigmas(bundle, horses, sigma)
+    win_p, combo_prob = simulate_trifecta(base, sig_vec, n_sim=n_sim)
+    n_steady = int((sig_vec < sigma * 0.999).sum())
+    if n_steady:
+        res['messages'].append(
+            f'分散低減スキル（安定感など）を {n_steady}頭に反映しました'
+            f'（σ×{float(sig_vec.min()/sigma):.2f}）。')
     disp = disambiguate([h['name'] for h in horses])
-    n = len(base)
 
-    win_p = (ranks[:, 0:1] == np.arange(n)).mean(axis=0)
     odds = np.array([h.get('odds', np.nan) for h in horses], dtype=float)
     mkt_p = market_win_prob(odds)
 
-    # 単勝テーブル（参考）
-    cutoff_map = STAMINA_CUTOFF
+    # 寄与の内訳（なぜこの馬が強い/弱いか）
+    contrib = _contributions(bundle, horses, s['dist'], s['track'])
+
     order = np.argsort(-win_p)
     single = []
     for i in order:
         h = horses[i]
-        stam_mult = effective_passive_mult(
-            h['passive'], s['dist'], s['track'], _kindred_on(i))[2]
-        stam_eff = h['stamina'] * stam_mult
-        cut = cutoff_map.get(s['dist'], 0)
         row = {'name': disp[i], 'model_p': float(win_p[i]), 'market_p': None,
-               'odds': None, 'tag': '',
-               'below_cutoff': bool(stam_eff < cut),
-               'stam_margin': float(stam_eff - cut)}
+               'odds': None, 'tag': '', 'base': float(base[i]),
+               'passives': ' / '.join(h.get('passives', ())) or 'なし',
+               'condition': h.get('condition', '普通'),
+               'contrib': contrib[i]}
         if mkt_p is not None:
             row['market_p'] = float(mkt_p[i])
             od = odds[i]
@@ -976,21 +1702,18 @@ def analyze(raw_text, bundle, settings=None):
         single.append(row)
     res['single_win'] = single
     res['model_pick'] = disp[order[0]]
-    below = [r['name'] for r in single if r.get('below_cutoff')]
-    if below:
-        res['messages'].append(
-            f'⚠ スタミナ足切り未満（{s["dist"]}は最低{STAMINA_CUTOFF.get(s["dist"], "?")}）'
-            f': {", ".join(below)} → スコア大幅減。実質的に上位は厳しい。')
     res['has_market'] = mkt_p is not None
-    res['win_recs'] = recommend_win(single, s)
 
-    # 3連単確率
-    idx_counts = {}
-    for r3 in ranks[:, :3]:
-        key = (int(r3[0]), int(r3[1]), int(r3[2]))
-        idx_counts[key] = idx_counts.get(key, 0) + 1
-    combo_prob = {k: v / N_SIM for k, v in idx_counts.items()}
+    # 単勝の推奨（任意）。1口の単位は貼り付け画面の『1口（N rrc）』から自動検出。
+    win_unit = detect_stake_unit(raw_text, default=WIN_STAKE_UNIT)
+    res['win_unit'] = win_unit
+    res['win_picks'] = []
+    if s.get('win_bets') and mkt_p is not None:
+        res['win_picks'] = win_bet_picks(
+            disp, win_p, odds, s['bankroll'], s['kelly_fraction'],
+            s.get('win_edge_min', 0.15), stake_unit=win_unit)
 
+    # --- 3連単 ---
     exact_cp, name_cp = {}, {}
     for (i, j, k), p in combo_prob.items():
         ek = (disp[i], disp[j], disp[k])
@@ -1007,7 +1730,6 @@ def analyze(raw_text, bundle, settings=None):
             return name_cp[bk], 'bare'
         return 0.0, 'none'
 
-    # CSVオッズ（統合に無ければCSVファイル）
     if csv_odds is None:
         path = (s.get('csv_path') or '').strip()
         if path and os.path.exists(path):
@@ -1020,18 +1742,19 @@ def analyze(raw_text, bundle, settings=None):
     res['purchase_lines'] = []
     res['pool'] = P_total
     res['has_csv'] = bool(csv_odds)
+    res['mc_note'] = (f'モンテカルロ {n_sim:,} 試行 / σ={sigma:.4f}。'
+                      f'確率 0.01% 付近の組は±10%程度のブレがあります。')
 
-    # 成立オッズ逆引き（disp名→od）。スリーブ判定・ランキング双方で使用。
     odds_exact, odds_bare = {}, {}
     if csv_odds:
         for (a, b, c), od in csv_odds.items():
             odds_exact[(a, b, c)] = od
             odds_bare[(bare(a), bare(b), bare(c))] = od
 
-    def od_of(names):
-        if names in odds_exact:
-            return odds_exact[names]
-        return odds_bare.get(tuple(bare(x) for x in names))
+    def od_of(nm):
+        if nm in odds_exact:
+            return odds_exact[nm]
+        return odds_bare.get(tuple(bare(x) for x in nm))
 
     if csv_odds:
         rows = []
@@ -1046,17 +1769,14 @@ def analyze(raw_text, bundle, settings=None):
                         unmatched.add(nm)
             rows.append((combo, p, od, STAKE_UNIT * (p * od - 1)))
         rows.sort(key=lambda x: x[3], reverse=True)
-        mode = ('完全名一致' if how_counts['exact'] and not how_counts['bare']
-                else '素名フォールバック' if how_counts['bare'] and not how_counts['exact']
-                else '混在')
-        res['mode'] = mode
+        res['mode'] = ('完全名一致' if how_counts['exact'] and not how_counts['bare']
+                       else '素名フォールバック' if how_counts['bare'] and not how_counts['exact']
+                       else '混在')
         res['bare_used'] = bool(how_counts['bare'])
         res['unmatched_names'] = sorted(unmatched)
 
-        # キャリーオーバー診断
         if P_total > 0:
-            n_h = len(horses)
-            expected = n_h * (n_h - 1) * (n_h - 2) if n_h >= 3 else 0
+            expected = n * (n - 1) * (n - 2) if n >= 3 else 0
             co_trust = (n_tri_total > 0 and n_tri_total == expected)
             payout_pool, cinfo = resolve_payout_pool(
                 P_total, csv_odds.values(),
@@ -1068,17 +1788,12 @@ def analyze(raw_text, bundle, settings=None):
                 res['pool_msgs'].append(f'Σ(1/od)={inv:.3f} → 控除0%・CO無し。プール {P_total:,} rrc。')
             elif reg == 'carryover_added':
                 res['pool_msgs'].append(
-                    f'Σ(1/od)={inv:.3f} → キャリーオーバー検出（推定CO ≈ {cinfo["carryover"]:,.0f} rrc）。'
-                    f'pool=実ベット総額とみなし加算 → 払戻プール {payout_pool:,.0f} rrc で計算。'
-                    'ゲーム表示のCO額と一致するか確認を。')
+                    f'Σ(1/od)={inv:.3f} → キャリーオーバー検出（推定 ≈ {cinfo["carryover"]:,.0f} rrc）。'
+                    f'払戻プール {payout_pool:,.0f} rrc で計算。')
                 P_total = int(round(payout_pool))
             elif reg == 'carryover_untrusted':
                 res['pool_msgs'].append(
-                    f'Σ(1/od)={inv:.3f} → CO検出だが全{expected}組中{n_tri_total}組のみで不完全 → '
-                    '自動補正せず。全組のオッズを貼れば補正します。')
-            elif reg == 'carryover_in_pool':
-                res['pool_msgs'].append(
-                    f'Σ(1/od)={inv:.3f} → CO検出。poolは払戻総額(CO内包)とみなし補正なし。')
+                    f'Σ(1/od)={inv:.3f} → CO検出だが全{expected}組中{n_tri_total}組のみで不完全 → 補正なし。')
             elif reg == 'manual':
                 res['pool_msgs'].append(
                     f'手動CO {cinfo["carryover"]:,.0f} rrc を加算 → 払戻プール {payout_pool:,.0f} rrc。')
@@ -1087,7 +1802,6 @@ def analyze(raw_text, bundle, settings=None):
                 res['pool_msgs'].append(f'Σ(1/od)={inv:.3f} は異常値 → 安全側で補正なし。')
         res['pool'] = P_total
 
-        # 安定運用配分
         alloc = allocate_units_stable(
             [(c, p, od) for c, p, od, ev in rows], P_total,
             bankroll=s['bankroll'], kelly_frac=s['kelly_fraction'],
@@ -1108,7 +1822,6 @@ def analyze(raw_text, bundle, settings=None):
                 purchase_lines += [' ✅' + ' → '.join(combo)] * k
                 total_units += k
 
-        # 未成立スリーブ（任意・少額キャップ）。成立配分の残り予算内で各組1口。
         n_unformed = 0
         if s.get('unformed_sleeve') and P_total > 0:
             sleeve = unformed_sleeve_picks(
@@ -1146,20 +1859,17 @@ def analyze(raw_text, bundle, settings=None):
             'n_formed': total_units - n_unformed, 'n_unformed': n_unformed,
             'sleeve_on': bool(s.get('unformed_sleeve'))}
     else:
-        # CSV未指定: 損益分岐表
         ranked = sorted(combo_prob.items(), key=lambda x: x[1], reverse=True)
-        be = []
-        for idx, p in ranked[:max(int(s['topn']), 1)]:
-            be.append({'combo': ' → '.join(disp[i] for i in idx),
-                       'model_p': p, 'need_od': (1 / p if p > 0 else float('inf'))})
-        res['breakeven_rows'] = be
+        res['breakeven_rows'] = [
+            {'combo': ' → '.join(disp[i] for i in idx), 'model_p': p,
+             'need_od': (1 / p if p > 0 else float('inf'))}
+            for idx, p in ranked[:max(int(s['topn']), 1)]]
         res['mode'] = None
         res['summary'] = None
         res['alloc_rows'] = []
         res['bare_used'] = False
         res['unmatched_names'] = []
 
-    # 的中確率ランキング（1口購入時の実効オッズ付き）
     ranked_p = sorted(combo_prob.items(), key=lambda x: x[1], reverse=True)
     shown = ranked_p[:max(int(s['topn']), 1)]
     ranking, cum = [], 0.0
@@ -1167,72 +1877,131 @@ def analyze(raw_text, bundle, settings=None):
         cum += p
         names = tuple(disp[i] for i in idx)
         od = od_of(names)
-        flag = '成' if od else '未'
+        row = {'rank': rk, 'combo': ' → '.join(names), 'model_p': p, 'cum': cum,
+               'flag': ('成' if od else '未'), 'eff1_od': None, 'ev1': None,
+               'plus_ev': False}
         if P_total > 0:
             P_c = (P_total / od) if od else 0.0
             eff = (P_total + STAKE_UNIT) / (P_c + STAKE_UNIT)
-            ev1 = (p * eff - 1) * STAKE_UNIT
-            ranking.append({'rank': rk, 'combo': ' → '.join(names), 'model_p': p,
-                            'cum': cum, 'flag': flag, 'eff1_od': eff, 'ev1': ev1,
-                            'plus_ev': p * eff > 1})
-        else:
-            ranking.append({'rank': rk, 'combo': ' → '.join(names), 'model_p': p,
-                            'cum': cum, 'flag': flag, 'eff1_od': None, 'ev1': None,
-                            'plus_ev': False})
+            row.update(eff1_od=eff, ev1=(p * eff - 1) * STAKE_UNIT, plus_ev=(p * eff > 1))
+        ranking.append(row)
     res['ranking'] = ranking
     res['ranking_pool_known'] = P_total > 0
     res['ranking_cover'] = min(cum, 1.0)
-    res['horses_disp'] = list(disp)        # 結果入力(着順)ドロップダウン用
+    res['horses_disp'] = list(disp)
+    res['passive_effects'] = passive_effects(bundle, s['dist'], s['track'])
     return res
 
 
-# ====================================================================
-#  ベットログ（ローカルCSVに永続化）
-# ====================================================================
-LOG_COLUMNS = ['bet_id', 'time', 'race_id', 'combo', 'model_prob',
+def _contributions(bundle, horses, dist, track):
+    """各馬の予測値を「ステータス由来 / コンディション / パッシブ」に分解する。
+    パッシブは実効ステータスに畳み込まれているので、素ステータスとの差分で寄与を出す。"""
+    coef = dict(zip(bundle['feature_names'], bundle['model'].coef_))
+    spec = bundle.get('spec') or default_spec()
+    b_sp = coef.get(f'{dist}:log(SP)', 0.0)
+    b_pw = coef.get(f'{dist}:log(PW)', 0.0)
+    b_st = coef.get(f'{dist}:log(ST)', 0.0)
+    same = same_species_flags([h.get('name', '') for h in horses],
+                              [h.get('species') for h in horses])
+    out = []
+    for hi, h in enumerate(horses):
+        ctx = {'same_species': same[hi]}
+        e = effective_stats(h['speed'], h['power'], h['stamina'],
+                            h.get('passives', ()), dist, track, spec, ctx)
+        sp = math.log(max(float(h['speed']), 1.0))
+        pw = math.log(max(float(h['power']), 1.0))
+        st = math.log(max(float(h['stamina']), 1.0))
+        c_sp = b_sp * sp
+        c_pw = b_pw * pw
+        c_st = b_st * st
+        c_spec = (b_sp * (math.log(e['speed']) - sp)
+                  + b_pw * (math.log(e['power']) - pw)
+                  + b_st * (math.log(e['stamina']) - st))
+        cond = h.get('condition', '普通')
+        c_cond = coef.get('好調', 0.0) if cond == '好調' else (
+            coef.get('不調', 0.0) if cond == '不調' else 0.0)
+        c_pass, detail = c_spec, []
+        for p in h.get('passives', ()):
+            sp_ = spec.get(p)
+            if sp_ and sp_.get('mult'):
+                e1 = effective_stats(h['speed'], h['power'], h['stamina'], (p,),
+                                     dist, track, spec, ctx)
+                v = (b_sp * (math.log(e1['speed']) - sp)
+                     + b_pw * (math.log(e1['power']) - pw)
+                     + b_st * (math.log(e1['stamina']) - st))
+            elif sp_ and sp_.get('scope') == 'variance':
+                v = 0.0
+            elif PASSIVE_CATALOG.get(p) == 'aptitude':
+                col, val = APTITUDE_MATCH[p]
+                ok = (track == val) if col == 'track' else (dist == val)
+                v = coef.get(p, 0.0) if ok else 0.0
+                c_pass += v
+            elif p in PASSIVE_CATALOG:
+                v = coef.get(p, 0.0) + INTERACTION_SHRINK * coef.get(f'{p}×{dist}', 0.0)
+                c_pass += v
+            else:
+                v = 0.0
+            detail.append((p, float(v)))
+        out.append({'speed': c_sp, 'power': c_pw, 'stamina': c_st,
+                    'condition': float(c_cond), 'passive': float(c_pass),
+                    'passive_detail': detail})
+    return out
+
+
+# =====================================================================
+#  11. ベットログ
+# =====================================================================
+LOG_COLUMNS = ['bet_id', 'time', 'race_id', 'bet_type', 'combo', 'model_prob',
                'odds', 'stake', 'status', 'result', 'payout', 'pnl']
 
 
 class BetLog:
-    """賭けた✅と結果をローカルCSVに記録し、モデルの的中率を答え合わせする。"""
+    """賭けと結果の記録。保存先はローカルCSV、または store（Google スプレッドシート等）。
 
-    def __init__(self, path, race_sigma=None, store=None):
-        """store を渡すと外部ストレージ（Google Sheets 等）に読み書きする。
-        store=None のときは従来どおりローカルCSV（self.path）を使う。
-        store は read_df()->DataFrame と write_df(DataFrame) を持つオブジェクト。"""
-        self.path = path
+    store は read_df() / write_df(df) の2メソッドだけ持てばよい。
+    store が指定されていればそちらを優先し、無ければ path の CSV を使う。
+    """
+
+    def __init__(self, path=None, race_sigma=None, store=None):
+        self.path = path or 'oasis_bet_log.csv'
         self.race_sigma = race_sigma
         self.store = store
 
-    def _coerce(self, df):
-        """読み込んだ生データの型を整える（CSV/Sheets 共通）。"""
-        for c in ['race_id', 'combo', 'status', 'result', 'time']:
+    @property
+    def location(self):
+        return 'Google スプレッドシート' if self.store else self.path
+
+    def _normalize(self, df):
+        if df is None or len(df) == 0:
+            return pd.DataFrame(columns=LOG_COLUMNS)
+        if 'bet_type' not in df.columns:
+            df['bet_type'] = '3連単'
+        for c in ['race_id', 'combo', 'status', 'result', 'time', 'bet_type']:
             if c in df.columns:
                 df[c] = df[c].fillna('').astype(str)
         for c in ['bet_id', 'model_prob', 'odds', 'stake', 'payout', 'pnl']:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors='coerce')
-        return df
+        for c in LOG_COLUMNS:
+            if c not in df.columns:
+                df[c] = '' if c in ('result', 'combo', 'status') else 0
+        return df[LOG_COLUMNS]
 
     def load(self):
-        # 外部ストレージ（Google Sheets 等）
         if self.store is not None:
             try:
-                df = self.store.read_df()
+                return self._normalize(self.store.read_df())
             except Exception:
                 return pd.DataFrame(columns=LOG_COLUMNS)
-            if df is None or len(df) == 0:
-                return pd.DataFrame(columns=LOG_COLUMNS)
-            return self._coerce(df)
-        # ローカルCSV（従来動作）
         if os.path.exists(self.path):
             try:
-                return self._coerce(pd.read_csv(self.path, encoding='utf-8-sig'))
+                return self._normalize(pd.read_csv(self.path, encoding='utf-8-sig'))
             except Exception:
                 pass
         return pd.DataFrame(columns=LOG_COLUMNS)
 
     def _save(self, df):
+        df = self._normalize(df)
         if self.store is not None:
             self.store.write_df(df)
             return
@@ -1242,8 +2011,6 @@ class BetLog:
         df.to_csv(self.path, index=False, encoding='utf-8-sig')
 
     def race_horses(self, race_id):
-        """指定レースで記録済みの買い目から、出走馬名（disp名）の一覧を復元。
-        精算時の着順ドロップダウンを、直近の解析レースに依存せず正しく出すために使う。"""
         df = self.load()
         if len(df) == 0:
             return []
@@ -1260,16 +2027,16 @@ class BetLog:
         df = self.load()
         return bool((df['race_id'].astype(str) == str(race_id)).any()) if len(df) else False
 
-    def record(self, race_id, picks, unit=STAKE_UNIT):
-        """picks: [(combo_tuple, model_prob, odds, units), ...] を pending として追記。"""
+    def record(self, race_id, picks, unit=STAKE_UNIT, bet_type='3連単'):
         df = self.load()
         base = int(df['bet_id'].max()) + 1 if len(df) else 1
         new = []
         for i, (combo, prob, od, units) in enumerate(picks):
+            name = ' → '.join(combo) if isinstance(combo, (tuple, list)) else str(combo)
             new.append({'bet_id': base + i,
                         'time': datetime.now().isoformat(timespec='seconds'),
-                        'race_id': race_id, 'combo': ' → '.join(combo),
-                        'model_prob': round(float(prob), 4), 'odds': float(od),
+                        'race_id': race_id, 'bet_type': bet_type, 'combo': name,
+                        'model_prob': round(float(prob), 5), 'odds': float(od),
                         'stake': int(units) * int(unit), 'status': 'pending',
                         'result': '', 'payout': 0, 'pnl': 0})
         df = pd.concat([df, pd.DataFrame(new)], ignore_index=True)
@@ -1277,16 +2044,18 @@ class BetLog:
         return len(new)
 
     def settle(self, race_id, order3):
-        """order3=(1着,2着,3着) で当該レースの pending を精算。"""
         df = self.load()
-        for col in ('payout', 'pnl', 'odds', 'stake'):       # int列へのfloat代入を防ぐ
+        for col in ('payout', 'pnl', 'odds', 'stake'):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
         actual = ' → '.join(order3)
+        winner = order3[0]
         mask = (df['race_id'].astype(str) == str(race_id)) & (df['status'] == 'pending')
         cnt = 0
         for idx in df[mask].index:
-            won = (df.at[idx, 'combo'] == actual)
+            bt = str(df.at[idx, 'bet_type']) if 'bet_type' in df.columns else '3連単'
+            won = (df.at[idx, 'combo'] == winner) if bt == '単勝' \
+                else (df.at[idx, 'combo'] == actual)
             df.at[idx, 'status'] = 'won' if won else 'lost'
             df.at[idx, 'result'] = actual
             pay = float(df.at[idx, 'odds']) * float(df.at[idx, 'stake']) if won else 0.0
@@ -1297,7 +2066,6 @@ class BetLog:
         return cnt
 
     def undo_last(self):
-        """直近 race_id のレコードを削除（取消）。戻り値: (race_id, 削除件数)。"""
         df = self.load()
         if len(df) == 0:
             return None, 0
@@ -1306,16 +2074,17 @@ class BetLog:
         self._save(keep)
         return last_rid, len(df) - len(keep)
 
-    def report(self):
-        """成績サマリを dict で返す（UIで描画）。"""
+    def report(self, bet_type=None):
         df = self.load()
         if len(df) == 0:
             return {'empty': True, 'path': self.path}
+        if bet_type:
+            df = df[df['bet_type'] == bet_type]
         settled = df[df['status'].isin(['won', 'lost'])].copy()
-        pending = int((df['status'] == 'pending').sum())
         out = {'empty': False, 'path': self.path, 'n_total': len(df),
-               'n_settled': len(settled), 'n_pending': pending, 'buckets': [],
-               'calib_hint': None, 'overall': None}
+               'n_settled': len(settled),
+               'n_pending': int((df['status'] == 'pending').sum()),
+               'buckets': [], 'calib_hint': None, 'overall': None}
         if len(settled) == 0:
             return out
         stake = float(settled['stake'].sum())
@@ -1324,9 +2093,8 @@ class BetLog:
         hits = int((settled['status'] == 'won').sum())
         out['overall'] = {
             'stake': stake, 'payout': ret, 'pnl': pnl,
-            'roi': (pnl / stake * 100 if stake else 0),
-            'hits': hits, 'n': len(settled),
-            'hit_rate': hits / len(settled) * 100,
+            'roi': (pnl / stake * 100 if stake else 0), 'hits': hits,
+            'n': len(settled), 'hit_rate': hits / len(settled) * 100,
             'pred_rate': float(settled['model_prob'].mean()) * 100}
         bins = [0, 0.02, 0.05, 0.10, 0.20, 1.01]
         labels = ['0-2%', '2-5%', '5-10%', '10-20%', '20%+']
@@ -1345,15 +2113,13 @@ class BetLog:
         if len(settled) >= 20:
             if real < pred * 0.7:
                 out['calib_hint'] = (f'過信: 予測{pred*100:.2f}% > 実測{real*100:.2f}% → '
-                                     + (f'SIGMA_OVERRIDE を大きく（例 {rs*1.3:.1f}）にして再学習。'
-                                        if rs else 'σを大きくして再学習。'))
+                                     + (f'σを大きく（例 {rs*1.3:.3f}）にして再学習。' if rs else 'σを大きく。'))
             elif real > pred * 1.3:
                 out['calib_hint'] = (f'過小: 予測{pred*100:.2f}% < 実測{real*100:.2f}% → '
-                                     + (f'SIGMA_OVERRIDE を小さく（例 {rs*0.7:.1f}）にして再学習。'
-                                        if rs else 'σを小さくして再学習。'))
+                                     + (f'σを小さく（例 {rs*0.7:.3f}）にして再学習。' if rs else 'σを小さく。'))
             else:
                 out['calib_hint'] = (f'予測≈実測（{pred*100:.2f}% vs {real*100:.2f}%）→ '
-                                     + (f'現在の RACE_SIGMA={rs:.2f} は妥当。' if rs else '現在のσは妥当。'))
+                                     + (f'現在の σ={rs:.4f} は妥当。' if rs else '現在のσは妥当。'))
         else:
             out['calib_hint'] = f'サンプル{len(settled)}件では不十分（最低20件目安）。'
         return out

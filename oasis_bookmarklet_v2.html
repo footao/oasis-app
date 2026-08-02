@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>おあしすっち レースデータ取得 ブックマークレット v2</title>
+<style>
+* {box-sizing:border-box;margin:0;padding:0;}
+body {font-family:'Segoe UI','Hiragino Sans',sans-serif;background:#f5f5f0;color:#222;padding:2rem;}
+.card {background:#fff;border:1px solid #e0e0e0;border-radius:12px;padding:1.5rem 2rem;max-width:680px;margin:0 auto;}
+h1 {font-size:1.2rem;font-weight:600;margin-bottom:.3rem;}
+.sub {color:#666;font-size:.85rem;margin-bottom:1.6rem;}
+.step {display:flex;gap:1rem;margin-bottom:1.3rem;align-items:flex-start;}
+.num {background:#1a1a2e;color:#e2b96f;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:.82rem;font-weight:700;flex-shrink:0;margin-top:2px;}
+.step h3 {font-size:.9rem;font-weight:600;margin-bottom:.2rem;}
+.step p {font-size:.82rem;color:#555;line-height:1.6;}
+.bm-btn {display:inline-block;background:#1a1a2e;color:#e2b96f!important;text-decoration:none!important;padding:.6rem 1.2rem;border-radius:8px;font-size:.92rem;font-weight:700;border:2px solid #e2b96f;cursor:grab;box-shadow:0 2px 8px rgba(0,0,0,.18);margin:.5rem 0;user-select:none;}
+.hint {font-size:.76rem;color:#888;margin-top:.3rem;}
+hr {border:none;border-top:1px solid #eee;margin:1.3rem 0;}
+.note {font-size:.8rem;background:#fff8e1;border-left:3px solid #e2b96f;padding:.55rem .8rem;border-radius:0 6px 6px 0;margin-top:.5rem;color:#555;line-height:1.7;}
+.note.fix {background:#e8f5e9;border-left-color:#4caf50;}
+.alt {background:#f8f8f8;border-radius:8px;padding:1rem;}
+.alt h4 {font-size:.83rem;font-weight:600;color:#444;margin-bottom:.4rem;}
+.alt p {font-size:.78rem;color:#666;margin-bottom:.5rem;line-height:1.6;}
+.codebox {background:#1a1a2e;color:#a8d8ea;font-family:monospace;font-size:.7rem;padding:.65rem;border-radius:6px;white-space:pre-wrap;word-break:break-all;max-height:80px;overflow-y:auto;position:relative;}
+.copybtn {position:absolute;top:5px;right:5px;background:#e2b96f;color:#1a1a2e;border:none;border-radius:4px;padding:2px 7px;font-size:.73rem;cursor:pointer;font-weight:700;}
+pre.sample {background:#fafafa;border:1px solid #eee;border-radius:6px;padding:.7rem;font-size:.7rem;line-height:1.55;overflow-x:auto;color:#444;}
+footer {text-align:center;color:#aaa;font-size:.76rem;margin-top:1.6rem;}
+b.k {color:#1a1a2e;}
+</style>
+</head>
+<body>
+<div class="card">
+  <div style="text-align:center;margin-bottom:1.3rem">
+    <div style="font-size:1.8rem;margin-bottom:.3rem">🏇</div>
+    <h1>おあしすっち レースデータ一括取得 <span style="color:#4caf50;font-size:.8rem">v2</span></h1>
+    <p class="sub">券購入ページでワンクリック → 予測ツールにそのまま貼れる形でクリップボードへ</p>
+  </div>
+
+  <div class="note fix" style="margin-bottom:1.3rem">
+    <b>v2 の変更点</b><br>
+    ① <b class="k">パッシブ2枠に対応</b>（<code>passive_skill</code> と <code>passive_skill_2</code> の両方を取得）。<br>
+    ② <b class="k">スキル名の辞書を廃止</b>。購入ページ自身が持つ <code>PASSIVE_INFO</code> を読むので、
+    ゲームにスキルが追加されても<b>自動で追従</b>します（コードの取りこぼしゼロ）。<br>
+    ③ <b class="k">スキルの効果説明も出力</b>（<code>=== パッシブ効果 ===</code>）。
+    予測ツールがこの説明文から倍率を読み取って計算に使います。<br>
+    ④ <b class="k">成体種（adult_key）を出力</b>。同族嫌悪は「同じ<b>成体種</b>が出走している場合」に
+    発動するので、名前ではなく成体種で正しく判定できます。<br>
+    ⑤ 同名馬は <code>#1 / #2</code> で区別。コピーに失敗した環境では手動コピー用の枠を出します。<br>※ 地面（良/稍重など）はAPIが返さないため空欄になりますが、<b>予測結果には影響しません</b>（レース全体に等しく効くため、モデル内部で相殺されます）。
+  </div>
+
+  <div class="step">
+    <div class="num">1</div>
+    <div>
+      <h3>ブックマークバーを表示する</h3>
+      <p>Chrome: <b>Ctrl+Shift+B</b>（Mac: ⌘+Shift+B）</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">2</div>
+    <div>
+      <h3>ボタンをブックマークバーへドラッグ&amp;ドロップ</h3>
+      <a class="bm-btn" href="javascript:(async () =&gt; { const B=&#x27;https://api.oasis.red&#x27;; const q=new URLSearchParams(location.search); const G=q.get(&#x27;guild&#x27;), S=q.get(&#x27;race&#x27;)||q.get(&#x27;schedule_id&#x27;), U=q.get(&#x27;user&#x27;); if(!G||!S){alert(&#x27;おあしすっち券購入ページで実行してください&#x27;);return;} const btn=document.createElement(&#x27;div&#x27;); Object.assign(btn.style,{position:&#x27;fixed&#x27;,top:&#x27;12px&#x27;,right:&#x27;12px&#x27;,zIndex:&#x27;99999&#x27;,background:&#x27;#1a1a2e&#x27;,color:&#x27;#e2b96f&#x27;,padding:&#x27;10px 18px&#x27;,borderRadius:&#x27;8px&#x27;,fontFamily:&#x27;sans-serif&#x27;,fontSize:&#x27;14px&#x27;,fontWeight:&#x27;600&#x27;,boxShadow:&#x27;0 4px 12px rgba(0,0,0,.4)&#x27;,border:&#x27;1px solid #e2b96f&#x27;}); btn.textContent=&#x27;🏇 取得中...&#x27;;document.body.appendChild(btn); const csv=v=&gt;{const s=(v==null?&#x27;&#x27;:String(v)).replace(/\r?\n/g,&#x27; &#x27;);return /[&quot;,]/.test(s)?&#x27;&quot;&#x27;+s.replace(/&quot;/g,&#x27;&quot;&quot;&#x27;)+&#x27;&quot;&#x27;:s;}; try{ const DICT=(typeof PASSIVE_INFO!==&#x27;undefined&#x27;&amp;&amp;PASSIVE_INFO)||(window.PASSIVE_INFO)||{}; const dictOK=Object.keys(DICT).length&gt;0; const unknown=new Set(); const info=code=&gt;{ if(code==null||code===&#x27;none&#x27;)return null; const d=DICT[code]; if(d)return{code:code,label:d.label,emoji:d.emoji||&#x27;&#x27;,desc:d.description||&#x27;&#x27;}; unknown.add(code);return{code:code,label:code,emoji:&#x27;&#x27;,desc:&#x27;&#x27;}; }; btn.textContent=&#x27;🏇 レースデータ取得中...&#x27;; const race=await(await fetch(`${B}/api/race/by-id/${G}/${S}?user=${U}`)).json(); const raw=race.pets||[], dist=race.distance||&#x27;&#x27;, surf=race.surface||&#x27;&#x27;; const ground=race.ground||race.track_condition||race.ground_condition||&#x27;&#x27;; const cnt={};raw.forEach(h=&gt;{cnt[h.name]=(cnt[h.name]||0)+1;}); const seen={}; const pets=raw.map(h=&gt;{ let dn=h.display_name||h.name; if(cnt[h.name]&gt;1){seen[h.name]=(seen[h.name]||0)+1;dn=`${h.name}#${seen[h.name]}`;} const p1=info(h.passive_skill), p2=info(h.passive_skill_2); return {...h,displayName:dn,p1:p1,p2:p2}; }); const effRows=[],effSeen=new Set(); pets.forEach(h=&gt;[h.p1,h.p2].forEach(p=&gt;{ if(p&amp;&amp;!effSeen.has(p.label)){effSeen.add(p.label); effRows.push(`${csv(p.label)},${csv(p.code)},${csv(p.desc)}`);} })); const horseHeader=&#x27;レース距離,馬場,地面,馬名,成体種,SPEED,POWER,STAMINA,コンディション,パッシブスキル1,パッシブスキル2,単勝オッズ&#x27;; const horseRows=pets.map(h=&gt;[dist,surf,ground,h.displayName,h.adult_key||&#x27;&#x27;,h.speed,h.power,h.stamina,h.condition_label,(h.p1?h.p1.label:&#x27;&#x27;),(h.p2?h.p2.label:&#x27;&#x27;),h.odds].map(csv).join(&#x27;,&#x27;)); const n=pets.length, total=n*(n-1)*(n-2); btn.textContent=`🏇 3連単 ${total}通り 取得中...`; const combos=[]; for(const a of pets)for(const b of pets){if(b.pet_id===a.pet_id)continue; for(const x of pets){if(x.pet_id===a.pet_id||x.pet_id===b.pet_id)continue;combos.push([a,b,x]);}} const results=[]; for(let i=0;i&lt;combos.length;i+=20){ const batch=combos.slice(i,i+20); const got=await Promise.all(batch.map(async([a,b,x])=&gt;{try{ const d=await(await fetch(`${B}/api/trifecta/odds?guild=${G}&amp;schedule_id=${S}&amp;first=${a.pet_id}&amp;second=${b.pet_id}&amp;third=${x.pet_id}`)).json(); return{first:a.displayName,second:b.displayName,third:x.displayName,odds:typeof d.odds===&#x27;number&#x27;?d.odds:null}; }catch{return null;}})); results.push(...got.filter(Boolean)); btn.textContent=`🏇 3連単 ${Math.min(i+20,combos.length)}/${combos.length} 取得中...`; } const withOdds=results.filter(r=&gt;r.odds!==null).sort((a,b)=&gt;a.odds-b.odds); const noOdds=results.filter(r=&gt;r.odds===null); btn.textContent=&#x27;🏇 プール取得中...&#x27;; let poolAmt=0; try{poolAmt=(await(await fetch(`${B}/api/trifecta/pool?guild=${G}&amp;schedule_id=${S}`)).json()).pool||0;}catch{} const clip=[`guild=${G}`,`schedule_id=${S}`,`pool=${poolAmt}`,&#x27;&#x27;, &#x27;=== 出走馬一覧 ===&#x27;,horseHeader,...horseRows,&#x27;&#x27;, &#x27;=== パッシブ効果 ===&#x27;,&#x27;パッシブ,コード,説明&#x27;,...effRows,&#x27;&#x27;, &#x27;=== 3連単オッズ ===&#x27;,&#x27;順位,1着,2着,3着,オッズ&#x27;, ...withOdds.map((r,i)=&gt;`${i+1},${csv(r.first)},${csv(r.second)},${csv(r.third)},${r.odds}`), ...noOdds.map(r=&gt;`未成立,${csv(r.first)},${csv(r.second)},${csv(r.third)},未成立`)].join(&#x27;\n&#x27;); let copied=true; try{await navigator.clipboard.writeText(clip);}catch(e){copied=false;} if(!copied){ const ta=document.createElement(&#x27;textarea&#x27;); Object.assign(ta.style,{position:&#x27;fixed&#x27;,left:&#x27;2%&#x27;,top:&#x27;8%&#x27;,width:&#x27;96%&#x27;,height:&#x27;70%&#x27;,zIndex:&#x27;99998&#x27;,fontSize:&#x27;11px&#x27;,fontFamily:&#x27;monospace&#x27;}); ta.value=clip;document.body.appendChild(ta);ta.focus();ta.select(); try{copied=document.execCommand(&#x27;copy&#x27;);}catch(e){} if(copied){ta.remove();}else{ta.title=&#x27;Ctrl+A → Ctrl+C でコピーしてください&#x27;;} } const warn=unknown.size?` ⚠未知コード:${[...unknown].join(&#x27;/&#x27;)}`:&#x27;&#x27;; if(unknown.size)console.warn(&#x27;Oasis: 辞書に無いパッシブコード:&#x27;,[...unknown]); const n2=pets.filter(h=&gt;h.p1&amp;&amp;h.p2).length; btn.style.background=unknown.size?&#x27;#e65100&#x27;:&#x27;#1b5e20&#x27;;btn.style.color=&#x27;#fff&#x27;; btn.style.borderColor=unknown.size?&#x27;#ff9800&#x27;:&#x27;#4caf50&#x27;; btn.textContent=`${copied?&#x27;✅&#x27;:&#x27;📋&#x27;} ${n}頭(2枠${n2}) | スキル${effRows.length}種 | 3連単${withOdds.length}件 | プール${poolAmt.toLocaleString()}rrc | ${copied?&#x27;コピー完了&#x27;:&#x27;下の枠を手動でコピー&#x27;}${warn}`; if(!dictOK)btn.textContent+=&#x27; ※辞書未検出&#x27;; setTimeout(()=&gt;btn.remove(),unknown.size?12000:7000); }catch(e){btn.style.background=&#x27;#b71c1c&#x27;;btn.style.borderColor=&#x27;#ef5350&#x27;;btn.textContent=&#x27;❌ エラー: &#x27;+e.message;setTimeout(()=&gt;btn.remove(),6000);} })();">🏇 レースデータ取得 v2</a>
+      <p class="hint">↑ このボタンをブックマークバーへドラッグ（既存のものは置き換えてください）</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">3</div>
+    <div>
+      <h3>券購入ページを開いてクリック</h3>
+      <p>右上に進捗が出ます。完了すると <b>何頭・2枠持ち何頭・スキル何種・3連単何件・プール</b> が表示され、
+      すべてクリップボードに入ります。あとは予測ツールの「予測」タブに貼るだけです。</p>
+    </div>
+  </div>
+
+  <hr>
+
+  <div class="alt">
+    <h4>📋 出力されるデータの形</h4>
+<pre class="sample">guild=1310885590094450739
+schedule_id=1837
+pool=1500000
+
+=== 出走馬一覧 ===
+レース距離,馬場,地面,馬名,成体種,SPEED,POWER,STAMINA,コンディション,パッシブスキル1,パッシブスキル2,単勝オッズ
+マイル,ダート,良,メビウス,hyou,159,49,47,好調,スピードスター,マイル得意,1.0
+...
+
+=== パッシブ効果 ===
+パッシブ,コード,説明
+スピードスター,speed_star,スピードが35%上昇する代わりに、スタミナが10%低下する。
+マイル得意,mile_special,マイルレースでは、全ステータスが15%上昇する。
+...
+
+=== 3連単オッズ ===
+順位,1着,2着,3着,オッズ
+1,メビウス,ういえれ,うるは,12.5
+...</pre>
+    <p style="margin-top:.6rem">予測ツール側はこの3セクションをすべて読みます。
+    <code>=== パッシブ効果 ===</code> の説明文は
+    <code>passive_spec.json</code> に蓄積され、<b>新スキルが増えても貼るだけで学習</b>します。</p>
+  </div>
+
+  <hr>
+
+  <div class="alt">
+    <h4>⚙️ 仕組み・トラブル時</h4>
+    <p>スキル名は購入ページの <code>PASSIVE_INFO</code> から取ります。
+    万一この辞書が見つからない場合はボタンに <b>※辞書未検出</b> と出て、
+    スキル欄にAPIのコード（<code>speed_star</code> 等）がそのまま入りますが、
+    予測ツール側にも同じ対応表があるので<b>そのまま使えます</b>。</p>
+    <p>辞書に無いコードが出た場合は <b>⚠未知コード:○○</b> と表示されます。
+    ゲーム側に新スキルが追加されたサインなので、そのまま貼れば効果説明ごと取り込まれます。</p>
+  </div>
+
+  <hr>
+
+  <div class="alt">
+    <h4>⌨️ ドラッグできない場合（手動登録）</h4>
+    <p>新規ブックマーク作成 → 名前を入力 → URLに以下を貼り付け</p>
+    <div style="position:relative">
+      <div class="codebox" id="bm-code"></div>
+      <button class="copybtn" onclick="copyBm()">コピー</button>
+    </div>
+  </div>
+</div>
+
+<footer>おあしすっち レースデータ取得ツール v2 / パッシブ2枠・効果説明・成体種 対応</footer>
+
+<script>
+const RAW = document.querySelector('.bm-btn').getAttribute('href');
+document.getElementById('bm-code').textContent = RAW;
+function copyBm() {
+  navigator.clipboard.writeText(RAW).then(() => {
+    const b = document.querySelector('.copybtn');
+    b.textContent = '✓ 完了';
+    setTimeout(() => b.textContent = 'コピー', 2000);
+  }).catch(() => alert('コピーに失敗しました'));
+}
+</script>
+</body>
+</html>

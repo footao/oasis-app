@@ -11,11 +11,14 @@ Community Cloud では st.secrets に資格情報とシート情報を入れて�
 build_store_from_secrets(st.secrets) が SheetsStore を返す。
 secrets が無い（ローカル等）場合は None を返すので、呼び出し側は
 従来どおりローカルCSVにフォールバックできる。
+
+v2 で bet_type 列（3連単 / 単勝）が増えた。旧シート（bet_type なし）を読んでも
+BetLog 側で自動的に '3連単' を補うので、そのまま使い続けられる。
 """
 import pandas as pd
 
 # BetLog と同じ列順（oasis_core.LOG_COLUMNS と一致させる）
-LOG_COLUMNS = ['bet_id', 'time', 'race_id', 'combo', 'model_prob',
+LOG_COLUMNS = ['bet_id', 'time', 'race_id', 'bet_type', 'combo', 'model_prob',
                'odds', 'stake', 'status', 'result', 'payout', 'pnl']
 
 
@@ -33,16 +36,16 @@ class SheetsStore:
         values = self.ws.get_all_values()
         if not values:
             return pd.DataFrame(columns=LOG_COLUMNS)
-        header = values[0]
-        rows = values[1:]
-        if not header:
+        header = [str(h).strip() for h in values[0]]
+        if not any(header):
             return pd.DataFrame(columns=LOG_COLUMNS)
-        if not rows:
-            return pd.DataFrame(columns=header)
-        # 行ごとの列数のブレを吸収してから DataFrame 化
         width = len(header)
-        norm = [(r + [''] * width)[:width] for r in rows]
-        return pd.DataFrame(norm, columns=header)
+        rows = []
+        for r in values[1:]:
+            r = list(r)[:width] + [''] * max(0, width - len(r))
+            if any(str(x).strip() for x in r):
+                rows.append(r)
+        return pd.DataFrame(rows, columns=header)
 
     def write_df(self, df):
         header = list(df.columns) if len(df.columns) else LOG_COLUMNS
@@ -62,7 +65,6 @@ def build_store_from_secrets(secrets, *, default_worksheet='bet_log'):
             spreadsheet_id  = "..."   （または spreadsheet_url）
             worksheet       = "bet_log"   （任意・既定 bet_log）
     """
-    # サービスアカウントが無ければ Sheets モードにしない
     try:
         has_sa = 'gcp_service_account' in secrets
     except Exception:
@@ -103,5 +105,4 @@ def build_store_from_secrets(secrets, *, default_worksheet='bet_log'):
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=ws_name, rows=2000, cols=len(LOG_COLUMNS))
         ws.update(values=[LOG_COLUMNS], range_name='A1', value_input_option='RAW')
-
     return SheetsStore(ws)

@@ -1,0 +1,443 @@
+{
+ "スピードスター": {
+  "mult": {
+   "speed": 1.35,
+   "stamina": 0.9
+  },
+  "scope": "always",
+  "scope_arg": null,
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "スピードが35%上昇する代わりに、スタミナが10%低下する。",
+  "code": "speed_star"
+ },
+ "脳筋": {
+  "mult": {
+   "power": 1.35,
+   "speed": 0.9
+  },
+  "scope": "always",
+  "scope_arg": null,
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "パワーが35%上昇する代わりに、スピードが10%低下する。",
+  "code": "muscle_head"
+ },
+ "マイペース": {
+  "mult": {
+   "stamina": 1.35,
+   "power": 0.9
+  },
+  "scope": "always",
+  "scope_arg": null,
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "スタミナが35%上昇する代わりに、パワーが10%低下する。",
+  "code": "steady_runner"
+ },
+ "器用貧乏": {
+  "mult": {
+   "speed": 1.05,
+   "power": 1.05,
+   "stamina": 1.05
+  },
+  "scope": "always",
+  "scope_arg": null,
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "全ステータスが5%上昇する。",
+  "code": "jack_of_all"
+ },
+ "スピード大アップ": {
+  "mult": {
+   "speed": 1.25
+  },
+  "scope": "always",
+  "scope_arg": null,
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "スピードが25%上昇する。",
+  "code": "speed_l"
+ },
+ "パワー大アップ": {
+  "mult": {
+   "power": 1.25
+  },
+  "scope": "always",
+  "scope_arg": null,
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "パワーが25%上昇する。",
+  "code": "power_l"
+ },
+ "スタミナ大アップ": {
+  "mult": {
+   "stamina": 1.25
+  },
+  "scope": "always",
+  "scope_arg": null,
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "スタミナが25%上昇する。",
+  "code": "stamina_l"
+ },
+ "スピード小アップ": {
+  "mult": {
+   "speed": 1.15
+  },
+  "scope": "always",
+  "scope_arg": null,
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "スピードが15%上昇する。",
+  "code": "speed_s"
+ },
+ "パワー小アップ": {
+  "mult": {
+   "power": 1.15
+  },
+  "scope": "always",
+  "scope_arg": null,
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "パワーが15%上昇する。",
+  "code": "power_s"
+ },
+ "スタミナ小アップ": {
+  "mult": {
+   "stamina": 1.15
+  },
+  "scope": "always",
+  "scope_arg": null,
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "スタミナが15%上昇する。",
+  "code": "stamina_s"
+ },
+ "勝負師": {
+  "mult": {
+   "speed": 1.25,
+   "power": 1.25,
+   "stamina": 1.25
+  },
+  "scope": "conditional",
+  "scope_arg": null,
+  "duty": 0.05,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "レース開始時に5%の確率で発動し、全ステータスが25%上昇する。",
+  "code": "gambler"
+ },
+ "同族嫌悪": {
+  "mult": {
+   "speed": 1.2,
+   "power": 1.2,
+   "stamina": 1.2
+  },
+  "scope": "same_species",
+  "scope_arg": null,
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "同じ成体種のおあしすっちが出場している場合、全ステータスが20%上昇する。",
+  "code": "same_kind_boost"
+ },
+ "芝得意": {
+  "mult": {
+   "speed": 1.1,
+   "power": 1.1,
+   "stamina": 1.1
+  },
+  "scope": "aptitude",
+  "scope_arg": "芝",
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "芝レースでは、全ステータスが10%上昇する。",
+  "code": "turf_specialist"
+ },
+ "ダート得意": {
+  "mult": {
+   "speed": 1.1,
+   "power": 1.1,
+   "stamina": 1.1
+  },
+  "scope": "aptitude",
+  "scope_arg": "ダート",
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "ダートレースでは、全ステータスが10%上昇する。",
+  "code": "dirt_specialist"
+ },
+ "短距離得意": {
+  "mult": {
+   "speed": 1.15,
+   "power": 1.15,
+   "stamina": 1.15
+  },
+  "scope": "aptitude",
+  "scope_arg": "短距離",
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "短距離レースでは、全ステータスが15%上昇する。",
+  "code": "short_special"
+ },
+ "マイル得意": {
+  "mult": {
+   "speed": 1.15,
+   "power": 1.15,
+   "stamina": 1.15
+  },
+  "scope": "aptitude",
+  "scope_arg": "マイル",
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "マイルレースでは、全ステータスが15%上昇する。",
+  "code": "mile_special"
+ },
+ "中距離得意": {
+  "mult": {
+   "speed": 1.15,
+   "power": 1.15,
+   "stamina": 1.15
+  },
+  "scope": "aptitude",
+  "scope_arg": "中距離",
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "中距離レースでは、全ステータスが15%上昇する。",
+  "code": "middle_special"
+ },
+ "長距離得意": {
+  "mult": {
+   "speed": 1.15,
+   "power": 1.15,
+   "stamina": 1.15
+  },
+  "scope": "aptitude",
+  "scope_arg": "長距離",
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "長距離レースでは、全ステータスが15%上昇する。",
+  "code": "long_special"
+ },
+ "ロケットスタート": {
+  "mult": {
+   "speed": 1.12
+  },
+  "scope": "phase",
+  "scope_arg": "序盤",
+  "duty": 0.3333333333333333,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "序盤区間のみ、スピードが12%上昇する。",
+  "code": "rocket_start"
+ },
+ "中盤加速": {
+  "mult": {
+   "power": 1.1
+  },
+  "scope": "phase",
+  "scope_arg": "中盤",
+  "duty": 0.3333333333333333,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "中盤区間のみ、パワーが10%上昇する。",
+  "code": "mid_acceleration"
+ },
+ "末脚": {
+  "mult": {
+   "power": 1.12
+  },
+  "scope": "phase",
+  "scope_arg": "終盤",
+  "duty": 0.3333333333333333,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "終盤区間のみ、パワーが12%上昇する。",
+  "code": "final_kick"
+ },
+ "二の脚": {
+  "mult": {
+   "speed": 1.08
+  },
+  "scope": "phase",
+  "scope_arg": "中盤",
+  "duty": 0.15,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "中盤開始後の200mのみ、スピードが8%上昇する。",
+  "code": "second_gear"
+ },
+ "ロングスパート": {
+  "mult": {
+   "power": 1.07,
+   "stamina": 0.92
+  },
+  "scope": "phase",
+  "scope_arg": "終盤",
+  "duty": 0.5,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "中盤後半からパワーが7%上昇するが、スタミナ消費量が8%増加する。",
+  "code": "long_spurt"
+ },
+ "ペース配分": {
+  "mult": {
+   "speed": 0.95,
+   "stamina": 1.15
+  },
+  "scope": "phase",
+  "scope_arg": "序盤",
+  "duty": 0.3333333333333333,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "序盤のスピードが5%低下する代わりに、序盤のスタミナ消費量が15%減少する。",
+  "code": "pace_control"
+ },
+ "逃げの心得": {
+  "mult": {
+   "speed": 1.08,
+   "power": 1.08,
+   "stamina": 0.9504
+  },
+  "scope": "phase",
+  "scope_arg": "序盤",
+  "duty": 0.3333333333333333,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "序盤の走行能力が8%上昇するが、序盤のスタミナ消費量が12%増加する。",
+  "code": "front_runner"
+ },
+ "差しの構え": {
+  "mult": {
+   "power": 1.08
+  },
+  "scope": "conditional",
+  "scope_arg": "中盤",
+  "duty": 0.16666666666666666,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "中盤開始時に順位が下位半分の場合、中盤のパワーが8%上昇する。",
+  "code": "closer_stance"
+ },
+ "追い込み": {
+  "mult": {
+   "power": 1.12
+  },
+  "scope": "conditional",
+  "scope_arg": "終盤",
+  "duty": 0.16666666666666666,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "終盤開始時に順位が下位半分の場合、終盤のパワーが12%上昇する。",
+  "code": "deep_closer"
+ },
+ "競り合い": {
+  "mult": {
+   "power": 1.06
+  },
+  "scope": "conditional",
+  "scope_arg": null,
+  "duty": 0.5,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "他の出走馬が20m以内にいる間、パワーが6%上昇する。",
+  "code": "duel_spirit"
+ },
+ "独走態勢": {
+  "mult": {
+   "stamina": 1.06
+  },
+  "scope": "conditional",
+  "scope_arg": null,
+  "duty": 0.2,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "先頭で2位と50m以上離れている間、スタミナ消費量が6%減少する。",
+  "code": "solo_lead"
+ },
+ "不屈": {
+  "mult": {
+   "power": 1.08
+  },
+  "scope": "conditional",
+  "scope_arg": null,
+  "duty": 0.1,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "他の出走馬に追い抜かれた直後の100mのみ、パワーが8%上昇する。",
+  "code": "indomitable"
+ },
+ "緊急回復": {
+  "mult": {
+   "stamina": 1.06
+  },
+  "scope": "conditional",
+  "scope_arg": null,
+  "duty": 0.5,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "残りスタミナが20%以下になったとき、一度だけ最大スタミナの6%を回復する。",
+  "code": "emergency_recovery"
+ },
+ "セカンドウインド": {
+  "mult": {
+   "stamina": 1.08
+  },
+  "scope": "always",
+  "scope_arg": null,
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "中盤開始時に、最大スタミナの8%を回復する。",
+  "code": "second_wind"
+ },
+ "省エネ走法": {
+  "mult": {
+   "stamina": 1.08
+  },
+  "scope": "always",
+  "scope_arg": null,
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "レース中のスタミナ消費量が8%減少する。",
+  "code": "energy_saver"
+ },
+ "安定感": {
+  "mult": {},
+  "scope": "variance",
+  "scope_arg": null,
+  "duty": 1.0,
+  "sigma_mult": 0.5,
+  "source": "game",
+  "desc": "レース中の速度のばらつきが約半分になり、能力どおりに走りやすくなる。",
+  "code": "consistency"
+ },
+ "粘り腰": {
+  "mult": {},
+  "scope": "learned",
+  "scope_arg": null,
+  "duty": 1.0,
+  "sigma_mult": 1.0,
+  "source": "game",
+  "desc": "スタミナ不足による速度低下を20%軽減する。",
+  "code": "tenacious"
+ }
+}
