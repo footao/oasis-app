@@ -660,6 +660,12 @@ def parse_race_log(log_path=None, texts=None):
         })
     df = pd.DataFrame(out)
     if len(df):
+        # 同じログを重ねて置いた場合の二重カウントを防ぐ（新旧エクスポートの期間が重なる等）
+        before = len(df)
+        df = df.drop_duplicates(
+            subset=['race_key', 'name', 'owner', 'speed', 'stamina', 'power', 'rank'],
+            keep='first').reset_index(drop=True)
+        df.attrs['n_duplicates'] = before - len(df)
         df['n_field'] = df.groupby('race_key')['score'].transform('size')
         df['_d'] = pd.to_datetime(df['date'], format='%Y/%m/%d', errors='coerce')
     return df
@@ -924,9 +930,11 @@ def train_model(log_path=None, sigma_override=None, train_from=DEFAULT_TRAIN_FRO
     未出現 = [p for p in PASSIVE_NAMES if seen.get(p, 0) == 0]
     thin = [p for p in PASSIVE_NAMES if 0 < seen.get(p, 0) < 8]
 
+    n_dup = int(df_all.attrs.get('n_duplicates', 0) or 0)
     msgs.append(
         f'学習完了  {len(df)}行 / {df["race_key"].nunique()}レース  '
-        f'（{df["date"].min()}〜{df["date"].max()}, mode={mode}）')
+        f'（{df["date"].min()}〜{df["date"].max()}, mode={mode}）'
+        + (f'  ※重複 {n_dup}行を除外' if n_dup else ''))
     msgs.append(
         f'精度(OOF)  レース内スピアマン={race_rho:.3f}  1着的中={top1*100:.0f}%  '
         f'残差std={resid_std:.4f}  α={best_alpha}')

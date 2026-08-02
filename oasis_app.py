@@ -42,6 +42,26 @@ def _resolve_read(p):
     return cands[0], False
 
 
+def _auto_log_path():
+    """リポジトリ（アプリと同じ場所）にあるログを自動で探す。
+    logg/ フォルダ → logs/ → data/ → 直下の *.txt の順。"""
+    base = _app_dir()
+    for cand in ("logg", "logs", "log", "data"):
+        d = os.path.join(base, cand)
+        if os.path.isdir(d) and any(f.lower().endswith((".txt", ".md"))
+                                    for f in os.listdir(d)):
+            return cand
+    try:
+        txts = [f for f in os.listdir(base) if f.lower().endswith(".txt")]
+    except OSError:
+        txts = []
+    if len(txts) == 1:
+        return txts[0]
+    if txts:
+        return "*.txt"
+    return "logg"
+
+
 def _spec_path():
     return os.path.join(_app_dir(), oc.SPEC_FILE)
 
@@ -127,45 +147,56 @@ with st.sidebar:
     st.subheader("1) モデル学習")
 
     drive_src = _get_drive_source()
-    uploaded = st.file_uploader(
-        "ログを直接アップロード（任意・最優先）", type=["txt", "md"], accept_multiple_files=True,
-        help="Discordエクスポートの .txt。ここに入れたものが最優先で使われます。")
+    SRC_REPO, SRC_DRIVE, SRC_UP = "📁 リポジトリ内のファイル", "☁ Google ドライブ", "⬆ アップロード"
+    src_opts = [SRC_REPO] + ([SRC_DRIVE] if drive_src is not None else []) + [SRC_UP]
+    src_mode = st.radio("ログの取得元", src_opts, index=0, horizontal=False,
+                        help="既定はリポジトリ内（GitHubに置いたファイル）です。"
+                             "ドライブは secrets に [gdrive] を設定すると選べます。")
 
     log_texts, source_key, log_path, src_label = [], None, "", ""
 
-    if uploaded:
-        for f in uploaded:
-            raw = f.getvalue()
-            for enc in ("utf-8", "utf-8-sig", "cp932"):
-                try:
-                    log_texts.append(raw.decode(enc))
-                    break
-                except UnicodeDecodeError:
-                    continue
-            else:
-                log_texts.append(raw.decode("utf-8", errors="replace"))
-        source_key = ("upload", tuple(sorted((f.name, f.size) for f in uploaded)))
-        src_label = f"⬆ アップロード {len(uploaded)}ファイル"
-    elif drive_src is not None:
+    if src_mode == SRC_UP:
+        uploaded = st.file_uploader(
+            "ログファイルを選ぶ", type=["txt", "md"], accept_multiple_files=True,
+            help="Discordエクスポートの .txt。複数選択できます。")
+        if uploaded:
+            for f in uploaded:
+                raw = f.getvalue()
+                for enc in ("utf-8", "utf-8-sig", "cp932"):
+                    try:
+                        log_texts.append(raw.decode(enc))
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                else:
+                    log_texts.append(raw.decode("utf-8", errors="replace"))
+            source_key = ("upload", tuple(sorted((f.name, f.size) for f in uploaded)))
+            src_label = f"⬆ アップロード {len(uploaded)}ファイル"
+        else:
+            src_label = "⬆ ファイルを選んでください"
+
+    elif src_mode == SRC_DRIVE and drive_src is not None:
         try:
             fp = _drive_fingerprint()
             files = _drive_texts(fp)
             log_texts = [t for _, t in files]
             source_key = ("drive", fp)
-            src_label = "☁ Google ドライブ: " + ", ".join(n for n, _ in files)[:80]
+            src_label = "☁ " + ", ".join(n for n, _ in files)[:90]
         except Exception as e:
             st.error(f"ドライブからの読み込みに失敗しました: {e}")
             src_label = "☁ Google ドライブ（エラー）"
-    else:
+
+    else:   # リポジトリ内（既定）
         log_path_in = st.text_input(
-            "レースログのパス", value="logg",
-            help="ローカル実行用。ファイル・フォルダ・ワイルドカードのいずれでも可。")
+            "ログのパス", value=_auto_log_path(),
+            help="アプリと同じ場所が基準です。フォルダ名（logg）を入れると中の .txt を"
+                 "まとめて読みます。ワイルドカード（logg/*.txt）やフルパスも可。")
         log_path, found = _resolve_read(log_path_in)
         source_key = ("path", log_path, found)
-        src_label = ("💾 " if found else "❌ 見つかりません: ") + log_path
-        if drive_backend is not None and not found:
-            st.caption("Google ドライブから読むには secrets に [gdrive] を設定してください"
-                       "（DEPLOY.md 参照）。")
+        src_label = ("📁 " if found else "❌ 見つかりません: ") + log_path
+        if not found:
+            st.caption("GitHub のリポジトリに `logg/` フォルダごとログを置いてください。"
+                       "（置き場所を変えた場合は上の欄をそれに合わせてください）")
 
     st.caption(src_label)
     if st.session_state.get("_drive_error"):
