@@ -95,7 +95,7 @@ st.set_page_config(page_title="Oasis 予測 v2", page_icon="🐎", layout="wide"
 #  片方だけ更新すると「AttributeError（内容は伏せられます）」になって
 #  原因が分からなくなるので、起動時に分かる形で止める。
 # ---------------------------------------------------------------
-REQUIRED_CORE = "2.8.0"
+REQUIRED_CORE = "3.0.0"
 _NEEDED = [
     "CORE_VERSION", "WIN_MAX_TOTAL_UNITS", "WIN_STAKE_UNIT", "UNBET_ODDS",
     "MAX_TOTAL_UNITS", "SIGMA_SAFETY", "DIST_LIST", "TRACK_LIST",
@@ -261,10 +261,17 @@ with st.sidebar:
         "σ手動上書き (0=自動校正)", min_value=0.0, value=0.0, step=0.005, format="%.4f",
         help="0なら『実際の着順が最も出やすいσ』を自動で探します。")
     sigma_safety = st.slider(
-        "σ安全係数", 1.0, 2.0, oc.SIGMA_SAFETY, 0.05,
-        help="自動校正したσに掛ける係数。1.0＝データが言うとおり（強気・買い目が絞られる）、"
-             "大きいほど弱気で買い目が広がり、過剰投資を防ぎます。"
-             "学習レース数が少ないうちは 1.2〜1.4 を推奨。")
+        "σ係数", 1.0, 2.0, oc.SIGMA_SAFETY, 0.05,
+        help="自動校正したσに掛ける係数。既定1.0。"
+             "⚠ 大きくしても安全にはなりません。σを膨らませると確率が平坦になり、"
+             "ロングショット（大穴）の確率を過大評価して偽の+EVを量産します。"
+             "資金を守る安全弁は分数ケリーと下の『モデル信頼度』です。")
+    model_weight = st.slider(
+        "モデル信頼度 λ", 0.3, 1.0, 0.7, 0.05,
+        help="EV計算で使う確率 = λ×モデル + (1−λ)×市場。"
+             "モデルと市場が食い違うとき、食い違いの一部は必ずモデル側の誤差です。"
+             "λ=1（モデル全信頼）は、その誤差にそのまま賭けることを意味します。"
+             "実績ログで予測≈実測が確認できるまでは 0.7 以下を推奨。")
 
     auto = st.checkbox("開いたら自動で学習する", value=True,
                        help="学習結果はキャッシュされるので、2回目以降は待ち時間ゼロです。")
@@ -336,6 +343,11 @@ with st.sidebar:
             help="Google スプレッドシートが設定されている場合はそちらが優先されます。")
         n_sim = st.select_slider("モンテカルロ試行数", [200_000, 400_000, 800_000],
                                  value=oc.N_SIM)
+        min_prob = st.number_input(
+            "最小モデル的中率（これ未満は買わない）", min_value=0.0, max_value=0.05,
+            value=0.003, step=0.001, format="%.3f",
+            help="確率が小さすぎる組はモンテカルロの推定ノイズが支配的で、"
+                 "「偽の+EV」のほぼ全てがこの領域から出ます。既定0.3%。")
 
 csv_resolved, _ = _resolve_read(csv_path) if csv_path else ("", False)
 settings = dict(dist=dist, track=track, ground=ground, topn=topn,
@@ -344,6 +356,7 @@ settings = dict(dist=dist, track=track, ground=ground, topn=topn,
                 unformed_sleeve=sleeve_on, unformed_max_units=sleeve_units,
                 unformed_p_min=sleeve_pmin, unformed_edge_min=0.30,
                 win_bets=win_on, win_edge_min=win_edge, n_sim=n_sim,
+                model_weight=model_weight, min_prob=min_prob,
                 spec_path=_spec_path())
 bet_log_resolved = _resolve_save(bet_log_path)
 _store = _get_sheets_store()

@@ -50,10 +50,26 @@ class SheetsStore:
     def write_df(self, df):
         header = list(df.columns) if len(df.columns) else LOG_COLUMNS
         body = df.fillna('').astype(object).values.tolist()
-        self.ws.clear()
+        # 「clear → update」の順だと、clear 成功後に update が失敗した瞬間に
+        # シートが空になる（＝全ログ喪失）。先に上書きしてから余りを消す順にする。
+        # update が失敗してもシートは旧内容のまま、末尾の clear が失敗しても
+        # 「新内容＋古い尻尾」で、どちらもデータは残る。
         # gspread 5.x / 6.x どちらでも動くようキーワード引数で呼ぶ
         self.ws.update(values=[header] + body, range_name='A1',
                        value_input_option='RAW')
+        n_new = len(body) + 1
+        try:
+            n_rows = int(self.ws.row_count)
+        except Exception:
+            n_rows = 0
+        if n_rows > n_new:
+            width = max(len(header), 1)
+            end_col = ''
+            w = width
+            while w > 0:
+                w, r = divmod(w - 1, 26)
+                end_col = chr(65 + r) + end_col
+            self.ws.batch_clear([f'A{n_new + 1}:{end_col}{n_rows}'])
 
 
 def build_store_from_secrets(secrets, *, default_worksheet='bet_log'):

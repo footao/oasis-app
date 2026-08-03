@@ -54,7 +54,9 @@ pets.forEach(h=>{
   }
   put(h.name+'#'+h.pet_id,h.pet_id);
 });
-const nameOf={}; pets.forEach(h=>{nameOf[h.pet_id]=h.name;});
+const nameOf={}; { const s2={};
+ pets.forEach(h=>{ if(cnt[h.name]>1){ s2[h.name]=(s2[h.name]||0)+1; nameOf[h.pet_id]=h.name+'#'+s2[h.name]; }
+   else nameOf[h.pet_id]=h.name; }); }
 const ownWin=pets.reduce((a,h)=>a+(Number(h.my_amount)||0),0)/WIN_UNIT;
 log(pets.length+'頭取得完了','#4caf50');
 

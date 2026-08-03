@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '2.8.0'
+CORE_VERSION = '3.0.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -600,6 +600,8 @@ def parse_results(text):
             sc_m = re.search(r'score\s+(\d+\.?\d*)', block)
             pa_m = re.search(r'✨\s*パッシブ\s*[:：]\s*([^\n\r]+)', block)
             od_m = re.search(r'(?:最終)?オッズ\s*[:：]?\s*([0-9.]+)', block)
+            # 結果ブロックに直接コンディションが書かれている場合（API採取ログ等）はそれを使う。
+            cd_m = re.search(r'コンディション\s*[:：]\s*([^\s\r\n😄😐😞🙁😰]+)', block)
             if s_m and st_m and p_m and sc_m:
                 rows.append({
                     'race_key': r_key, 'race_no': race_no,
@@ -609,6 +611,7 @@ def parse_results(text):
                     'power': int(p_m.group(1)), 'score': float(sc_m.group(1)),
                     'passives': parse_passives(pa_m.group(1)) if pa_m else (),
                     'win_odds': float(od_m.group(1)) if od_m else np.nan,
+                    'condition': cd_m.group(1).strip() if cd_m else None,
                     'dist': dist, 'track': track, 'g_cond': g_cond,
                 })
     return rows
@@ -643,14 +646,15 @@ def parse_race_log(log_path=None, texts=None):
     out = []
     for r in all_rows:
         passives = r['passives']
-        condition = '不明'
+        condition = r.get('condition') or '不明'
         ent = all_entries.get(r['race_key'])
         if ent:
             target = horse_identity(r['name'], r['owner'], r['speed'], r['stamina'], r['power'])
             for h in ent['horses']:
                 if horse_identity(h['name'], h['owner'], h['speed'],
                                   h['stamina'], h['power']) == target:
-                    condition = h['condition']
+                    if not r.get('condition'):
+                        condition = h['condition']
                     if not passives:
                         passives = h['passives']
                     break
@@ -684,7 +688,12 @@ def feature_names(spec):
     スペック未知のパッシブだけ、ダミー＋距離交互作用で学習する。"""
     names = []
     for d in DIST_LIST:
-        names += [f'{d}:切片', f'{d}:log(SP)', f'{d}:log(PW)', f'{d}:log(ST)']
+        # log項（頑健・逓減）＋ 内部式由来の線形項（加法的・スタミナの重みを正しく捉える）。
+        # ゲームの実結果APIから、内部速度が Σ(フェーズ重み×距離係数×実効ステ) の
+        # 加法形であることを確認済み。log単独だと中〜長距離でスタミナを過小評価するため、
+        # 線形項を併用する（新式34レースの検証で held-out スピアマン 0.898→0.926）。
+        names += [f'{d}:切片', f'{d}:log(SP)', f'{d}:log(PW)', f'{d}:log(ST)',
+                  f'{d}:lin(SP)', f'{d}:lin(PW)', f'{d}:lin(ST)']
     names += ['好調', '不調']
     for p in unspecced_passives(spec):
         names.append(p)
@@ -715,10 +724,12 @@ def _row_features(speed, power, stamina, condition, passives, dist, track, spec,
     sp = math.log(max(e['speed'], 1.0))
     pw = math.log(max(e['power'], 1.0))
     st = math.log(max(e['stamina'], 1.0))
+    # 線形項は 1/100 スケール（log項と桁を揃え、正則化の効きを均す）
+    lsp, lpw, lst = e['speed'] / 100.0, e['power'] / 100.0, e['stamina'] / 100.0
     f = []
     for d in DIST_LIST:
         m = 1.0 if dist == d else 0.0
-        f += [m, m * sp, m * pw, m * st]
+        f += [m, m * sp, m * pw, m * st, m * lsp, m * lpw, m * lst]
     f += [1.0 if condition == '好調' else 0.0, 1.0 if condition == '不調' else 0.0]
     pset = set(passives or ())
     for p in unspecced_passives(spec):
@@ -789,11 +800,20 @@ def _oof_predictions(X, y, groups, alpha, w=None, k=5):
     return _center_by_race(oof, groups)
 
 
-def _order_loglik(base, actual_score, sigma, z):
-    """base(予測相対スコア) + sigma*z のモンテカルロで、実際の上位3着順が出る確率の log。"""
+def _truth_top(g, k=3):
+    """「実際の上位k着」の位置インデックス。rank 列（ゲームの公式着順）を優先する。
+    スコアで argsort すると同点レース（実測55/886件）で並びが不定になる。"""
+    if 'rank' in g.columns and g['rank'].notna().all():
+        order = np.argsort(g['rank'].values, kind='stable')
+    else:
+        order = np.argsort(-g['score'].values, kind='stable')
+    return tuple(int(x) for x in order[:min(k, len(g))])
+
+
+def _order_loglik(base, truth, sigma, z):
+    """base(予測相対スコア) + sigma*z のモンテカルロで、実際の上位着順が出る確率の log。"""
     n = len(base)
-    k = min(3, n)
-    truth = tuple(np.argsort(-np.asarray(actual_score))[:k])
+    k = len(truth)
     sim = base[None, :] + sigma * z
     order = np.argsort(-sim, axis=1)[:, :k]
     hit = np.ones(len(sim), dtype=bool)
@@ -829,13 +849,19 @@ def _calibrate_sigma(oof, df, resid_std, n_draw=40_000, seed=7):
         tot = 0.0
         for k, g in races:
             z = np.random.default_rng(rng_seeds[k]).standard_normal((n_draw, len(g)))
-            tot += _order_loglik(oof[g.index.values], g['score'].values, s, z)
+            tot += _order_loglik(oof[g.index.values], _truth_top(g), s, z)
         curve.append((float(s), tot / len(races)))
     best = max(curve, key=lambda t: t[1])[0]
     return max(best, 1e-4), curve
 
 
-SIGMA_SAFETY = 1.25   # 校正で得たσに掛ける安全係数（>1 = 弱気側＝過剰投資を防ぐ）
+# σに掛ける係数。既定 1.0。
+# 注意: かつて 1.25（弱気側）を既定にしていたが、これは誤った安全策だった。
+# σを膨らませると確率分布が平坦になり、ロングショットの確率を過大評価する。
+# 市場が正しい確率どおりに張っている状況をシミュレートすると、σ×1.25 では
+# 「偽の+EV」の検出が 87件 → 666件（平均オッズ1164倍に集中）に増えた。
+# 資金を守る安全弁は σ ではなく、分数ケリー・model_weight(λ)・min_prob が担う。
+SIGMA_SAFETY = 1.0
 
 
 def train_model(log_path=None, sigma_override=None, train_from=DEFAULT_TRAIN_FROM,
@@ -922,8 +948,9 @@ def train_model(log_path=None, sigma_override=None, train_from=DEFAULT_TRAIN_FRO
     else:
         sigma_mle, sigma_curve = _calibrate_sigma(oof, df, resid_std)
         race_sigma = sigma_mle * max(float(sigma_safety), 0.1)
-        sigma_note = (f'（着順尤度の最適値 {sigma_mle:.4f} × 安全係数 {sigma_safety:g}。'
-                      f'学習レースが少ないうちは弱気側に倒して過剰投資を防ぎます）')
+        sigma_note = (f'（着順尤度の最適値 {sigma_mle:.4f} × 係数 {sigma_safety:g}。'
+                      '※σを膨らませても安全にはなりません。資金の保険は'
+                      '分数ケリーとモデル信頼度λが担います）')
 
     # --- 校正チェック: OOF予測の「予測確率 vs 実測」 ---
     calib = _calibration_check(oof, df, race_sigma)
@@ -1005,7 +1032,7 @@ def _calibration_check(oof, df, sigma, n_draw=60_000, seed=11):
         sim = b[None, :] + sigma * rng.standard_normal((n_draw, len(b)))
         order = np.argsort(-sim, axis=1)[:, :3]
         win = np.bincount(order[:, 0], minlength=len(b)) / n_draw
-        truth = np.argsort(-g['score'].values)[:3]
+        truth = _truth_top(g)
         p1.append(win.max())
         a1.append(int(np.argmax(win) == truth[0]))
         # 予測最有力3連単の確率と、それが的中したか
@@ -1034,7 +1061,8 @@ def _mean_race_spearman(pred, df):
     for _, g in df.groupby('race_key'):
         if len(g) < 4:
             continue
-        r = _spearman(pred[g.index.values], g['score'].values)
+        actual = (-g['rank'].values) if 'rank' in g.columns else g['score'].values
+        r = _spearman(pred[g.index.values], actual)
         if r == r:
             vals.append(r)
     return float(np.mean(vals)) if vals else float('nan')
@@ -1045,7 +1073,7 @@ def _top1_accuracy(pred, df):
     for _, g in df.groupby('race_key'):
         if len(g) < 4:
             continue
-        hits.append(int(np.argmax(pred[g.index.values]) == np.argmax(g['score'].values)))
+        hits.append(int(np.argmax(pred[g.index.values]) == _truth_top(g, 1)[0]))
     return float(np.mean(hits)) if hits else float('nan')
 
 
@@ -1063,6 +1091,9 @@ def passive_effects(bundle, dist=None, track=None, same_species=True):
     b_sp = coef.get(f'{d}:log(SP)', 0.0)
     b_pw = coef.get(f'{d}:log(PW)', 0.0)
     b_st = coef.get(f'{d}:log(ST)', 0.0)
+    l_sp = coef.get(f'{d}:lin(SP)', 0.0)
+    l_pw = coef.get(f'{d}:lin(PW)', 0.0)
+    l_st = coef.get(f'{d}:lin(ST)', 0.0)
     ref = (100.0, 100.0, 100.0)
     out = []
     for p in PASSIVE_NAMES:
@@ -1072,7 +1103,10 @@ def passive_effects(bundle, dist=None, track=None, same_species=True):
             e = effective_stats(*ref, (p,), d, t, spec, {'same_species': same_species})
             eff = (b_sp * math.log(e['speed'] / ref[0])
                    + b_pw * math.log(e['power'] / ref[1])
-                   + b_st * math.log(e['stamina'] / ref[2]))
+                   + b_st * math.log(e['stamina'] / ref[2])
+                   + l_sp * (e['speed'] - ref[0]) / 100.0
+                   + l_pw * (e['power'] - ref[1]) / 100.0
+                   + l_st * (e['stamina'] - ref[2]) / 100.0)
             kind = 'game' if src == 'game' else 'inferred'
         elif sp_.get('scope') == 'variance':
             eff = 0.0
@@ -1556,12 +1590,15 @@ def allocate_units_stable(cands, P_total, bankroll, kelly_frac, max_risk_frac,
 
 def unformed_sleeve_picks(combo_prob, disp, od_of, P_total, p_min=0.05, edge_min=0.30,
                           max_units=5, remaining_budget=MAX_TOTAL_UNITS,
-                          stake_unit=STAKE_UNIT):
+                          stake_unit=STAKE_UNIT, p_scale=1.0):
+    """※「未成立組を自分だけが買っていれば的中時に全プール総取り」というゲーム仕様の
+    想定に基づく。実際の払戻がこの通りかは未検証（検証できたら README を更新すること）。"""
     if P_total <= 0 or max_units <= 0 or remaining_budget <= 0:
         return []
     eff = (P_total + stake_unit) / stake_unit
     cand = []
     for idx, p in combo_prob.items():
+        p = p * p_scale                     # 市場情報が無い組は λ でモデル確率を割り引く
         names = tuple(disp[i] for i in idx)
         if od_of(names) is not None:
             continue
@@ -1842,6 +1879,13 @@ DEFAULT_SETTINGS = dict(
     unformed_p_min=0.05, unformed_edge_min=0.30,
     win_bets=False, win_edge_min=0.15,
     n_sim=N_SIM, spec_path=None,
+    # モデル確率をどこまで信じるか。EV計算では p_bet = λ×モデル + (1−λ)×市場 を使う。
+    # モデルと市場が食い違うとき、食い違いの一部は必ずモデル側の誤差なので、
+    # λ=1（モデル全信頼）はそのまま「モデルの誤差に賭ける」ことになる。
+    model_weight=0.7,
+    # モデル的中率がこれ未満の組は買わない。モンテカルロの試行数に対して確率が小さすぎる
+    # 組は推定ノイズが支配的で、「偽の+EV」のほぼ全てがこの領域から出る。
+    min_prob=0.003,
 )
 
 
@@ -2043,6 +2087,8 @@ def analyze(raw_text, bundle, settings=None):
                 '取りに行ける他人のお金が少ないので、控えめに。')
     if s.get('win_bets') and mkt_p is not None and res['win_pool'] and not others_ok:
         res['win_pool_mode'] = '実測プール（自分の掛け金が大半のため推奨なし）'
+    lam_w = float(s.get('model_weight', 0.7))
+    win_p_bet = (lam_w * win_p + (1 - lam_w) * mkt_p) if mkt_p is not None else lam_w * win_p
     if s.get('win_bets') and mkt_p is not None and res['win_pool'] and others_ok:
         my_units = [int((h.get('my_amount') or 0) // win_unit) for h in horses]
         unbet = [bool(np.isfinite(odds[i]) and abs(odds[i] - UNBET_ODDS) < 1e-9
@@ -2054,7 +2100,7 @@ def analyze(raw_text, bundle, settings=None):
                 '（当たれば非常に高配当ですが、高分散です）。')
         names_o = [disp[i] for i in range(n)]
         picks, summ = win_bet_picks_pool(
-            names_o, win_p, odds, res['win_pool'], s['bankroll'], s['kelly_fraction'],
+            names_o, win_p_bet, odds, res['win_pool'], s['bankroll'], s['kelly_fraction'],
             s.get('win_edge_min', 0.15), stake_unit=win_unit,
             risk_cap_frac=s['max_risk_frac'], my_units=my_units, unbet=unbet)
         res['win_picks'] = picks
@@ -2062,7 +2108,7 @@ def analyze(raw_text, bundle, settings=None):
         res['win_pool_mode'] = '実測プール（希薄化込み）'
     elif s.get('win_bets') and mkt_p is not None:
         res['win_picks'] = win_bet_picks(
-            disp, win_p, odds, s['bankroll'], s['kelly_fraction'],
+            disp, win_p_bet, odds, s['bankroll'], s['kelly_fraction'],
             s.get('win_edge_min', 0.15), stake_unit=win_unit,
             risk_cap_frac=s['max_risk_frac'])
         if res['win_picks']:
@@ -2127,6 +2173,17 @@ def analyze(raw_text, bundle, settings=None):
         return odds_bare.get(tuple(bare(x) for x in nm))
 
     if csv_odds:
+        lam = float(s.get('model_weight', 0.7))
+        min_p = float(s.get('min_prob', 0.003))
+        # 市場の暗黙確率（成立組のみ・正規化）。q_i = (1/od_i)/Σ(1/od)。
+        inv_sum = sum(1.0 / od for od in csv_odds.values()
+                      if od and math.isfinite(od) and od > 0)
+        inv_norm = max(inv_sum, 1.0)
+
+        def blend(p_model, od):
+            q = (1.0 / od) / inv_norm if (od and od > 0) else 0.0
+            return lam * p_model + (1.0 - lam) * q
+
         rows = []
         how_counts = {'exact': 0, 'bare': 0, 'none': 0}
         unmatched = set()
@@ -2137,8 +2194,14 @@ def analyze(raw_text, bundle, settings=None):
                 for nm in combo:
                     if bare(nm) not in {bare(x) for x in screen_names}:
                         unmatched.add(nm)
-            rows.append((combo, p, od, STAKE_UNIT * (p * od - 1)))
+            pb = blend(p, od)
+            rows.append((combo, p, od, STAKE_UNIT * (pb * od - 1)))
         rows.sort(key=lambda x: x[3], reverse=True)
+        res['messages'].append(
+            f'ℹ EVはモデル確率 λ={lam:.0%} で市場と混合し、'
+            f'モデル的中率 {min_p:.1%} 未満の組を除外して計算しています'
+            '（モデルと市場の食い違いの一部は必ずモデル側の誤差のため、'
+            'モデルを全信頼するとその誤差に賭けることになります）。')
         res['mode'] = ('完全名一致' if how_counts['exact'] and not how_counts['bare']
                        else '素名フォールバック' if how_counts['bare'] and not how_counts['exact']
                        else '混在')
@@ -2173,7 +2236,7 @@ def analyze(raw_text, bundle, settings=None):
         res['pool'] = P_total
 
         alloc = allocate_units_stable(
-            [(c, p, od) for c, p, od, ev in rows], P_total,
+            [(c, blend(p, od), od) for c, p, od, ev in rows if p >= min_p], P_total,
             bankroll=s['bankroll'], kelly_frac=s['kelly_fraction'],
             max_risk_frac=s['max_risk_frac'], edge_min=s['edge_min'],
             budget=MAX_TOTAL_UNITS, max_per_combo=MAX_UNITS)
@@ -2200,7 +2263,8 @@ def analyze(raw_text, bundle, settings=None):
                 p_min=s.get('unformed_p_min', 0.05),
                 edge_min=s.get('unformed_edge_min', 0.30),
                 max_units=s.get('unformed_max_units', 5),
-                remaining_budget=min(MAX_TOTAL_UNITS, risk_units_cap) - total_units)
+                remaining_budget=min(MAX_TOTAL_UNITS, risk_units_cap) - total_units,
+                p_scale=lam)
             for names, p, eff_od, k in sleeve:
                 eff_ev = (p * eff_od - 1) * STAKE_UNIT * k
                 alloc_rows.append({
@@ -2254,7 +2318,14 @@ def analyze(raw_text, bundle, settings=None):
         if P_total > 0:
             P_c = (P_total / od) if od else 0.0
             eff = (P_total + STAKE_UNIT) / (P_c + STAKE_UNIT)
-            row.update(eff1_od=eff, ev1=(p * eff - 1) * STAKE_UNIT, plus_ev=(p * eff > 1))
+            lam_r = float(s.get('model_weight', 0.7))
+            if csv_odds and od:
+                q = (1.0 / od) / max(sum(1.0 / o for o in csv_odds.values()
+                                         if o and o > 0), 1.0)
+                pb = lam_r * p + (1 - lam_r) * q
+            else:
+                pb = lam_r * p
+            row.update(eff1_od=eff, ev1=(pb * eff - 1) * STAKE_UNIT, plus_ev=(pb * eff > 1))
         ranking.append(row)
     res['ranking'] = ranking
     res['ranking_pool_known'] = P_total > 0
@@ -2272,6 +2343,9 @@ def _contributions(bundle, horses, dist, track):
     b_sp = coef.get(f'{dist}:log(SP)', 0.0)
     b_pw = coef.get(f'{dist}:log(PW)', 0.0)
     b_st = coef.get(f'{dist}:log(ST)', 0.0)
+    l_sp = coef.get(f'{dist}:lin(SP)', 0.0)
+    l_pw = coef.get(f'{dist}:lin(PW)', 0.0)
+    l_st = coef.get(f'{dist}:lin(ST)', 0.0)
     same = same_species_flags([h.get('name', '') for h in horses],
                               [h.get('species') for h in horses])
     out = []
@@ -2282,12 +2356,16 @@ def _contributions(bundle, horses, dist, track):
         sp = math.log(max(float(h['speed']), 1.0))
         pw = math.log(max(float(h['power']), 1.0))
         st = math.log(max(float(h['stamina']), 1.0))
-        c_sp = b_sp * sp
-        c_pw = b_pw * pw
-        c_st = b_st * st
+        lsp0, lpw0, lst0 = float(h['speed']) / 100.0, float(h['power']) / 100.0, float(h['stamina']) / 100.0
+        c_sp = b_sp * sp + l_sp * lsp0
+        c_pw = b_pw * pw + l_pw * lpw0
+        c_st = b_st * st + l_st * lst0
         c_spec = (b_sp * (math.log(e['speed']) - sp)
                   + b_pw * (math.log(e['power']) - pw)
-                  + b_st * (math.log(e['stamina']) - st))
+                  + b_st * (math.log(e['stamina']) - st)
+                  + l_sp * (e['speed'] - float(h['speed'])) / 100.0
+                  + l_pw * (e['power'] - float(h['power'])) / 100.0
+                  + l_st * (e['stamina'] - float(h['stamina'])) / 100.0)
         cond = h.get('condition', '普通')
         c_cond = coef.get('好調', 0.0) if cond == '好調' else (
             coef.get('不調', 0.0) if cond == '不調' else 0.0)
@@ -2299,7 +2377,10 @@ def _contributions(bundle, horses, dist, track):
                                      dist, track, spec, ctx)
                 v = (b_sp * (math.log(e1['speed']) - sp)
                      + b_pw * (math.log(e1['power']) - pw)
-                     + b_st * (math.log(e1['stamina']) - st))
+                     + b_st * (math.log(e1['stamina']) - st)
+                     + l_sp * (e1['speed'] - float(h['speed'])) / 100.0
+                     + l_pw * (e1['power'] - float(h['power'])) / 100.0
+                     + l_st * (e1['stamina'] - float(h['stamina'])) / 100.0)
             elif sp_ and sp_.get('scope') == 'variance':
                 v = 0.0
             elif PASSIVE_CATALOG.get(p) == 'aptitude':

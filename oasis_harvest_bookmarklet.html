@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>おあしすっち 結果採取ブックマークレット</title>
+<style>
+* {box-sizing:border-box;margin:0;padding:0;}
+body {font-family:'Segoe UI','Hiragino Sans',sans-serif;background:#f5f5f0;color:#222;padding:2rem;}
+.card {background:#fff;border:1px solid #e0e0e0;border-radius:12px;padding:1.5rem 2rem;max-width:680px;margin:0 auto;}
+h1 {font-size:1.2rem;font-weight:600;margin-bottom:.3rem;}
+.sub {color:#666;font-size:.85rem;margin-bottom:1.6rem;}
+.step {display:flex;gap:1rem;margin-bottom:1.3rem;align-items:flex-start;}
+.num {background:#1a1a2e;color:#e2b96f;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:.82rem;font-weight:700;flex-shrink:0;margin-top:2px;}
+.step h3 {font-size:.9rem;font-weight:600;margin-bottom:.2rem;}
+.step p {font-size:.82rem;color:#555;line-height:1.6;}
+.bm-btn {display:inline-block;background:#1a1a2e;color:#e2b96f!important;text-decoration:none!important;padding:.6rem 1.2rem;border-radius:8px;font-size:.92rem;font-weight:700;border:2px solid #e2b96f;cursor:grab;box-shadow:0 2px 8px rgba(0,0,0,.18);margin:.5rem 0;user-select:none;}
+.hint {font-size:.76rem;color:#888;margin-top:.3rem;}
+hr {border:none;border-top:1px solid #eee;margin:1.3rem 0;}
+.note {font-size:.8rem;background:#fff8e1;border-left:3px solid #e2b96f;padding:.55rem .8rem;border-radius:0 6px 6px 0;margin-top:.5rem;color:#555;line-height:1.7;}
+.note.fix {background:#e8f5e9;border-left-color:#4caf50;}
+.codebox {background:#1a1a2e;color:#a8d8ea;font-family:monospace;font-size:.7rem;padding:.65rem;border-radius:6px;white-space:pre-wrap;word-break:break-all;max-height:80px;overflow-y:auto;position:relative;}
+.copybtn {position:absolute;top:5px;right:5px;background:#e2b96f;color:#1a1a2e;border:none;border-radius:4px;padding:2px 7px;font-size:.73rem;cursor:pointer;font-weight:700;}
+pre.sample {background:#fafafa;border:1px solid #eee;border-radius:6px;padding:.7rem;font-size:.7rem;line-height:1.55;overflow-x:auto;color:#444;}
+footer {text-align:center;color:#aaa;font-size:.76rem;margin-top:1.6rem;}
+b.k {color:#1a1a2e;}
+</style>
+</head>
+<body>
+<div class="card">
+  <div style="text-align:center;margin-bottom:1.3rem">
+    <div style="font-size:1.8rem;margin-bottom:.3rem">📥</div>
+    <h1>おあしすっち 結果採取（学習データ増やし）</h1>
+    <p class="sub">過去の確定レースをまとめて取得 → loggフォルダに置ける形でクリップボードへ</p>
+  </div>
+
+  <div class="note fix" style="margin-bottom:1.3rem">
+    <b>これは何？</b><br>
+    予測モデルは「公式スコア付きの過去レース」で学習します。今のところ新スコア式のレースは数十件しかありません。
+    このブックマークレットは <code>result API</code> から<b>過去の確定レースを一括取得</b>し、
+    <b class="k">Discordログと同じ書式</b>のテキストにして出力します。保存して <code>logg</code> フォルダに入れるだけで学習データが増えます。<br>
+    ・各馬の <b>着順・score・ステータス・コンディション・パッシブ2枠</b>を取得<br>
+    ・確定していないレース／欠番は自動でスキップ<br>
+    ・地面（良/稍重）はAPI次第で空欄になりますが<b>予測には影響しません</b>（モデルの特徴量ではないため）
+  </div>
+
+  <div class="step">
+    <div class="num">1</div>
+    <div>
+      <h3>ブックマークバーを表示する</h3>
+      <p>Chrome: <b>Ctrl+Shift+B</b>（Mac: ⌘+Shift+B）</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">2</div>
+    <div>
+      <h3>下のボタンをブックマークバーへドラッグ</h3>
+      <a class="bm-btn" href="javascript:(async () =&gt; { const B=&#x27;https://api.oasis.red&#x27;; const q=new URLSearchParams(location.search); const G=q.get(&#x27;guild&#x27;), U=q.get(&#x27;user&#x27;)||&#x27;&#x27;; const S=parseInt(q.get(&#x27;race&#x27;)||q.get(&#x27;schedule_id&#x27;),10); if(!G||!S){alert(&#x27;おあしすっちのレースページ（guild と race がURLにある）で実行してください&#x27;);return;} let N=120; try{const v=prompt(&#x27;何レースさかのぼって採取しますか？（確定済みのみ取得）&#x27;,String(N));if(v!==null&amp;&amp;/^\d+$/.test(v.trim()))N=Math.max(1,Math.min(1000,parseInt(v.trim(),10)));}catch(e){} const btn=document.createElement(&#x27;div&#x27;); Object.assign(btn.style,{position:&#x27;fixed&#x27;,top:&#x27;12px&#x27;,right:&#x27;12px&#x27;,zIndex:&#x27;99999&#x27;,background:&#x27;#1a1a2e&#x27;,color:&#x27;#e2b96f&#x27;,padding:&#x27;10px 18px&#x27;,borderRadius:&#x27;8px&#x27;,fontFamily:&#x27;sans-serif&#x27;,fontSize:&#x27;14px&#x27;,fontWeight:&#x27;600&#x27;,boxShadow:&#x27;0 4px 12px rgba(0,0,0,.4)&#x27;,border:&#x27;1px solid #e2b96f&#x27;,maxWidth:&#x27;70%&#x27;}); btn.textContent=&#x27;📥 採取準備...&#x27;;document.body.appendChild(btn); const DICT=(typeof PASSIVE_INFO!==&#x27;undefined&#x27;&amp;&amp;PASSIVE_INFO)||(window.PASSIVE_INFO)||{}; const unknown=new Set(); const label=code=&gt;{ if(code==null||code===&#x27;none&#x27;||code===&#x27;&#x27;)return null; const d=DICT[code]; if(d&amp;&amp;d.label)return d.label; unknown.add(code);return code; }; const RANK=r=&gt;r===1?&#x27;🥇&#x27;:r===2?&#x27;🥈&#x27;:r===3?&#x27;🥉&#x27;:(r+&#x27;着&#x27;); const dstr=s=&gt;String(s||&#x27;&#x27;).replace(/-/g,&#x27;/&#x27;); const jget=async u=&gt;{try{const r=await fetch(u);if(!r.ok)return null;return await r.json();}catch(e){return null;}}; const groundOf=o=&gt;{for(const k of [&#x27;ground&#x27;,&#x27;track_condition&#x27;,&#x27;ground_condition&#x27;,&#x27;baba&#x27;,&#x27;condition&#x27;])if(o&amp;&amp;o[k])return o[k];return &#x27;不明&#x27;;}; const oneRace=async(s)=&gt;{ const info=await jget(`${B}/api/race/by-id/${G}/${s}?user=${U}`); if(!info||!Array.isArray(info.pets)||!info.pets.length)return {sid:s,state:&#x27;nodata&#x27;}; const date=info.race_date, time=info.race_time||&#x27;0:00&#x27;; const dist=info.distance||&#x27;&#x27;, surf=info.surface||&#x27;&#x27;; const res=await jget(`${B}/api/race/result/${G}/${date}/${s}?user=${U}`); const rr=res&amp;&amp;Array.isArray(res.results)?res.results:null; if(!rr||!rr.length)return {sid:s,state:&#x27;unfinished&#x27;}; const ground=groundOf(res)!==&#x27;不明&#x27;?groundOf(res):groundOf(info); const byId={};rr.forEach(r=&gt;{byId[r.pet_id]={rank:r.rank,score:r.score};}); const cnt={};info.pets.forEach(h=&gt;{cnt[h.name]=(cnt[h.name]||0)+1;}); const seen={}; const rows=info.pets.map(h=&gt;{ const rs=byId[h.pet_id]; if(!rs||rs.rank==null||rs.score==null)return null; let nm=h.display_name||h.name; if(cnt[h.name]&gt;1){seen[h.name]=(seen[h.name]||0)+1;nm=`${h.name}#${seen[h.name]}`;} const ps=[label(h.passive_skill),label(h.passive_skill_2)].filter(Boolean); return {rank:rs.rank,score:rs.score,name:nm,speed:h.speed,power:h.power, stamina:h.stamina,cond:h.condition_label||&#x27;普通&#x27;,passives:ps}; }).filter(Boolean); if(!rows.length||rows.length!==info.pets.length)return {sid:s,state:&#x27;partial&#x27;}; rows.sort((a,b)=&gt;a.rank-b.rank); const lines=[`[${dstr(date)} ${time}] Oasis-API`,&#x27;&#x27;,`🏁 レース 結果`, `🕘 ${time}｜${dist}｜${surf}｜${ground}`]; rows.forEach(r=&gt;{ lines.push(`${RANK(r.rank)} ${r.name}`,`@Unknown`, `🏃 スピード ${r.speed}`,`🫀 スタミナ ${r.stamina}`,`💥 パワー ${r.power} `, `📊 score ${r.score}`,`📉 コンディション：${r.cond}`); if(r.passives.length)lines.push(`✨ パッシブ：${r.passives.join(&#x27;、&#x27;)}`); }); lines.push(&#x27;&#x27;,&#x27;&#x27;); return {sid:s,state:&#x27;ok&#x27;,date:date,text:lines.join(&#x27;\n&#x27;),n:rows.length}; }; try{ const blocks=[]; let done=0, okCount=0, miss=0, unfinished=0, minDate=null, maxDate=null; const ids=[];for(let i=0;i&lt;N;i++)ids.push(S-i); const BATCH=6; for(let i=0;i&lt;ids.length;i+=BATCH){ const part=ids.slice(i,i+BATCH); const got=await Promise.all(part.map(oneRace)); for(const g of got){ done++; if(g.state===&#x27;ok&#x27;){okCount++;blocks.push([g.sid,g.text]); if(!minDate||g.date&lt;minDate)minDate=g.date; if(!maxDate||g.date&gt;maxDate)maxDate=g.date;} else if(g.state===&#x27;unfinished&#x27;||g.state===&#x27;partial&#x27;)unfinished++; else miss++; } btn.textContent=`📥 採取中 ${done}/${N}（確定 ${okCount}）...`; } blocks.sort((a,b)=&gt;a[0]-b[0]); const header=`# おあしすっち 結果採取（result API）\n`+ `# guild=${G} 対象 schedule_id ${S-N+1}〜${S} 確定 ${okCount}レース\n`+ `# 期間 ${minDate||&#x27;?&#x27;} 〜 ${maxDate||&#x27;?&#x27;}\n\n`; const out=header+blocks.map(b=&gt;b[1]).join(&#x27;&#x27;); let copied=true; try{await navigator.clipboard.writeText(out);}catch(e){copied=false;} if(!copied){ const ta=document.createElement(&#x27;textarea&#x27;); Object.assign(ta.style,{position:&#x27;fixed&#x27;,left:&#x27;2%&#x27;,top:&#x27;8%&#x27;,width:&#x27;96%&#x27;,height:&#x27;74%&#x27;,zIndex:&#x27;99998&#x27;,fontSize:&#x27;11px&#x27;,fontFamily:&#x27;monospace&#x27;}); ta.value=out;document.body.appendChild(ta);ta.focus();ta.select(); try{copied=document.execCommand(&#x27;copy&#x27;);}catch(e){} if(copied)ta.remove();else ta.title=&#x27;Ctrl+A → Ctrl+C でコピー&#x27;; } const warn=unknown.size?` ⚠未知コード:${[...unknown].join(&#x27;/&#x27;)}`:&#x27;&#x27;; if(unknown.size)console.warn(&#x27;Oasis: 辞書に無いパッシブコード:&#x27;,[...unknown]); btn.style.background=okCount?&#x27;#1b5e20&#x27;:&#x27;#e65100&#x27;;btn.style.color=&#x27;#fff&#x27;; btn.style.borderColor=okCount?&#x27;#4caf50&#x27;:&#x27;#ff9800&#x27;; btn.textContent=`${copied?&#x27;✅&#x27;:&#x27;📋&#x27;} 確定${okCount}レース採取 | 未確定${unfinished} | 欠番${miss} | `+ `${copied?&#x27;コピー完了→txtで保存しloggへ&#x27;:&#x27;下の枠を手動コピー&#x27;}${warn}`; setTimeout(()=&gt;btn.remove(),unknown.size?15000:10000); }catch(e){btn.style.background=&#x27;#b71c1c&#x27;;btn.style.borderColor=&#x27;#ef5350&#x27;;btn.textContent=&#x27;❌ エラー: &#x27;+e.message;setTimeout(()=&gt;btn.remove(),8000);} })();">📥 結果を採取</a>
+      <p class="hint">クリックせず、ブックマークバーに<b>ドラッグ＆ドロップ</b>してください。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">3</div>
+    <div>
+      <h3>おあしすっちのレースページで実行</h3>
+      <p>URLに <code>guild</code> と <code>race</code> が入っているページ（券購入ページ等）を開き、
+      ブックマークをクリック。<b>何レースさかのぼるか</b>を聞かれるので数を入れます（既定120）。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">4</div>
+    <div>
+      <h3>テキストを保存して logg フォルダへ</h3>
+      <p>取得が終わるとクリップボードにコピーされます。メモ帳などに貼り付けて
+      <code>harvest_YYYYMMDD.txt</code> のような名前で保存し、<code>logg</code> フォルダに入れてください。
+      次回モデル学習時に自動で読み込まれます。</p>
+      <p class="hint">※ 同じレースを重ねて入れても、ツール側で重複は自動除去されます（二重カウントしません）。</p>
+    </div>
+  </div>
+
+  <hr>
+
+  <h3 style="font-size:.9rem;margin-bottom:.5rem">出力サンプル</h3>
+  <pre class="sample">[2026/08/02 23:00] Oasis-API
+
+🏁 レース 結果
+🕘 23:00｜マイル｜ダート｜良
+🥇 メビウス
+@Unknown
+🏃 スピード 159
+🫀 スタミナ 47
+💥 パワー 49
+📊 score 210.0
+📉 コンディション：好調
+✨ パッシブ：スピードスター、マイル得意
+...</pre>
+
+  <hr>
+
+  <h3 style="font-size:.9rem;margin-bottom:.5rem">手動で登録する場合のコード</h3>
+  <div class="codebox" id="raw"></div>
+  <button class="copybtn" onclick="navigator.clipboard.writeText(document.querySelector('.bm-btn').getAttribute('href'));this.textContent='✓'">コピー</button>
+
+  <footer>おあしすっち予測ツール ／ 結果採取ブックマークレット</footer>
+</div>
+<script>
+document.getElementById('raw').textContent = document.querySelector('.bm-btn').getAttribute('href');
+</script>
+</body>
+</html>
