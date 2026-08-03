@@ -49,7 +49,8 @@ from sklearn.linear_model import Ridge
 STAKE_UNIT          = 10_000   # 3連単 1口 = 10,000 rrc
 MAX_UNITS           = 20       # 1組あたり上限口数
 MAX_TOTAL_UNITS     = 20       # 1レース合計口数の上限（2026/04/17 で 10→20）
-WIN_MAX_UNITS       = 100      # 単勝は 100口まで
+WIN_MAX_UNITS       = 100      # 単勝の1頭あたり上限口数
+WIN_MAX_TOTAL_UNITS = 100      # 単勝は【1レース合計】100口まで（全頭の合算）
 WIN_STAKE_UNIT      = 1_000    # 単勝は 1口 = 1,000 rrc（購入画面の表記）
 MIN_FIELD_TRIFECTA  = 8        # 2026/06/17: 7頭以下は3連単なし
 MAX_FIELD           = 16       # 2026/04/20: 当選 8→16頭
@@ -1295,7 +1296,10 @@ def parse_unified(text):
                 continue
             win_odds = pd.to_numeric(str(r.get('単勝オッズ', '')).strip(), errors='coerce')
             spc = str(r.get('成体種', r.get('adult_key', '')) or '').strip()
+            mine = pd.to_numeric(r.get('自分の購入額', r.get('my_amount', np.nan)),
+                                 errors='coerce')
             horses.append({
+                'my_amount': (float(mine) if pd.notna(mine) else None),
                 'name': str(r.get('馬名', r.get('名前', ''))).strip(),
                 'species': spc or None,
                 'speed': int(sp), 'power': int(pw), 'stamina': int(st),
@@ -1532,12 +1536,195 @@ def unformed_sleeve_picks(combo_prob, disp, od_of, P_total, p_min=0.05, edge_min
     return [(names, p, eff, 1) for names, p in cand[:cap]]
 
 
-def win_bet_picks(names, win_p, odds, bankroll, kelly_frac, edge_min,
-                  max_units=WIN_MAX_UNITS, stake_unit=WIN_STAKE_UNIT, risk_cap_frac=0.10):
-    """単勝の推奨（参考）。表示オッズは自分の購入で下がるため、控えめの分数ケリー。
-    プール額が不明なので希薄化は織り込めない → 保守的に扱うこと。"""
+def estimate_win_pool(before, after, floor=ODDS_FLOOR):
+    """単勝プール総額を「試し買いの前後のオッズ変化」から推定する。
+
+    単勝は控除0%の純パリミュチュエル（実ログ379レースで Σ(1/最終オッズ)=1.000 を確認）。
+    そのため **オッズ自体はシェアしか表さず、プール規模の情報を一切含まない**。
+    自分で少額を入れて、その前後の動きから逆算するしかない。
+
+    原理:
+      od_j = P / P_j（P=プール総額, P_j=その馬への投入額）
+      自分が合計 Δ を入れると P → P+Δ。自分が **買っていない** 馬 j は P_j が変わらないので
+          od_j1 / od_j0 = (P+Δ) / P
+      よって  P = Δ / (od_j1/od_j0 − 1)  … 買っていない馬1頭ごとに1つの推定値が得られる。
+      買った馬 i（自分の投入 Δ_i）からは
+          P = (Δ − od_i1·Δ_i) / (od_i1/od_i0 − 1)
+
+    before/after: parse_unified が返す horses のリスト（name, odds, my_amount を使う）。
+    戻り値: dict（pool, method, per_horse, n_used, spread, delta, messages）
+    """
+    idx_b = {h['name']: h for h in before}
+    idx_a = {h['name']: h for h in after}
+    common = [n for n in idx_b if n in idx_a]
+    msgs = []
+
+    # 自分の投入増分
+    deltas = {}
+    for n in common:
+        mb = idx_b[n].get('my_amount')
+        ma = idx_a[n].get('my_amount')
+        if mb is None or ma is None:
+            continue
+        d = float(ma) - float(mb)
+        if d > 0:
+            deltas[n] = d
+    total_delta = sum(deltas.values())
+    if total_delta <= 0:
+        return {'ok': False, 'pool': None, 'messages': [
+            '試し買いの増分が見つかりません。①の後に実際に単勝を買ってから②を取得してください。'
+            '（自分の購入額が両方のデータに入っている必要があります）']}
+
+    ests, detail = [], []
+    for n in common:
+        ob = idx_b[n].get('odds')
+        oa = idx_a[n].get('odds')
+        if ob is None or oa is None or not (np.isfinite(ob) and np.isfinite(oa)):
+            continue
+        if ob <= floor or oa <= floor:
+            detail.append({'name': n, 'est': None, 'note': f'オッズが下限({floor})付近で使えない'})
+            continue
+        ratio = oa / ob
+        d_i = deltas.get(n, 0.0)
+        if d_i > 0:
+            denom = ratio - 1.0
+            num = total_delta - oa * d_i
+        else:
+            denom = ratio - 1.0
+            num = total_delta
+        if abs(denom) < 1e-9:
+            detail.append({'name': n, 'est': None, 'note': 'オッズが動いていない'})
+            continue
+        est = num / denom
+        if est <= 0 or not np.isfinite(est):
+            detail.append({'name': n, 'est': None, 'note': '推定値が不正（他の人の投票が入った可能性）'})
+            continue
+        detail.append({'name': n, 'est': float(est), 'bet': d_i,
+                       'od_before': float(ob), 'od_after': float(oa),
+                       'note': '自分が買った馬' if d_i > 0 else ''})
+        ests.append(est)
+
+    if not ests:
+        return {'ok': False, 'pool': None, 'per_horse': detail, 'delta': total_delta,
+                'messages': ['オッズが動いていないか、下限に張り付いていて推定できません。'
+                             '試し買いの口数を増やすか、市場が動いてから試してください。']}
+
+    arr = np.array(sorted(ests))
+    pool = float(np.median(arr))
+    spread = float((arr.max() - arr.min()) / max(pool, 1e-9))
+    if spread > 0.35:
+        msgs.append(f'⚠ 馬ごとの推定にばらつきがあります（±{spread*100:.0f}%）。'
+                    '試し買いの前後で他の人も投票した可能性があります。'
+                    '短い間隔で①②を取り直すと精度が上がります。')
+    if len(ests) < 3:
+        msgs.append('△ 推定に使えた馬が少ないため精度は粗いです。')
+    msgs.append(f'自分の投入 {total_delta:,.0f} rrc の前後で、'
+                f'{len(ests)}頭のオッズ変化から推定しました。')
+    return {'ok': True, 'pool': pool, 'per_horse': detail, 'n_used': len(ests),
+            'spread': spread, 'delta': total_delta, 'messages': msgs}
+
+
+def win_bet_picks_pool(names, win_p, odds, pool, bankroll, kelly_frac, edge_min,
+                       stake_unit=WIN_STAKE_UNIT, total_units=WIN_MAX_TOTAL_UNITS,
+                       max_units=WIN_MAX_UNITS, risk_cap_frac=0.10, my_units=None):
+    """プール総額が分かっている場合の単勝配分（希薄化を織り込む）。
+
+    パリミュチュエルなので、自分が k口 入れると
+        実効オッズ = (P + Σk·u) / (P_i + k_i·u)
+    と必ず下がる。表示オッズのまま計算すると期待値を過大評価するので、
+    合計EVが最大になる配分を「限界EVが一番大きい馬へ1口ずつ」の貪欲法で求める。
+    プールが小さいほど希薄化は激しく、口数は自然に絞られる。
+    """
+    n = len(names)
+    od = np.asarray(odds, dtype=float)
+    p = np.asarray(win_p, dtype=float)
+    ok = np.isfinite(od) & (od > 1.0) & (p > 0)
+    if pool is None or pool <= 0 or not ok.any():
+        return [], None
+    P_i = np.where(ok, pool / np.where(ok, od, 1.0), 0.0)      # 各馬への現在の投入額
+    k = np.zeros(n, dtype=int)
+    if my_units is not None:
+        k0 = np.asarray(my_units, dtype=int)                    # すでに買った分
+    else:
+        k0 = np.zeros(n, dtype=int)
+
+    risk_units = max(1, int((risk_cap_frac * bankroll) // stake_unit))
+    budget = min(int(total_units), risk_units) - int(k0.sum())
+    if budget <= 0:
+        return [], {'note': '既に上限まで購入済み'}
+
+    def total_ev(kv):
+        add = kv + k0
+        P_new = pool + add.sum() * stake_unit
+        Pi_new = P_i + add * stake_unit
+        with np.errstate(divide='ignore', invalid='ignore'):
+            eff = np.where(Pi_new > 0, P_new / Pi_new, 0.0)
+        return float(np.sum(np.where(add > 0, add * stake_unit * (p * eff - 1.0), 0.0)))
+
+    # ケリー上限（1口時の実効オッズで計算）
+    caps = np.zeros(n, dtype=int)
+    for i in range(n):
+        if not ok[i]:
+            continue
+        eff1 = (pool + stake_unit) / (P_i[i] + stake_unit)
+        edge = p[i] * eff1 - 1
+        if edge < edge_min or eff1 <= 1:
+            continue
+        f = edge / (eff1 - 1)
+        caps[i] = max(0, min(int((kelly_frac * f * bankroll) // stake_unit), int(max_units)))
+
+    base = total_ev(k)
+    used = 0
+    while used < budget:
+        best_i, best_gain = -1, 1e-9
+        for i in range(n):
+            if not ok[i] or k[i] + k0[i] >= caps[i]:
+                continue
+            trial = k.copy()
+            trial[i] += 1
+            g = total_ev(trial) - base
+            if g > best_gain:
+                best_gain, best_i = g, i
+        if best_i < 0:
+            break
+        k[best_i] += 1
+        base = total_ev(k)
+        used += 1
+
+    add = k + k0
+    P_new = pool + add.sum() * stake_unit
     out = []
-    cap_units = max(1, int((risk_cap_frac * bankroll) // stake_unit))
+    for i in range(n):
+        if k[i] <= 0:
+            continue
+        eff = P_new / (P_i[i] + add[i] * stake_unit)
+        out.append({'name': names[i], 'p': float(p[i]), 'odds': float(od[i]),
+                    'eff_od': float(eff), 'edge': float(p[i] * eff - 1),
+                    'units': int(k[i]), 'stake': int(k[i] * stake_unit),
+                    'ev': float(k[i] * stake_unit * (p[i] * eff - 1))})
+    out.sort(key=lambda r: -r['ev'])
+    summary = {'units': int(k.sum()), 'invest': int(k.sum() * stake_unit),
+               'ev': float(base), 'pool_before': float(pool), 'pool_after': float(P_new),
+               'hit': float(sum(r['p'] for r in out)), 'unit': stake_unit,
+               'max_units': int(total_units), 'already': int(k0.sum())}
+    return out, summary
+
+
+def win_bet_picks(names, win_p, odds, bankroll, kelly_frac, edge_min,
+                  max_units=WIN_MAX_UNITS, stake_unit=WIN_STAKE_UNIT,
+                  risk_cap_frac=0.10, total_units=WIN_MAX_TOTAL_UNITS):
+    """単勝の推奨（参考）。
+
+    ゲーム仕様: 1レースの単勝は **合計** total_units 口まで（全頭の合算）。
+    1頭あたりも max_units 口までだが、実際には合計側が先に効くことが多い。
+
+    配分は「1口あたりの期待値（＝エッジ）が大きい買い目から、分数ケリーの口数まで
+    埋めていく」貪欲法。単勝は自分の購入による希薄化を織り込めない（プール額が
+    分からない）ので、EVは口数に対して線形とみなしている。
+
+    プール額が不明な以上ここは参考値。控えめに使うこと。
+    """
+    cand = []
     for i, nm in enumerate(names):
         od = odds[i]
         p = win_p[i]
@@ -1547,13 +1734,29 @@ def win_bet_picks(names, win_p, odds, bankroll, kelly_frac, edge_min,
         if edge < edge_min:
             continue
         f = edge / (od - 1)
-        k = int((kelly_frac * f * bankroll) // stake_unit)
-        k = max(0, min(k, max_units, cap_units))
-        if k >= 1:
-            out.append({'name': nm, 'p': float(p), 'odds': float(od),
-                        'edge': float(edge), 'units': int(k),
-                        'stake': int(k * stake_unit),
-                        'ev': float(edge * k * stake_unit)})
+        k_kelly = int((kelly_frac * f * bankroll) // stake_unit)
+        cap = max(0, min(k_kelly, int(max_units)))
+        if cap >= 1:
+            cand.append({'name': nm, 'p': float(p), 'odds': float(od),
+                         'edge': float(edge), 'cap': cap})
+
+    # 合計上限 = min(ゲーム仕様の合計口数, 資金リスク上限)
+    risk_units = max(1, int((risk_cap_frac * bankroll) // stake_unit))
+    budget = min(int(total_units), risk_units)
+
+    cand.sort(key=lambda r: -r['edge'])        # 1口あたりEVが大きい順
+    out, used = [], 0
+    for c in cand:
+        if used >= budget:
+            break
+        k = min(c['cap'], budget - used)
+        if k < 1:
+            continue
+        used += k
+        out.append({'name': c['name'], 'p': c['p'], 'odds': c['odds'],
+                    'edge': c['edge'], 'units': int(k),
+                    'stake': int(k * stake_unit),
+                    'ev': float(c['edge'] * k * stake_unit)})
     out.sort(key=lambda r: -r['ev'])
     return out
 
@@ -1716,10 +1919,20 @@ def analyze(raw_text, bundle, settings=None):
     win_unit = detect_stake_unit(raw_text, default=WIN_STAKE_UNIT)
     res['win_unit'] = win_unit
     res['win_picks'] = []
+    res['win_summary'] = None
     if s.get('win_bets') and mkt_p is not None:
         res['win_picks'] = win_bet_picks(
             disp, win_p, odds, s['bankroll'], s['kelly_fraction'],
-            s.get('win_edge_min', 0.15), stake_unit=win_unit)
+            s.get('win_edge_min', 0.15), stake_unit=win_unit,
+            risk_cap_frac=s['max_risk_frac'])
+        if res['win_picks']:
+            wu = sum(r['units'] for r in res['win_picks'])
+            res['win_summary'] = {
+                'units': wu, 'max_units': WIN_MAX_TOTAL_UNITS,
+                'invest': wu * win_unit, 'unit': win_unit,
+                'ev': sum(r['ev'] for r in res['win_picks']),
+                'hit': float(sum(r['p'] for r in res['win_picks'])),
+                'capped': wu >= WIN_MAX_TOTAL_UNITS}
 
     # --- 3連単 ---
     exact_cp, name_cp = {}, {}

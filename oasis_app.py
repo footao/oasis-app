@@ -374,7 +374,11 @@ with tab_pred:
                         st.caption("※ 一部は素名フォールバックで照合（同名別個体を合算）。")
                     if result.get("unmatched_names"):
                         st.warning("画面に無い馬: " + ", ".join(result["unmatched_names"]))
-                    with st.expander("📋 購入リスト（コピー用・1行1口）"):
+                    with st.expander("📋 購入リスト（コピー用）"):
+                        comp = [f"{r['combo']} x{r['k']}" for r in rows if r["k"] > 0]
+                        st.caption("一括購入ブックマークレットにそのまま貼れます。")
+                        st.code("\n".join(comp) or "(なし)", language=None)
+                        st.caption("1行1口の形式が必要な場合はこちら")
                         st.code("\n".join(result["purchase_lines"]) or "(なし)", language=None)
                 else:
                     st.info(f"見送り: エッジ {sm['edge_pct']:.0f}% 以上の成立買い目がありません。")
@@ -389,16 +393,107 @@ with tab_pred:
 
             if result.get("win_picks"):
                 st.subheader("🥇 単勝の推奨（参考）")
+                ws = result.get("win_summary") or {}
+                if ws:
+                    w1, w2, w3 = st.columns(3)
+                    w1.metric("投資額", f"{ws['invest']:,} rrc",
+                              f"{ws['units']}口 / 上限{ws['max_units']}口")
+                    w2.metric("理論EV合計", f"{ws['ev']:+,.0f} rrc")
+                    w3.metric("いずれか的中", f"{min(ws['hit'],1.0)*100:.0f}%")
+                    if ws.get("capped"):
+                        st.caption(f"※ 1レースの単勝は**合計{ws['max_units']}口まで**という"
+                                   "ゲーム仕様の上限に達したため、エッジの大きい順に配分しています。")
                 st.dataframe(pd.DataFrame([{
                     "馬": r["name"], "モデル勝率": f"{r['p']*100:.1f}%",
                     "オッズ": f"{r['odds']:.2f}", "エッジ": f"{r['edge']*100:+.0f}%",
                     "口数": f"{r['units']}口", "投資": f"{r['stake']:,}",
                     "理論EV": f"{r['ev']:+,.0f}"} for r in result["win_picks"]]),
                     **_wide(hide_index=True))
+                with st.expander("📋 単勝の購入リスト（コピー用）"):
+                    st.code("\n".join(f"{r['name']} x{r['units']}"
+                                      for r in result["win_picks"]) or "(なし)", language=None)
                 st.caption(f"1口 = {result.get('win_unit', oc.WIN_STAKE_UNIT):,} rrc"
-                           f"（最大 {oc.WIN_MAX_UNITS}口）。"
+                           f"（1レース**合計 {oc.WIN_MAX_TOTAL_UNITS}口**まで）。"
                            "⚠ 単勝はプール額が分からないため、自分の購入によるオッズ低下を"
                            "織り込めていません。表示より実効オッズは必ず低くなります。")
+
+            # ---------- 単勝：プール推定 ----------
+            with st.expander("🥇 単勝：プールを実測して推奨を出す（少額の試し買いで測ります）"):
+                st.markdown(
+                    "単勝は**控除0%の純パリミュチュエル**で、実ログ379レースすべてで "
+                    "`Σ(1/最終オッズ) = 1.000` でした。つまり**オッズは各馬のシェアしか表さず、"
+                    "プール総額の情報を一切含みません**。"
+                    "そのため少額で試し買いして、その前後のオッズの動きから逆算します。")
+                st.markdown(
+                    "**手順** ① オッズ取得ブックマークレットでデータを取る → "
+                    "② 好きな馬に少額（3〜10口目安）だけ単勝を買う → "
+                    "③ もう一度データを取る → 下に①と③を貼る")
+                pc1, pc2 = st.columns(2)
+                t_before = pc1.text_area("① 試し買い **前** のデータ", height=110, key="wp_b")
+                t_after = pc2.text_area("③ 試し買い **後** のデータ", height=110, key="wp_a")
+                if st.button("🔎 プールを推定して推奨を出す", **_wide()):
+                    if not (t_before.strip() and t_after.strip()):
+                        st.warning("①と③の両方を貼り付けてください。")
+                    else:
+                        try:
+                            hb = oc.parse_unified(t_before)[0]
+                            ha = oc.parse_unified(t_after)[0]
+                            est = oc.estimate_win_pool(hb, ha)
+                        except Exception as e:
+                            est = {"ok": False, "messages": [f"解析に失敗しました: {e}"]}
+                        for m in est.get("messages", []):
+                            (st.warning if m.startswith("⚠") else st.info)(m)
+                        if est.get("ok"):
+                            st.metric("推定プール総額", f"{est['pool']:,.0f} rrc",
+                                      f"{est['n_used']}頭から / ばらつき ±{est['spread']*100:.0f}%")
+                            det = [d for d in est["per_horse"] if d.get("est")]
+                            if det:
+                                st.dataframe(pd.DataFrame([{
+                                    "馬": d["name"],
+                                    "前": f"{d['od_before']:.2f}", "後": f"{d['od_after']:.2f}",
+                                    "この馬からの推定": f"{d['est']:,.0f}",
+                                    "備考": d.get("note", "")} for d in det]),
+                                    **_wide(hide_index=True))
+                            res2 = oc.analyze(t_after, bundle, settings)
+                            if res2.get("ok"):
+                                sw = res2["single_win"]
+                                nm = [r["name"] for r in sw]
+                                pp = [r["model_p"] for r in sw]
+                                oo = [(r["odds"] if r["odds"] else float("nan")) for r in sw]
+                                mine = {h["name"]: (h.get("my_amount") or 0) for h in ha}
+                                unit = res2.get("win_unit", oc.WIN_STAKE_UNIT)
+                                ku = [int((mine.get(n, 0) or 0) // unit) for n in nm]
+                                picks, summ = oc.win_bet_picks_pool(
+                                    nm, pp, oo, est["pool"], settings["bankroll"],
+                                    settings["kelly_fraction"], settings["win_edge_min"],
+                                    stake_unit=unit, risk_cap_frac=settings["max_risk_frac"],
+                                    my_units=ku)
+                                if picks:
+                                    m1, m2, m3 = st.columns(3)
+                                    m1.metric("追加購入", f"{summ['invest']:,} rrc",
+                                              f"{summ['units']}口"
+                                              + (f"（購入済 {summ['already']}口）" if summ['already'] else ""))
+                                    m2.metric("実効EV合計", f"{summ['ev']:+,.0f} rrc")
+                                    m3.metric("いずれか的中", f"{min(summ['hit'],1.0)*100:.0f}%")
+                                    st.dataframe(pd.DataFrame([{
+                                        "馬": r["name"], "モデル勝率": f"{r['p']*100:.1f}%",
+                                        "表示od": f"{r['odds']:.2f}",
+                                        "実効od": f"{r['eff_od']:.2f}",
+                                        "エッジ": f"{r['edge']*100:+.0f}%",
+                                        "口数": f"{r['units']}口",
+                                        "投資": f"{r['stake']:,}",
+                                        "実効EV": f"{r['ev']:+,.0f}"} for r in picks]),
+                                        **_wide(hide_index=True))
+                                    st.caption(
+                                        f"自分が {summ['units']}口 入れるとプールは "
+                                        f"{summ['pool_before']:,.0f} → {summ['pool_after']:,.0f} rrc になり、"
+                                        "その希薄化を織り込んだ実効オッズで計算しています。"
+                                        f"1レース合計 {summ['max_units']}口が上限です。")
+                                    st.code("\n".join(f"{r['name']} x{r['units']}"
+                                                      for r in picks), language=None)
+                                else:
+                                    st.info("推定プールでは、エッジ条件を満たす単勝がありません"
+                                            "（プールが小さいと希薄化が大きく、+EVになりにくいです）。")
 
             st.subheader("🏆 的中確率ランキング")
             rk = result["ranking"]
