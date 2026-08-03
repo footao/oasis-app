@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '2.7.0'
+CORE_VERSION = '2.8.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -588,7 +588,7 @@ def parse_results(text):
         date = _date_before(text, m.start())
         r_key = f"{date} {r_time}"
 
-        for block in re.split(r'(?=🥇|🥈|🥉|\d+着)', body):
+        for block in re.split(r'(?=🥇|🥈|🥉|(?<!\d)\d{1,2}着)', body):
             if not block.strip():
                 continue
             hm = re.search(r'(🥇|🥈|🥉|(\d+)着)\s+([^\n@]+?)\s*\n(?:(@[^\n\r]+)\s*\n)?', block)
@@ -818,8 +818,9 @@ def _calibrate_sigma(oof, df, resid_std, n_draw=40_000, seed=7):
     races = _recent_races(df)
     if len(races) < 6:
         return max(resid_std * 0.6, 1e-4), []
-    rng = np.random.default_rng(seed)
-    zs = {k: rng.standard_normal((n_draw, len(g))) for k, g in races}
+    # 乱数を全レース分まとめて持つと 500MB 超になるので、レースごとに使い捨てる。
+    # σの比較で同じ乱数を使いたいので、レースごとに固定シードで作り直す。
+    rng_seeds = {k: seed * 1000003 + i for i, (k, g) in enumerate(races)}
     grid = np.unique(np.round(np.concatenate([
         np.linspace(0.15, 2.0, 20) * max(resid_std, 1e-4),
         np.array([0.01, 0.02, 0.03, 0.05, 0.08, 0.12, 0.2])]), 5))
@@ -827,7 +828,8 @@ def _calibrate_sigma(oof, df, resid_std, n_draw=40_000, seed=7):
     for s in grid:
         tot = 0.0
         for k, g in races:
-            tot += _order_loglik(oof[g.index.values], g['score'].values, s, zs[k])
+            z = np.random.default_rng(rng_seeds[k]).standard_normal((n_draw, len(g)))
+            tot += _order_loglik(oof[g.index.values], g['score'].values, s, z)
         curve.append((float(s), tot / len(races)))
     best = max(curve, key=lambda t: t[1])[0]
     return max(best, 1e-4), curve
@@ -1284,6 +1286,7 @@ def parse_unified(text):
     mh = re.search(r'===\s*出走馬一覧\s*===\s*\n(.*?)(?=\n\s*===|\Z)', text, re.S)
     mo = re.search(r'===\s*3連単オッズ\s*===\s*\n(.*?)(?=\n\s*===|\Z)', text, re.S)
 
+    skipped = []
     if mh:
         df = pd.read_csv(io.StringIO(mh.group(1).strip()))
         df.columns = [str(c).strip() for c in df.columns]
@@ -1306,6 +1309,7 @@ def parse_unified(text):
             pw = pd.to_numeric(r.get('POWER', r.get('パワー', np.nan)), errors='coerce')
             st = pd.to_numeric(r.get('STAMINA', r.get('スタミナ', np.nan)), errors='coerce')
             if pd.isna(sp) or pd.isna(pw) or pd.isna(st):
+                skipped.append(str(r.get('馬名', r.get('名前', '?'))).strip())
                 continue
             win_odds = pd.to_numeric(str(r.get('単勝オッズ', '')).strip(), errors='coerce')
             spc = str(r.get('成体種', r.get('adult_key', '')) or '').strip()
@@ -1330,6 +1334,8 @@ def parse_unified(text):
             key = (str(r['1着']).strip(), str(r['2着']).strip(), str(r['3着']).strip())
             odds[key] = float(r['_o'])
 
+    if skipped:
+        meta['skipped_rows'] = skipped
     if meta:
         for h in horses:
             h.setdefault('_meta', meta)
@@ -1346,6 +1352,13 @@ def parse_betting_screen(text):
         if len(lines) < 3:
             continue
         sp_m = re.search(r'(\d+)\s*SPEED', block, re.I)
+        # 馬名は「コンディション：」の直前の行。先頭ブロックにはページのヘッダが
+        # 混ざるため、単純に lines[0] を使うと馬名を取り違える。
+        name = lines[0]
+        for li, l in enumerate(lines):
+            if re.match(r'コンディション\s*[:：]', l) and li >= 1:
+                name = lines[li - 1]
+                break
         pw_m = re.search(r'(\d+)\s*POWER', block, re.I)
         st_m = re.search(r'(\d+)\s*STAM', block, re.I)
         if not (sp_m and pw_m and st_m):
@@ -1361,7 +1374,7 @@ def parse_betting_screen(text):
         c_m = re.search(r'(好調|普通|不調)', block)
         od_m = re.search(r'オッズ\s*[:：]?\s*([0-9.]+)', block)
         horses.append({
-            'name': lines[0],
+            'name': name,
             'speed': int(sp_m.group(1)), 'power': int(pw_m.group(1)),
             'stamina': int(st_m.group(1)),
             'condition': c_m.group(1) if c_m else '普通',
@@ -1466,7 +1479,15 @@ def optimal_units_ev(p, od, P_tot, stake_unit=STAKE_UNIT, max_units=MAX_UNITS):
         else:
             return 0, 0.0, od
     else:
-        k = min(max_units, int(k_raw))
+        # 連続解の floor と floor+1 を比べる（floor だけだとEVを取りこぼす）
+        def _ev(kk):
+            if kk <= 0:
+                return -1.0
+            e = (P_tot + kk * stake_unit) / (P_c + kk * stake_unit)
+            return (p * e - 1) * stake_unit * kk
+        k_lo = min(max_units, int(k_raw))
+        k_hi = min(max_units, k_lo + 1)
+        k = k_hi if _ev(k_hi) > _ev(k_lo) else k_lo
     eff_od = (P_tot + k * stake_unit) / (P_c + k * stake_unit)
     return k, (p * eff_od - 1) * stake_unit * k, eff_od
 
@@ -1574,20 +1595,37 @@ def estimate_win_pool(before, after, floor=None):
     （高オッズの馬ほど相対誤差が小さい）。そこで比 R を **重み od² の加重平均**で求める。
     これが分散最小で、丸め誤差だけを考えたときの理論精度も同時に計算できる。
     """
-    idx_b = {h['name']: h for h in before}
-    idx_a = {h['name']: h for h in after}
-    common = [n for n in idx_b if n in idx_a]
+    # 同名馬がいると名前キーの辞書では1頭消えるので、まず「名前+ステータス」で対応付け、
+    # 駄目なら出走順（位置）で対応付ける。
+    def _key(h):
+        return (str(h.get('name', '')).strip(), h.get('speed'), h.get('power'), h.get('stamina'))
+
+    pair = []
+    kb = {}
+    for h in before:
+        kb.setdefault(_key(h), []).append(h)
+    used = {}
+    for h in after:
+        k = _key(h)
+        i = used.get(k, 0)
+        cand = kb.get(k, [])
+        if i < len(cand):
+            pair.append((cand[i], h))
+            used[k] = i + 1
+    if len(pair) < len(after) and len(before) == len(after):
+        pair = list(zip(before, after))          # 位置でのフォールバック
     msgs = []
 
     deltas = {}
-    for n in common:
-        mb, ma = idx_b[n].get('my_amount'), idx_a[n].get('my_amount')
+    total_delta = 0.0
+    for hb, ha in pair:
+        mb, ma = hb.get('my_amount'), ha.get('my_amount')
         if mb is None or ma is None:
             continue
         d = float(ma) - float(mb)
         if d > 0:
-            deltas[n] = d
-    total_delta = sum(deltas.values())
+            deltas[id(ha)] = d
+            total_delta += d
     if total_delta <= 0:
         return {'ok': False, 'pool': None, 'messages': [
             '試し買いの増分が見つかりません。①の後に実際に単勝を買ってから②を取得してください。'
@@ -1595,9 +1633,10 @@ def estimate_win_pool(before, after, floor=None):
 
     sw = sr = 0.0
     detail, singles = [], []
-    for n in common:
-        ob, oa = idx_b[n].get('odds'), idx_a[n].get('odds')
-        d_i = deltas.get(n, 0.0)
+    for hb, ha in pair:
+        n = str(ha.get('name', ''))
+        ob, oa = hb.get('odds'), ha.get('odds')
+        d_i = deltas.get(id(ha), 0.0)
         note = '試し買いした馬' if d_i > 0 else ''
         if ob is None or oa is None or not (np.isfinite(ob) and np.isfinite(oa)) \
                 or ob <= 0 or oa <= 0:
@@ -1675,10 +1714,9 @@ def win_bet_picks_pool(names, win_p, odds, pool, bankroll, kelly_frac, edge_min,
     # 表示オッズ 1.5 をそのまま使うと実際とかけ離れるので 0 として扱う。
     P_i = np.where(ok & ~unb, pool / np.where(od > 0, od, 1.0), 0.0)
     k = np.zeros(n, dtype=int)
-    if my_units is not None:
-        k0 = np.asarray(my_units, dtype=int)                    # すでに買った分
-    else:
-        k0 = np.zeros(n, dtype=int)
+    # k0 = すでに買った分。pool と P_i は「現在の値」＝ k0 を含んでいるので、
+    # プールの再計算では k0 を足してはいけない（足すと二重計上になり希薄化を過小評価する）。
+    k0 = np.zeros(n, dtype=int) if my_units is None else np.asarray(my_units, dtype=int)
 
     risk_units = max(1, int((risk_cap_frac * bankroll) // stake_unit))
     budget = min(int(total_units), risk_units) - int(k0.sum())
@@ -1686,12 +1724,12 @@ def win_bet_picks_pool(names, win_p, odds, pool, bankroll, kelly_frac, edge_min,
         return [], {'note': '既に上限まで購入済み'}
 
     def total_ev(kv):
-        add = kv + k0
-        P_new = pool + add.sum() * stake_unit
-        Pi_new = P_i + add * stake_unit
+        """これから追加する kv 口ぶんの期待値。既存の k0 は pool / P_i に織り込み済み。"""
+        P_new = pool + kv.sum() * stake_unit
+        Pi_new = P_i + kv * stake_unit
         with np.errstate(divide='ignore', invalid='ignore'):
             eff = np.where(Pi_new > 0, P_new / Pi_new, 0.0)
-        return float(np.sum(np.where(add > 0, add * stake_unit * (p * eff - 1.0), 0.0)))
+        return float(np.sum(np.where(kv > 0, kv * stake_unit * (p * eff - 1.0), 0.0)))
 
     # ケリー上限（1口時の実効オッズで計算）
     caps = np.zeros(n, dtype=int)
@@ -1723,13 +1761,12 @@ def win_bet_picks_pool(names, win_p, odds, pool, bankroll, kelly_frac, edge_min,
         base = total_ev(k)
         used += 1
 
-    add = k + k0
-    P_new = pool + add.sum() * stake_unit
+    P_new = pool + k.sum() * stake_unit
     out = []
     for i in range(n):
         if k[i] <= 0:
             continue
-        eff = P_new / (P_i[i] + add[i] * stake_unit)
+        eff = P_new / (P_i[i] + k[i] * stake_unit)
         out.append({'name': names[i], 'p': float(p[i]),
                     'odds': (None if unb[i] else float(od[i])), 'unbet': bool(unb[i]),
                     'eff_od': float(eff), 'edge': float(p[i] * eff - 1),
@@ -1868,6 +1905,11 @@ def analyze(raw_text, bundle, settings=None):
 
     n = len(horses)
     res['n_field'] = n
+    _sk = ((horses[0].get('_meta') or {}).get('skipped_rows') if horses else None)
+    if _sk:
+        res['messages'].append(
+            f'⚠ ステータスが読めず除外した行が {len(_sk)}件 あります: {", ".join(map(str, _sk[:6]))}。'
+            '出走頭数が変わると全確率がずれるので、貼り付けデータを確認してください。')
     if n < MIN_FIELD_TRIFECTA:
         res['messages'].append(
             f'⚠ 出走 {n}頭。現行ルールでは {MIN_FIELD_TRIFECTA}頭未満のレースで3連単は購入できません'
@@ -1903,6 +1945,15 @@ def analyze(raw_text, bundle, settings=None):
     if unseen_cond:
         res['messages'].append('⚠ 未学習コンディション（baseline扱い）: ' + ', '.join(unseen_cond))
 
+    if s['dist'] not in DIST_LIST:
+        return {'ok': False, 'error':
+                f'距離「{s["dist"]}」は未知です（対応: {" / ".join(DIST_LIST)}）。'
+                'このまま計算するとステータスが一切効かず、全馬同じ確率になってしまうため中止しました。'
+                'サイドバーの距離を選び直すか、貼り付けデータの「レース距離」を確認してください。'}
+    if s['track'] not in TRACK_LIST:
+        res['messages'].append(
+            f'⚠ 馬場「{s["track"]}」は未知です（対応: {" / ".join(TRACK_LIST)}）。'
+            '芝得意/ダート得意が発動しない扱いになります。')
     res['dist'], res['track'], res['ground'] = s['dist'], s['track'], s['ground']
 
     # --- 予測 + シミュレーション ---
@@ -2032,11 +2083,20 @@ def analyze(raw_text, bundle, settings=None):
         name_cp[bk] = name_cp.get(bk, 0.0) + p
     screen_names = set(disp)
 
+    # 素名フォールバックは「同名馬が居ない場合」に限る。
+    # 同名馬が居るのに素名で引くと、別個体の確率をコピーしてしまい
+    # 実力の無い方の組にも同額を配分してしまう（重大な誤配分）。
+    _bare_counts = {}
+    for _d in disp:
+        _b = bare(_d)
+        _bare_counts[_b] = _bare_counts.get(_b, 0) + 1
+    _bare_unique = {b for b, c in _bare_counts.items() if c == 1}
+
     def lookup_prob(combo):
         if combo in exact_cp:
             return exact_cp[combo], 'exact'
         bk = tuple(bare(x) for x in combo)
-        if bk in name_cp:
+        if all(x in _bare_unique for x in bk) and bk in name_cp:
             return name_cp[bk], 'bare'
         return 0.0, 'none'
 
@@ -2118,6 +2178,7 @@ def analyze(raw_text, bundle, settings=None):
             max_risk_frac=s['max_risk_frac'], edge_min=s['edge_min'],
             budget=MAX_TOTAL_UNITS, max_per_combo=MAX_UNITS)
 
+        risk_units_cap = max(1, int((s['max_risk_frac'] * s['bankroll']) // STAKE_UNIT))
         alloc_rows, picks, purchase_lines, total_units = [], [], [], 0
         for combo, p, od, ev in rows:
             k, eff_ev, eff_od = alloc.get(combo, (0, 0.0, od))
@@ -2139,7 +2200,7 @@ def analyze(raw_text, bundle, settings=None):
                 p_min=s.get('unformed_p_min', 0.05),
                 edge_min=s.get('unformed_edge_min', 0.30),
                 max_units=s.get('unformed_max_units', 5),
-                remaining_budget=MAX_TOTAL_UNITS - total_units)
+                remaining_budget=min(MAX_TOTAL_UNITS, risk_units_cap) - total_units)
             for names, p, eff_od, k in sleeve:
                 eff_ev = (p * eff_od - 1) * STAKE_UNIT * k
                 alloc_rows.append({
@@ -2265,6 +2326,10 @@ LOG_COLUMNS = ['bet_id', 'time', 'race_id', 'bet_type', 'combo', 'model_prob',
                'odds', 'stake', 'status', 'result', 'payout', 'pnl']
 
 
+class BetLogReadError(RuntimeError):
+    """ベットログの読み込みに失敗（この場合は絶対に書き込まない）。"""
+
+
 class BetLog:
     """賭けと結果の記録。保存先はローカルCSV、または store（Google スプレッドシート等）。
 
@@ -2297,17 +2362,27 @@ class BetLog:
                 df[c] = '' if c in ('result', 'combo', 'status') else 0
         return df[LOG_COLUMNS]
 
-    def load(self):
+    def load(self, strict=False):
+        """strict=True のときは読み込み失敗を例外にする。
+        書き込み前は必ず strict=True で読むこと。読めないのに「空」と誤認したまま
+        保存すると、既存のログを丸ごと消してしまう。"""
         if self.store is not None:
             try:
                 return self._normalize(self.store.read_df())
-            except Exception:
+            except Exception as e:
+                if strict:
+                    raise BetLogReadError(
+                        f'ベットログを読めませんでした（保存先: {self.location}）。'
+                        f'既存の記録を失わないよう、書き込みを中止します。原因: {e}') from e
                 return pd.DataFrame(columns=LOG_COLUMNS)
         if os.path.exists(self.path):
             try:
                 return self._normalize(pd.read_csv(self.path, encoding='utf-8-sig'))
-            except Exception:
-                pass
+            except Exception as e:
+                if strict:
+                    raise BetLogReadError(
+                        f'ベットログを読めませんでした（{self.path}）。'
+                        f'既存の記録を失わないよう、書き込みを中止します。原因: {e}') from e
         return pd.DataFrame(columns=LOG_COLUMNS)
 
     def _save(self, df):
@@ -2338,15 +2413,22 @@ class BetLog:
         return bool((df['race_id'].astype(str) == str(race_id)).any()) if len(df) else False
 
     def record(self, race_id, picks, unit=STAKE_UNIT, bet_type='3連単'):
-        df = self.load()
-        base = int(df['bet_id'].max()) + 1 if len(df) else 1
+        df = self.load(strict=True)
+        ids = pd.to_numeric(df['bet_id'], errors='coerce') if len(df) else pd.Series(dtype=float)
+        base = int(ids.max()) + 1 if len(ids) and ids.notna().any() else 1
         new = []
         for i, (combo, prob, od, units) in enumerate(picks):
             name = ' → '.join(combo) if isinstance(combo, (tuple, list)) else str(combo)
+            try:
+                od_f = float(od)
+                if not math.isfinite(od_f):
+                    od_f = 0.0
+            except (TypeError, ValueError):
+                od_f = 0.0          # 未投票馬など、オッズが決まっていない買い目
             new.append({'bet_id': base + i,
                         'time': datetime.now().isoformat(timespec='seconds'),
                         'race_id': race_id, 'bet_type': bet_type, 'combo': name,
-                        'model_prob': round(float(prob), 5), 'odds': float(od),
+                        'model_prob': round(float(prob), 5), 'odds': od_f,
                         'stake': int(units) * int(unit), 'status': 'pending',
                         'result': '', 'payout': 0, 'pnl': 0})
         df = pd.concat([df, pd.DataFrame(new)], ignore_index=True)
@@ -2354,7 +2436,7 @@ class BetLog:
         return len(new)
 
     def settle(self, race_id, order3):
-        df = self.load()
+        df = self.load(strict=True)
         for col in ('payout', 'pnl', 'odds', 'stake'):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
@@ -2376,7 +2458,7 @@ class BetLog:
         return cnt
 
     def undo_last(self):
-        df = self.load()
+        df = self.load(strict=True)
         if len(df) == 0:
             return None, 0
         last_rid = df.iloc[-1]['race_id']

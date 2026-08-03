@@ -5,6 +5,7 @@ oasis_app.py — Oasis 安定運用予測ツール v2（2026/07/27 大型アプ�
 起動:  streamlit run oasis_app.py
 ロジックは oasis_core.py（UI非依存）。このファイルは画面と状態管理のみ。
 """
+import hashlib
 import os
 import sys
 from datetime import datetime
@@ -40,6 +41,22 @@ def _resolve_read(p):
         if os.path.exists(c):
             return c, True
     return cands[0], False
+
+
+def _content_key(texts, path):
+    """ログ本文（またはファイルの中身）のハッシュ。これが変わったら学習し直す。"""
+    h = hashlib.sha1()
+    if texts:
+        for t in texts:
+            h.update(t.encode("utf-8", "replace"))
+    elif path:
+        for f in sorted(oc._iter_log_files(path)):
+            try:
+                with open(f, "rb") as fp:
+                    h.update(fp.read())
+            except OSError:
+                h.update(f.encode())
+    return h.hexdigest()
 
 
 def _auto_log_path():
@@ -78,13 +95,14 @@ st.set_page_config(page_title="Oasis 予測 v2", page_icon="🐎", layout="wide"
 #  片方だけ更新すると「AttributeError（内容は伏せられます）」になって
 #  原因が分からなくなるので、起動時に分かる形で止める。
 # ---------------------------------------------------------------
-REQUIRED_CORE = "2.7.0"
+REQUIRED_CORE = "2.8.0"
 _NEEDED = [
     "CORE_VERSION", "WIN_MAX_TOTAL_UNITS", "WIN_STAKE_UNIT", "UNBET_ODDS",
     "MAX_TOTAL_UNITS", "SIGMA_SAFETY", "DIST_LIST", "TRACK_LIST",
     "SCORING_PATCH_DATE", "DEFAULT_TRAIN_FROM", "SPEC_FILE",
     "train_model", "analyze", "BetLog", "passive_effects",
     "estimate_win_pool", "win_bet_picks_pool", "load_passive_spec",
+    "BetLogReadError",
 ]
 _missing = [a for a in _NEEDED if not hasattr(oc, a)]
 _core_ver = getattr(oc, "CORE_VERSION", None)
@@ -143,7 +161,10 @@ def _drive_fingerprint():
 
 
 @st.cache_resource(show_spinner="モデル学習中…（初回は数十秒）")
-def _train_cached(source_key, sigma_override, train_from, sigma_safety, _texts, log_path):
+def _train_cached(source_key, sigma_override, train_from, sigma_safety, _texts, log_path,
+                  content_key):
+    """content_key にログ本文のハッシュを入れる。_texts は先頭が _ のため
+    Streamlit のキャッシュキーに含まれず、内容が変わっても再学習されない。"""
     """同じ入力なら再学習しない。source_key に指紋を入れて差し替えを検知する。"""
     return oc.train_model(log_path or None,
                           texts=list(_texts) if _texts else None,
@@ -258,7 +279,7 @@ with st.sidebar:
         try:
             bundle = _train_cached(source_key, sigma_override, train_from.strip()
                                    or oc.DEFAULT_TRAIN_FROM, sigma_safety,
-                                   tuple(log_texts), log_path)
+                                   tuple(log_texts), log_path, _content_key(log_texts, log_path))
         except Exception as e:
             st.error(f"学習に失敗しました: {e}")
     ss.bundle = bundle or ss.bundle
@@ -359,8 +380,14 @@ with tab_pred:
             ss.last_text = raw_text
             with st.spinner("シミュレーション中…"):
                 ss.result = oc.analyze(raw_text, bundle, settings)
+            ss.result_settings = repr(sorted((k, str(v)) for k, v in settings.items()
+                                             if k != "spec_path"))
 
     result = ss.result
+    _sig = repr(sorted((k, str(v)) for k, v in settings.items() if k != "spec_path"))
+    if result is not None and ss.get("result_settings") not in (None, _sig):
+        st.warning("⚠ サイドバーの設定を変更しました。下の推奨は**変更前の設定**での結果です。"
+                   "『🎯 解析』を押し直してください。")
     if result is not None:
         if not result.get("ok"):
             st.error(result.get("error", "解析に失敗しました。"))
@@ -422,7 +449,13 @@ with tab_pred:
                     **_wide(hide_index=True))
 
             if result.get("win_picks"):
-                st.subheader("🥇 単勝の推奨（参考）")
+                st.subheader("🥇 単勝の推奨"
+                             + ("（実測プール・希薄化込み）" if result.get("win_pool")
+                                else "（参考・プール未測定）"))
+                if not result.get("win_pool"):
+                    st.warning("プールを測っていないため、**自分の購入によるオッズ低下を"
+                               "織り込めていません**。下の「単勝：プールを実測して推奨を出す」で"
+                               "測ってから買うことを強くおすすめします。")
                 ws = result.get("win_summary") or {}
                 if ws:
                     w1, w2, w3 = st.columns(3)
@@ -492,14 +525,25 @@ with tab_pred:
                                 nm = [r["name"] for r in sw]
                                 pp = [r["model_p"] for r in sw]
                                 oo = [(r["odds"] if r["odds"] else float("nan")) for r in sw]
-                                mine = {h["name"]: (h.get("my_amount") or 0) for h in ha}
                                 unit = res2.get("win_unit", oc.WIN_STAKE_UNIT)
+                                # 同名馬があると素名では引けないので、表示名の並び順で対応させる
+                                order = {r["name"]: i for i, r in enumerate(sw)}
+                                disp2 = res2.get("horses_disp") or []
+                                mine = {}
+                                for i, h in enumerate(ha):
+                                    key = disp2[i] if i < len(disp2) else h.get("name")
+                                    mine[key] = (h.get("my_amount") or 0)
+                                    if i < len(disp2):
+                                        pass
                                 ku = [int((mine.get(n, 0) or 0) // unit) for n in nm]
+                                unb = [bool(o == o and abs(o - oc.UNBET_ODDS) < 1e-9
+                                            and not mine.get(n, 0))
+                                       for n, o in zip(nm, oo)]
                                 picks, summ = oc.win_bet_picks_pool(
                                     nm, pp, oo, est["pool"], settings["bankroll"],
                                     settings["kelly_fraction"], settings["win_edge_min"],
                                     stake_unit=unit, risk_cap_frac=settings["max_risk_frac"],
-                                    my_units=ku)
+                                    my_units=ku, unbet=unb)
                                 if picks:
                                     m1, m2, m3 = st.columns(3)
                                     m1.metric("追加購入", f"{summ['invest']:,} rrc",
@@ -649,8 +693,11 @@ with tab_log:
         if st.button("✅ 3連単の推奨を記録（pending）", disabled=not can_log,
                      **_wide()):
             rid2 = rid.strip() or datetime.now().strftime("%Y%m%d_%H%M")
-            if betlog.race_exists(rid2):
-                st.error(f"レースID『{rid2}』は記録済み。別IDにするか取消/精算してください。")
+            _df = betlog.load()
+            _dup = len(_df) and ((_df["race_id"].astype(str) == str(rid2))
+                                 & (_df["bet_type"] == "3連単")).any()
+            if _dup:
+                st.error(f"レース『{rid2}』の3連単は記録済み。別IDにするか取消/精算してください。")
             else:
                 try:
                     n = betlog.record(rid2, result["picks"], oc.STAKE_UNIT, bet_type="3連単")
@@ -660,9 +707,17 @@ with tab_log:
         can_win = bool(result and result.get("ok") and result.get("win_picks"))
         if st.button("🥇 単勝の推奨も記録", disabled=not can_win, **_wide()):
             rid2 = rid.strip() or datetime.now().strftime("%Y%m%d_%H%M")
-            picks = [((r["name"],), r["p"], r["odds"], r["units"]) for r in result["win_picks"]]
+            _df = betlog.load()
+            _dup = len(_df) and ((_df["race_id"].astype(str) == str(rid2))
+                                 & (_df["bet_type"] == "単勝")).any()
+            if _dup:
+                st.error(f"レース『{rid2}』の単勝は記録済みです。取消してから記録してください。")
+                st.stop()
+            picks = [((r["name"],), r["p"], (r.get("eff_od") or r.get("odds")), r["units"])
+                     for r in result["win_picks"]]
+            wunit = int(result.get("win_unit") or oc.WIN_STAKE_UNIT)
             try:
-                n = betlog.record(rid2, picks, oc.STAKE_UNIT, bet_type="単勝")
+                n = betlog.record(rid2, picks, wunit, bet_type="単勝")
                 st.success(f"レース『{rid2}』に単勝 {n}点を記録しました。")
             except Exception as e:
                 st.error(f"保存に失敗しました: {e}")
@@ -676,8 +731,13 @@ with tab_log:
             if len(log_df_now) else []
         rid_settle = st.selectbox("精算するレースID", options=(pend_ids or ["(pendingなし)"]))
         horses = betlog.race_horses(rid_settle) if pend_ids else []
-        if not horses:
-            horses = (result.get("horses_disp") if result and result.get("ok") else None) or []
+        # 単勝だけを記録したレースは候補が1頭しか出ず、1〜3着を選べなくなる。
+        # 直近の解析結果の出走馬を足して補う。
+        extra = (result.get("horses_disp") if result and result.get("ok") else None) or []
+        horses = list(dict.fromkeys(list(horses) + list(extra)))
+        if len(horses) < 3:
+            st.caption("着順の候補が3頭に足りません。先に同じレースIDで3連単を記録するか、"
+                       "そのレースを解析してから精算してください。")
         cc = st.columns(3)
         o1 = cc[0].selectbox("実1着", options=(horses or ["—"]), key="o1")
         o2 = cc[1].selectbox("実2着", options=(horses or ["—"]), key="o2")

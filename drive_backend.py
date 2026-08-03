@@ -73,14 +73,22 @@ class DriveLogSource:
                 'includeItemsFromAllDrives': 'true',
                 'orderBy': 'name',
             }
-            r = s.get(DRIVE_API, params=params, timeout=30)
-            r.raise_for_status()
-            for f in r.json().get('files', []):
-                if f.get('mimeType') == 'application/vnd.google-apps.folder':
-                    continue
-                if self.pattern and self.pattern not in f.get('name', ''):
-                    continue
-                out.append(f)
+            token = None
+            while True:
+                if token:
+                    params['pageToken'] = token
+                r = s.get(DRIVE_API, params=params, timeout=30)
+                r.raise_for_status()
+                data = r.json()
+                for f in data.get('files', []):
+                    if f.get('mimeType') == 'application/vnd.google-apps.folder':
+                        continue
+                    if self.pattern and self.pattern not in f.get('name', ''):
+                        continue
+                    out.append(f)
+                token = data.get('nextPageToken')
+                if not token:
+                    break
         for fid in self.file_ids:
             r = s.get(f'{DRIVE_API}/{fid}',
                       params={'fields': 'id,name,modifiedTime,size',
@@ -95,10 +103,10 @@ class DriveLogSource:
                 uniq.append(f)
         return uniq
 
-    def fingerprint(self):
+    def fingerprint(self, files=None):
         """ファイル構成＋更新時刻の指紋。これが変わったら再ダウンロード・再学習する。"""
         return tuple(sorted((f['id'], f.get('modifiedTime', ''), str(f.get('size', '')))
-                            for f in self.list_files()))
+                            for f in (files if files is not None else self.list_files())))
 
     def download_texts(self):
         """[(ファイル名, 本文), ...] を返す。"""
