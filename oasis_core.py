@@ -43,6 +43,10 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import Ridge
 
+# oasis_app.py との組み合わせ検査に使う版番号。
+# 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
+CORE_VERSION = '2.7.0'
+
 # =====================================================================
 #  0. ゲーム仕様の定数
 # =====================================================================
@@ -1256,6 +1260,7 @@ def parse_unified(text):
     dist = track = ground = guild = schedule_id = None
     pool = None
     n_tri_total = 0
+    meta = {}
 
     for key, setter in [('guild', 'guild'), ('schedule_id', 'schedule_id')]:
         m = re.search(rf'^{key}=(\S+)', text, re.M)
@@ -1267,6 +1272,14 @@ def parse_unified(text):
     pm = re.search(r'^pool=(\d+)', text, re.M)
     if pm:
         pool = int(pm.group(1))
+    for key in ('win_pool', 'win_pool_before', 'win_pool_delta', 'win_pool_n',
+                'win_pool_spread', 'win_pool_err', 'win_own', 'win_pool_min'):
+        m = re.search(rf'^{key}=([0-9.]+)', text, re.M)
+        if m:
+            meta[key] = float(m.group(1))
+    m = re.search(r'^win_market=(\w+)', text, re.M)
+    if m:
+        meta['win_market'] = m.group(1)
 
     mh = re.search(r'===\s*出走馬一覧\s*===\s*\n(.*?)(?=\n\s*===|\Z)', text, re.S)
     mo = re.search(r'===\s*3連単オッズ\s*===\s*\n(.*?)(?=\n\s*===|\Z)', text, re.S)
@@ -1317,6 +1330,9 @@ def parse_unified(text):
             key = (str(r['1着']).strip(), str(r['2着']).strip(), str(r['3着']).strip())
             odds[key] = float(r['_o'])
 
+    if meta:
+        for h in horses:
+            h.setdefault('_meta', meta)
     return horses, odds, dist, track, ground, guild, schedule_id, pool, n_tri_total
 
 
@@ -1536,34 +1552,36 @@ def unformed_sleeve_picks(combo_prob, disp, od_of, P_total, p_min=0.05, edge_min
     return [(names, p, eff, 1) for names, p in cand[:cap]]
 
 
-def estimate_win_pool(before, after, floor=ODDS_FLOOR):
+UNBET_ODDS = 1.5           # まだ誰も賭けていない馬に表示される初期値（実測で確認）
+ODDS_DECIMALS = 2          # サイトが単勝オッズを丸めている桁数（実ログで確認）
+ODDS_STEP = 10 ** -ODDS_DECIMALS
+
+
+def estimate_win_pool(before, after, floor=None):
     """単勝プール総額を「試し買いの前後のオッズ変化」から推定する。
 
-    単勝は控除0%の純パリミュチュエル（実ログ379レースで Σ(1/最終オッズ)=1.000 を確認）。
+    単勝は控除0%の純パリミュチュエル（実ログ379レースで Σ(1/最終オッズ)=1.000、std 0.001）。
     そのため **オッズ自体はシェアしか表さず、プール規模の情報を一切含まない**。
     自分で少額を入れて、その前後の動きから逆算するしかない。
 
     原理:
       od_j = P / P_j（P=プール総額, P_j=その馬への投入額）
       自分が合計 Δ を入れると P → P+Δ。自分が **買っていない** 馬 j は P_j が変わらないので
-          od_j1 / od_j0 = (P+Δ) / P
-      よって  P = Δ / (od_j1/od_j0 − 1)  … 買っていない馬1頭ごとに1つの推定値が得られる。
-      買った馬 i（自分の投入 Δ_i）からは
-          P = (Δ − od_i1·Δ_i) / (od_i1/od_i0 − 1)
+          od_j後 / od_j前 = (P+Δ) / P  ＝ 全馬共通の比 R
+      よって  P = Δ / (R − 1)
 
-    before/after: parse_unified が返す horses のリスト（name, odds, my_amount を使う）。
-    戻り値: dict（pool, method, per_horse, n_used, spread, delta, messages）
+    推定の要点: オッズは小数2桁に丸められているため、丸め誤差は od に反比例する
+    （高オッズの馬ほど相対誤差が小さい）。そこで比 R を **重み od² の加重平均**で求める。
+    これが分散最小で、丸め誤差だけを考えたときの理論精度も同時に計算できる。
     """
     idx_b = {h['name']: h for h in before}
     idx_a = {h['name']: h for h in after}
     common = [n for n in idx_b if n in idx_a]
     msgs = []
 
-    # 自分の投入増分
     deltas = {}
     for n in common:
-        mb = idx_b[n].get('my_amount')
-        ma = idx_a[n].get('my_amount')
+        mb, ma = idx_b[n].get('my_amount'), idx_a[n].get('my_amount')
         if mb is None or ma is None:
             continue
         d = float(ma) - float(mb)
@@ -1573,60 +1591,71 @@ def estimate_win_pool(before, after, floor=ODDS_FLOOR):
     if total_delta <= 0:
         return {'ok': False, 'pool': None, 'messages': [
             '試し買いの増分が見つかりません。①の後に実際に単勝を買ってから②を取得してください。'
-            '（自分の購入額が両方のデータに入っている必要があります）']}
+            '（「自分の購入額」が両方のデータに入っている必要があります）']}
 
-    ests, detail = [], []
+    sw = sr = 0.0
+    detail, singles = [], []
     for n in common:
-        ob = idx_b[n].get('odds')
-        oa = idx_a[n].get('odds')
-        if ob is None or oa is None or not (np.isfinite(ob) and np.isfinite(oa)):
+        ob, oa = idx_b[n].get('odds'), idx_a[n].get('odds')
+        d_i = deltas.get(n, 0.0)
+        note = '試し買いした馬' if d_i > 0 else ''
+        if ob is None or oa is None or not (np.isfinite(ob) and np.isfinite(oa)) \
+                or ob <= 0 or oa <= 0:
+            detail.append({'name': n, 'est': None, 'note': note or 'オッズ不明'})
             continue
-        if ob <= floor or oa <= floor:
-            detail.append({'name': n, 'est': None, 'note': f'オッズが下限({floor})付近で使えない'})
+        if d_i > 0:                       # 買った馬は P_j が動くので比の推定には使わない
+            detail.append({'name': n, 'est': None, 'od_before': float(ob),
+                           'od_after': float(oa), 'note': note})
             continue
         ratio = oa / ob
-        d_i = deltas.get(n, 0.0)
-        if d_i > 0:
-            denom = ratio - 1.0
-            num = total_delta - oa * d_i
-        else:
-            denom = ratio - 1.0
-            num = total_delta
-        if abs(denom) < 1e-9:
-            detail.append({'name': n, 'est': None, 'note': 'オッズが動いていない'})
+        if abs(ratio - 1.0) < 1e-12:
+            detail.append({'name': n, 'est': None, 'od_before': float(ob),
+                           'od_after': float(oa), 'note': '動かず'})
             continue
-        est = num / denom
-        if est <= 0 or not np.isfinite(est):
-            detail.append({'name': n, 'est': None, 'note': '推定値が不正（他の人の投票が入った可能性）'})
-            continue
-        detail.append({'name': n, 'est': float(est), 'bet': d_i,
-                       'od_before': float(ob), 'od_after': float(oa),
-                       'note': '自分が買った馬' if d_i > 0 else ''})
-        ests.append(est)
+        w = oa * oa
+        sw += w
+        sr += w * ratio
+        est = total_delta / (ratio - 1.0)
+        singles.append(est)
+        detail.append({'name': n, 'est': float(est), 'od_before': float(ob),
+                       'od_after': float(oa), 'note': note})
 
-    if not ests:
+    if sw <= 0:
         return {'ok': False, 'pool': None, 'per_horse': detail, 'delta': total_delta,
-                'messages': ['オッズが動いていないか、下限に張り付いていて推定できません。'
+                'messages': ['オッズが動いておらず推定できません。'
                              '試し買いの口数を増やすか、市場が動いてから試してください。']}
+    R = sr / sw
+    if R <= 1:
+        return {'ok': False, 'pool': None, 'per_horse': detail, 'delta': total_delta,
+                'messages': ['オッズが想定と逆に動いています（他の人の投票が大きく入った可能性）。'
+                             '測り直してください。']}
+    pool = total_delta / (R - 1.0)
+    sd_R = (ODDS_STEP / math.sqrt(12)) * math.sqrt(2.0 / sw)
+    rel_err = float(sd_R * pool / total_delta)          # 1σ の相対誤差
+    pos = sorted(x for x in singles if x > 0)
+    spread = float((pos[-1] - pos[0]) / pool) if len(pos) > 1 else 0.0
 
-    arr = np.array(sorted(ests))
-    pool = float(np.median(arr))
-    spread = float((arr.max() - arr.min()) / max(pool, 1e-9))
-    if spread > 0.35:
-        msgs.append(f'⚠ 馬ごとの推定にばらつきがあります（±{spread*100:.0f}%）。'
-                    '試し買いの前後で他の人も投票した可能性があります。'
-                    '短い間隔で①②を取り直すと精度が上がります。')
-    if len(ests) < 3:
+    if rel_err > 0.05:
+        msgs.append(f'△ 推定精度は ±{rel_err*200:.0f}%（95%目安）。オッズが小数2桁までしか'
+                    '出ないため、プールが大きいと1口の影響が小さく精度が出ません。'
+                    'もう一度試し買いすると累積で精度が上がります。')
+    if spread > 0.5 and spread > rel_err * 6:
+        msgs.append('⚠ 馬ごとの推定のばらつきが、丸め誤差だけでは説明できないほど大きいです。'
+                    '試し買いの前後で他の人も投票した可能性があります。')
+    if len(pos) < 3:
         msgs.append('△ 推定に使えた馬が少ないため精度は粗いです。')
-    msgs.append(f'自分の投入 {total_delta:,.0f} rrc の前後で、'
-                f'{len(ests)}頭のオッズ変化から推定しました。')
-    return {'ok': True, 'pool': pool, 'per_horse': detail, 'n_used': len(ests),
+    msgs.append(f'自分の投入 {total_delta:,.0f} rrc の前後で、{len(pos)}頭のオッズ変化から'
+                f'推定しました（推定精度 ±{rel_err*200:.0f}%）。')
+    # pool は試し買い"前"の総額。②のオッズは"後"なので、そちらに合わせた値も返す。
+    return {'ok': True, 'pool': float(pool + total_delta), 'pool_before': float(pool),
+            'per_horse': detail, 'n_used': len(pos), 'rel_err': rel_err,
             'spread': spread, 'delta': total_delta, 'messages': msgs}
 
 
 def win_bet_picks_pool(names, win_p, odds, pool, bankroll, kelly_frac, edge_min,
                        stake_unit=WIN_STAKE_UNIT, total_units=WIN_MAX_TOTAL_UNITS,
-                       max_units=WIN_MAX_UNITS, risk_cap_frac=0.10, my_units=None):
+                       max_units=WIN_MAX_UNITS, risk_cap_frac=0.10, my_units=None,
+                       unbet=None):
     """プール総額が分かっている場合の単勝配分（希薄化を織り込む）。
 
     パリミュチュエルなので、自分が k口 入れると
@@ -1638,10 +1667,13 @@ def win_bet_picks_pool(names, win_p, odds, pool, bankroll, kelly_frac, edge_min,
     n = len(names)
     od = np.asarray(odds, dtype=float)
     p = np.asarray(win_p, dtype=float)
-    ok = np.isfinite(od) & (od > 1.0) & (p > 0)
+    unb = np.zeros(n, dtype=bool) if unbet is None else np.asarray(unbet, dtype=bool)
+    ok = np.isfinite(od) & (p > 0) & ((od > 1.0) | unb)
     if pool is None or pool <= 0 or not ok.any():
         return [], None
-    P_i = np.where(ok, pool / np.where(ok, od, 1.0), 0.0)      # 各馬への現在の投入額
+    # 未投票の馬（オッズが初期値のまま）は「その馬への投入額 0」。
+    # 表示オッズ 1.5 をそのまま使うと実際とかけ離れるので 0 として扱う。
+    P_i = np.where(ok & ~unb, pool / np.where(od > 0, od, 1.0), 0.0)
     k = np.zeros(n, dtype=int)
     if my_units is not None:
         k0 = np.asarray(my_units, dtype=int)                    # すでに買った分
@@ -1698,7 +1730,8 @@ def win_bet_picks_pool(names, win_p, odds, pool, bankroll, kelly_frac, edge_min,
         if k[i] <= 0:
             continue
         eff = P_new / (P_i[i] + add[i] * stake_unit)
-        out.append({'name': names[i], 'p': float(p[i]), 'odds': float(od[i]),
+        out.append({'name': names[i], 'p': float(p[i]),
+                    'odds': (None if unb[i] else float(od[i])), 'unbet': bool(unb[i]),
                     'eff_od': float(eff), 'edge': float(p[i] * eff - 1),
                     'units': int(k[i]), 'stake': int(k[i] * stake_unit),
                     'ev': float(k[i] * stake_unit * (p[i] * eff - 1))})
@@ -1920,7 +1953,63 @@ def analyze(raw_text, bundle, settings=None):
     res['win_unit'] = win_unit
     res['win_picks'] = []
     res['win_summary'] = None
-    if s.get('win_bets') and mkt_p is not None:
+    res['win_pool'] = None
+    meta = (horses[0].get('_meta') if horses else None) or {}
+    if meta.get('win_pool'):
+        res['win_pool'] = float(meta['win_pool'])
+        res['win_pool_info'] = {
+            'delta': meta.get('win_pool_delta'), 'n': meta.get('win_pool_n'),
+            'spread': meta.get('win_pool_spread'), 'err': meta.get('win_pool_err')}
+        err = meta.get('win_pool_err')
+        res['messages'].append(
+            f'🔬 単勝プールの実測値を取り込みました: {res["win_pool"]:,.0f} rrc'
+            + (f'（試し買い {meta["win_pool_delta"]:,.0f} rrc / '
+               f'{int(meta.get("win_pool_n", 0))}頭から' if meta.get('win_pool_delta') else '')
+            + (f' / 精度 ±{err*200:.0f}%）' if err else '）'))
+        if err and err > 0.05:
+            res['messages'].append(
+                f'⚠ 単勝プールの推定精度が ±{err*200:.0f}% と粗いです。'
+                'もう一度実測すると精度が上がります。口数は控えめに。')
+    if meta.get('win_market') == 'empty' or str(meta.get('win_market', '')) == 'empty':
+        res['messages'].append(
+            '⚠ 単勝プールが空です（全馬のオッズが初期値のまま）。'
+            'この状態で単勝を買っても実効オッズは 1.0 で、自分の掛け金を取り返すだけです。'
+            '他の人の投票が入ってから買ってください。')
+    own = float(meta.get('win_own') or 0)
+    others_ok = True
+    if own and res['win_pool']:
+        others = float(res['win_pool']) - own
+        if others <= 0.15 * float(res['win_pool']):
+            others_ok = False
+            res['messages'].append(
+                f'⚠ 単勝プール {res["win_pool"]:,.0f} rrc のうち {own:,.0f} rrc は自分の掛け金で、'
+                f'他人のお金は {max(others,0):,.0f} rrc しかありません。'
+                'パリミュチュエルは他人の掛け金を取りに行くゲームなので、'
+                'この状態では**どう買っても期待値はマイナス**です。単勝の推奨は出しません。')
+        elif others <= 0.4 * float(res['win_pool']):
+            res['messages'].append(
+                f'△ 単勝プールの {own/float(res["win_pool"])*100:.0f}% が自分の掛け金です。'
+                '取りに行ける他人のお金が少ないので、控えめに。')
+    if s.get('win_bets') and mkt_p is not None and res['win_pool'] and not others_ok:
+        res['win_pool_mode'] = '実測プール（自分の掛け金が大半のため推奨なし）'
+    if s.get('win_bets') and mkt_p is not None and res['win_pool'] and others_ok:
+        my_units = [int((h.get('my_amount') or 0) // win_unit) for h in horses]
+        unbet = [bool(np.isfinite(odds[i]) and abs(odds[i] - UNBET_ODDS) < 1e-9
+                      and not (horses[i].get('my_amount') or 0)) for i in range(n)]
+        if any(unbet):
+            res['messages'].append(
+                f'ℹ 未投票（オッズ {UNBET_ODDS} のまま）の馬が {sum(unbet)}頭 あります。'
+                'この馬たちは「その馬への投入額0」として実効オッズを計算します'
+                '（当たれば非常に高配当ですが、高分散です）。')
+        names_o = [disp[i] for i in range(n)]
+        picks, summ = win_bet_picks_pool(
+            names_o, win_p, odds, res['win_pool'], s['bankroll'], s['kelly_fraction'],
+            s.get('win_edge_min', 0.15), stake_unit=win_unit,
+            risk_cap_frac=s['max_risk_frac'], my_units=my_units, unbet=unbet)
+        res['win_picks'] = picks
+        res['win_summary'] = summ
+        res['win_pool_mode'] = '実測プール（希薄化込み）'
+    elif s.get('win_bets') and mkt_p is not None:
         res['win_picks'] = win_bet_picks(
             disp, win_p, odds, s['bankroll'], s['kelly_fraction'],
             s.get('win_edge_min', 0.15), stake_unit=win_unit,

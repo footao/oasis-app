@@ -73,6 +73,36 @@ def _resolve_save(p):
 
 st.set_page_config(page_title="Oasis 予測 v2", page_icon="🐎", layout="wide")
 
+# ---------------------------------------------------------------
+#  oasis_core.py との整合チェック
+#  片方だけ更新すると「AttributeError（内容は伏せられます）」になって
+#  原因が分からなくなるので、起動時に分かる形で止める。
+# ---------------------------------------------------------------
+REQUIRED_CORE = "2.7.0"
+_NEEDED = [
+    "CORE_VERSION", "WIN_MAX_TOTAL_UNITS", "WIN_STAKE_UNIT", "UNBET_ODDS",
+    "MAX_TOTAL_UNITS", "SIGMA_SAFETY", "DIST_LIST", "TRACK_LIST",
+    "SCORING_PATCH_DATE", "DEFAULT_TRAIN_FROM", "SPEC_FILE",
+    "train_model", "analyze", "BetLog", "passive_effects",
+    "estimate_win_pool", "win_bet_picks_pool", "load_passive_spec",
+]
+_missing = [a for a in _NEEDED if not hasattr(oc, a)]
+_core_ver = getattr(oc, "CORE_VERSION", None)
+if _missing or _core_ver != REQUIRED_CORE:
+    st.error(
+        f"**oasis_core.py と oasis_app.py の版が合っていません。**\n\n"
+        f"- この画面（oasis_app.py）が必要とする版: `{REQUIRED_CORE}`\n"
+        f"- 実際に読み込まれた oasis_core.py の版: "
+        f"`{_core_ver or '（版番号なし＝かなり古い）'}`\n"
+        + (f"- 足りない機能: `{', '.join(_missing[:8])}`"
+           f"{' ほか' if len(_missing) > 8 else ''}\n" if _missing else "")
+        + "\n**直し方**: 配布 zip の中身を**まとめて**アップロードし直してください。"
+        "`oasis_app.py` と `oasis_core.py` は必ずセットで差し替える必要があります。\n\n"
+        "アップロード済みなのにこの表示が出る場合は、Streamlit Cloud の "
+        "`Manage app` → `Reboot app` を実行してください（古いモジュールが"
+        "読み込まれたままになっていることがあります）。")
+    st.stop()
+
 
 # ---------------------- 保存先バックエンド ----------------------
 @st.cache_resource(show_spinner=False)
@@ -405,7 +435,9 @@ with tab_pred:
                                    "ゲーム仕様の上限に達したため、エッジの大きい順に配分しています。")
                 st.dataframe(pd.DataFrame([{
                     "馬": r["name"], "モデル勝率": f"{r['p']*100:.1f}%",
-                    "オッズ": f"{r['odds']:.2f}", "エッジ": f"{r['edge']*100:+.0f}%",
+                    "オッズ": ("未投票" if r.get("unbet") else f"{r['odds']:.2f}"),
+                    "実効od": (f"{r['eff_od']:.1f}" if r.get("eff_od") else "—"),
+                    "エッジ": f"{r['edge']*100:+.0f}%",
                     "口数": f"{r['units']}口", "投資": f"{r['stake']:,}",
                     "理論EV": f"{r['ev']:+,.0f}"} for r in result["win_picks"]]),
                     **_wide(hide_index=True))
@@ -477,7 +509,7 @@ with tab_pred:
                                     m3.metric("いずれか的中", f"{min(summ['hit'],1.0)*100:.0f}%")
                                     st.dataframe(pd.DataFrame([{
                                         "馬": r["name"], "モデル勝率": f"{r['p']*100:.1f}%",
-                                        "表示od": f"{r['odds']:.2f}",
+                                        "表示od": ("未投票" if r.get("unbet") else f"{r['odds']:.2f}"),
                                         "実効od": f"{r['eff_od']:.2f}",
                                         "エッジ": f"{r['edge']*100:+.0f}%",
                                         "口数": f"{r['units']}口",
