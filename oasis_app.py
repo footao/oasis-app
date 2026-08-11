@@ -95,14 +95,17 @@ st.set_page_config(page_title="Oasis 予測 v2", page_icon="🐎", layout="wide"
 #  片方だけ更新すると「AttributeError（内容は伏せられます）」になって
 #  原因が分からなくなるので、起動時に分かる形で止める。
 # ---------------------------------------------------------------
-REQUIRED_CORE = "3.0.0"
+REQUIRED_CORE = "3.5.0"
 _NEEDED = [
     "CORE_VERSION", "WIN_MAX_TOTAL_UNITS", "WIN_STAKE_UNIT", "UNBET_ODDS",
     "MAX_TOTAL_UNITS", "SIGMA_SAFETY", "DIST_LIST", "TRACK_LIST",
     "SCORING_PATCH_DATE", "DEFAULT_TRAIN_FROM", "SPEC_FILE",
     "train_model", "analyze", "BetLog", "passive_effects",
     "estimate_win_pool", "win_bet_picks_pool", "load_passive_spec",
-    "BetLogReadError",
+    "BetLogReadError", "model_formula", "passive_coef_table",
+    "internal_stat_weights", "INTERNAL_PHASE_WEIGHTS", "INTERNAL_DIST_BALANCE",
+    "STAT_RNG_WIDTH", "STAT_RNG_WIDTH_PREV",
+    "diagnose_floor_odds", "ENABLE_POOL_API",
 ]
 _missing = [a for a in _NEEDED if not hasattr(oc, a)]
 _core_ver = getattr(oc, "CORE_VERSION", None)
@@ -163,15 +166,34 @@ def _drive_fingerprint():
 @st.cache_resource(show_spinner="モデル学習中…（初回は数十秒）")
 def _train_cached(source_key, sigma_override, train_from, sigma_safety, _texts, log_path,
                   content_key):
-    """content_key にログ本文のハッシュを入れる。_texts は先頭が _ のため
-    Streamlit のキャッシュキーに含まれず、内容が変わっても再学習されない。"""
-    """同じ入力なら再学習しない。source_key に指紋を入れて差し替えを検知する。"""
+    """同じ入力なら再学習しない。
+
+    source_key に取得元の指紋を、content_key にログ本文のハッシュを入れてキャッシュキーにする。
+    `_texts` は先頭が `_` のため Streamlit のキャッシュキーに含まれない（中身が変わっても
+    再学習されない）ので、本文の変化は content_key 側で検知している。
+    """
     return oc.train_model(log_path or None,
                           texts=list(_texts) if _texts else None,
                           sigma_override=(sigma_override or None),
                           train_from=train_from,
                           spec_path=_spec_path(),
                           sigma_safety=sigma_safety)
+
+def _embed_html(html, height=0):
+    """HTML+JS を埋め込む。st.components.v1.html は 2026-06-01 で廃止予定なので、
+    新しい st.iframe があればそちらを使い、無ければ従来APIにフォールバックする。"""
+    try:
+        if hasattr(st, "iframe"):
+            # st.iframe は height=0 を受け付けない。中身は <script> だけなので
+            # 'content'（内容にフィット＝実質0px）を使う。
+            return st.iframe(html, height=(height or "content"))
+    except Exception:
+        pass
+    try:
+        return st.components.v1.html(html, height=height)
+    except Exception:
+        return None
+
 
 # --- streamlit のバージョン差を吸収する小さなラッパ ---
 def _wide(**kw):
@@ -189,7 +211,76 @@ def _wide(**kw):
 ss = st.session_state
 ss.setdefault("bundle", None)
 ss.setdefault("result", None)
-ss.setdefault("last_text", "")
+ss.setdefault("race_input", "")      # 貼り付け欄の中身（key方式にして外から操作可能にする）
+
+
+def _clear_race_input():
+    """入力欄を空にする。on_click コールバックなので、ウィジェット生成前に実行される。"""
+    ss["race_input"] = ""
+    ss["result"] = None              # 古い解析結果が残ると新データの結果と誤解しやすい
+
+
+# 入力欄の上に「クリップボードから貼り付け」ボタンを差し込むスクリプト。
+# Streamlit には貼り付け用のAPIが無いため、親ドキュメント（Streamlit本体のDOM）に
+# 実ボタンを注入する。クリックも clipboard 読み取りもトップレベル文脈で起きるので、
+# ブラウザの権限（clipboard-read）が正しく効く。
+# 読み取りを拒否された場合（Firefox など）は Ctrl+V を案内するだけで、壊れない。
+_CLIP_JS = """
+<style>html,body{margin:0;padding:0;overflow:hidden}</style>
+<script>
+(function(){
+  const LABEL="レースデータを貼り付け", BAR="oasis-clip-bar";
+  const doc=()=>{ try{ return window.parent.document; }catch(e){ return null; } };
+  function findTA(d){
+    for (const t of d.querySelectorAll("textarea")){
+      const a=(t.getAttribute("aria-label")||"")+(t.getAttribute("placeholder")||"");
+      if (a.indexOf(LABEL)>=0 || a.indexOf("出走馬一覧")>=0) return t;
+    }
+    return null;
+  }
+  function setVal(ta, text){
+    // React 管理下の textarea はネイティブ setter 経由でないと値が反映されない
+    const setter=Object.getOwnPropertyDescriptor(
+      window.parent.HTMLTextAreaElement.prototype,"value").set;
+    setter.call(ta, text);
+    ta.dispatchEvent(new (window.parent.Event)("input",{bubbles:true}));
+    ta.blur();   // Streamlit は blur で値をサーバへ確定させる
+  }
+  function mount(){
+    const d=doc(); if(!d || d.getElementById(BAR)) return;
+    const ta=findTA(d); if(!ta) return;
+    const bar=d.createElement("div"); bar.id=BAR;
+    bar.style.cssText="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin:.25rem 0 .5rem";
+    const btn=d.createElement("button");
+    btn.type="button"; btn.textContent="📋 クリアして貼り付け";
+    btn.title="入力欄を空にして、クリップボードの内容を貼り付けます";
+    btn.style.cssText="padding:.35rem .85rem;border-radius:.5rem;cursor:pointer;"
+      +"border:1px solid rgba(128,128,128,.45);background:transparent;color:inherit;"
+      +"font-size:.85rem;font-family:inherit";
+    const msg=d.createElement("span"); msg.style.cssText="font-size:.8rem;opacity:.8";
+    let timer=null;
+    const say=(t,c)=>{ msg.textContent=t; msg.style.color=c||"inherit";
+      clearTimeout(timer); timer=setTimeout(()=>{msg.textContent="";},5000); };
+    btn.onclick=async()=>{
+      try{
+        const text=await navigator.clipboard.readText();
+        if(!text || !text.trim()){ say("クリップボードが空です","#e6a23c"); return; }
+        setVal(ta, text);
+        say("貼り付けました（"+text.length.toLocaleString()+"文字）→ 🎯解析 を押してください","#67c23a");
+      }catch(e){
+        say("クリップボードを読めませんでした（"+e.name+"）。枠内で Ctrl+V / ⌘V してください","#e6a23c");
+      }
+    };
+    bar.appendChild(btn); bar.appendChild(msg);
+    const anchor=ta.closest("div[data-testid]")||ta.parentElement;
+    anchor.parentElement.insertBefore(bar, anchor.nextSibling);
+  }
+  mount();
+  const d=doc();
+  if(d) new MutationObserver(()=>mount()).observe(d.body,{childList:true,subtree:true});
+})();
+</script>
+"""
 
 # ============================ サイドバー ============================
 with st.sidebar:
@@ -374,15 +465,19 @@ tab_pred, tab_model, tab_log = st.tabs(["🎯 予測", "🔬 モデルを見る"
 with tab_pred:
     raw_text = st.text_area(
         "レースデータを貼り付け（統合フォーマット / 購入画面のコピーどちらでもOK）",
-        height=220, value=ss.last_text,
+        height=220, key="race_input",
         placeholder="=== 出走馬一覧 === … === 3連単オッズ === …\n"
                     "または購入画面をそのままコピペ（パッシブの説明文ごと貼ると、\n"
                     "『スピードが35%上昇』などの数値を自動で取り込みます）")
+    _embed_html(_CLIP_JS, height=0)
     st.caption("💡 購入画面をパッシブの説明文ごと貼ると、スキルの実数値を自動学習して "
                "`passive_spec.json` に保存します。新しい数値を覚えたら再学習してください。")
-    col_a, _ = st.columns([1, 5])
+    col_a, col_b, _ = st.columns([1, 1, 4])
     with col_a:
         do_analyze = st.button("🎯 解析", type="primary", **_wide())
+    with col_b:
+        st.button("🗑 クリア", on_click=_clear_race_input, **_wide(),
+                  help="入力欄と直前の解析結果を消します。")
 
     if do_analyze:
         if not (bundle and bundle.get("ok")):
@@ -390,7 +485,6 @@ with tab_pred:
         elif not raw_text.strip():
             st.warning("レースデータを貼り付けてください。")
         else:
-            ss.last_text = raw_text
             with st.spinner("シミュレーション中…"):
                 ss.result = oc.analyze(raw_text, bundle, settings)
             ss.result_settings = repr(sorted((k, str(v)) for k, v in settings.items()
@@ -540,23 +634,25 @@ with tab_pred:
                                 oo = [(r["odds"] if r["odds"] else float("nan")) for r in sw]
                                 unit = res2.get("win_unit", oc.WIN_STAKE_UNIT)
                                 # 同名馬があると素名では引けないので、表示名の並び順で対応させる
-                                order = {r["name"]: i for i, r in enumerate(sw)}
+                                # （analyze の horses_disp と ha は同じ並び）
                                 disp2 = res2.get("horses_disp") or []
                                 mine = {}
                                 for i, h in enumerate(ha):
                                     key = disp2[i] if i < len(disp2) else h.get("name")
                                     mine[key] = (h.get("my_amount") or 0)
-                                    if i < len(disp2):
-                                        pass
                                 ku = [int((mine.get(n, 0) or 0) // unit) for n in nm]
-                                unb = [bool(o == o and abs(o - oc.UNBET_ODDS) < 1e-9
-                                            and not mine.get(n, 0))
-                                       for n, o in zip(nm, oo)]
+                                # オッズ 1.5 は「未投票」と「本命すぎて下限に張り付いた」の
+                                # 両方を意味しうるので Σ(1/od) で判別する（誤ると大本命を
+                                # 投入額0とみなして超高配当と誤認する）。
+                                fl = oc.diagnose_floor_odds(
+                                    oo, [mine.get(n, 0) for n in nm])
+                                for _m in fl["messages"]:
+                                    (st.warning if _m.startswith("⚠") else st.info)(_m)
                                 picks, summ = oc.win_bet_picks_pool(
-                                    nm, pp, oo, est["pool"], settings["bankroll"],
+                                    nm, pp, fl["odds_eff"], est["pool"], settings["bankroll"],
                                     settings["kelly_fraction"], settings["win_edge_min"],
                                     stake_unit=unit, risk_cap_frac=settings["max_risk_frac"],
-                                    my_units=ku, unbet=unb)
+                                    my_units=ku, unbet=fl["unbet"])
                                 if picks:
                                     m1, m2, m3 = st.columns(3)
                                     m1.metric("追加購入", f"{summ['invest']:,} rrc",
@@ -604,6 +700,33 @@ with tab_pred:
             st.caption(f"上位{len(rk)}点でモデル確率の {result['ranking_cover']*100:.1f}% をカバー。"
                        f"{result.get('mc_note','')}")
 
+            # --- 3連単の買い方ガイド（1点では当たりにくいので、カバー点数や軸流しを案内）---
+            def _pts_for(cov):
+                for r in rk:
+                    if r["cum"] >= cov:
+                        return r["rank"]
+                return len(rk)
+            p50, p70, p80 = _pts_for(0.50), _pts_for(0.70), _pts_for(0.80)
+            top1p = rk[0]["model_p"] * 100 if rk else 0
+            with st.expander("🎫 3連単の買い方ガイド（1点で当てるのは難しい）", expanded=True):
+                st.markdown(
+                    f"3連単は「順番」まで当てる必要があり、**本命1点の的中率は約 {top1p:.0f}%**です"
+                    "（モデルは3頭の顔ぶれは高確率で当てますが、2着3着の順番は乱数で入れ替わります）。"
+                    "狙う的中率に応じて点数を広げるのが基本です。")
+                st.dataframe(pd.DataFrame([
+                    {"狙う的中率(累積)": "50%", "必要な点数": f"上位 {p50} 点"},
+                    {"狙う的中率(累積)": "70%", "必要な点数": f"上位 {p70} 点"},
+                    {"狙う的中率(累積)": "80%", "必要な点数": f"上位 {p80} 点"},
+                ]), **_wide(hide_index=True))
+                if rk:
+                    axis = rk[0]["combo"].split("→")[0].strip() if "→" in rk[0]["combo"] else result.get("model_pick", "")
+                    st.markdown(
+                        f"**軸1頭ながしの目安**: モデルの◎【{result.get('model_pick','')}】を1着固定にして、"
+                        "上位数頭を2・3着に流すと、点数を抑えつつ顔ぶれ的中を取りにいけます。"
+                        "上のランキングで◎が1着の行だけを買う、という買い方です。")
+                st.caption("※ ゲーム上限は3連単 合計20口。予算と相談しつつ、"
+                           "上限内で狙う的中率に届く点数を選んでください。")
+
             with st.expander("🥇 単勝 勝率：モデル vs 市場 ＋ 予測の内訳", expanded=False):
                 sw = result["single_win"]
                 base_cols = {
@@ -633,21 +756,80 @@ with tab_model:
         c1.metric("学習レース数", f"{bundle['n_races']}")
         c2.metric("レース内スピアマン", f"{bundle['race_spearman']:.3f}")
         c3.metric("1着的中(OOF)", f"{bundle['top1_acc']*100:.0f}%")
-        c4.metric("σ (着順のブレ)", f"{bundle['race_sigma']:.4f}",
-                  f"最適値 {bundle.get('sigma_mle', 0):.4f} ×{bundle.get('sigma_safety', 1):g}")
+        c4.metric("σ 単勝 / 3連単",
+                  f"{bundle['race_sigma']:.4f} / {bundle.get('tri_sigma', bundle['race_sigma']):.4f}",
+                  "3連単は順番のブレが大きいぶん大きめ")
         st.caption(f"期間 {bundle['date_min']}〜{bundle['date_max']}  /  mode={bundle['mode']}  "
                    f"/  α={bundle['alpha']}  /  読み込んだファイル {len(bundle['files'])}件")
 
         cal = bundle.get("calibration")
+        cal_tri = bundle.get("calibration_tri")
         if cal:
             st.markdown("**校正チェック（学習データの外挿予測 vs 実測）**")
+            rows = [{"指標": "1着を当てる確率（単勝σ）", "モデル予測": f"{cal['p_top1']*100:.1f}%",
+                     "実測": f"{cal['a_top1']*100:.1f}%"}]
+            if cal_tri:
+                rows.append({"指標": f"本命3連単1点の的中率（8頭以上{cal_tri['n_races']}レース・3連単σ）",
+                             "モデル予測": f"{cal_tri['p_tri']*100:.1f}%",
+                             "実測": f"{cal_tri['a_tri']*100:.1f}%"})
+            st.dataframe(pd.DataFrame(rows), **_wide(hide_index=True))
+            st.caption("3連単は「順番」まで当てる必要があり、1点だと当たりにくいのが普通です"
+                       "（モデルは3頭の顔ぶれは高確率で当てます）。実測がモデル予測より高い＝弱気（安全側）、"
+                       "低い＝強気で過剰投資の危険。")
+
+        st.markdown("### 📐 スコアの計算式")
+        with st.expander("① ゲーム内部の本当のスコア式（result API から逆解析）", expanded=False):
+            st.markdown(
+                "レースの着順は、次の式で計算される **rating** の大きい順に決まります。\n\n"
+                "> rating ＝ 定数 × Σ<sub>区間</sub> Σ<sub>stat</sub>"
+                "( **区間重み**[区間][stat] × **距離バランス**[距離][stat] × 実効ステータス ) × 疲労補正\n\n"
+                "・stat は スピード / パワー / スタミナ。実効ステータスにはパッシブの倍率が掛かった値が入ります。\n"
+                "・疲労補正は 1.0 近辺の小さな係数（スタミナが切れた馬だけ下がる）。",
+                unsafe_allow_html=True)
+            st.info(
+                f"レース中の乱数幅は **±{oc.STAT_RNG_WIDTH*100:g}%**"
+                f"（2026/08のプチ修正で ±{oc.STAT_RNG_WIDTH_PREV*100:g}% から拡大）。"
+                "実効ステータスにレースごとにこの幅の乱数が乗ります。荒れやすくなった分、"
+                "「安定感」などブレ低減スキルの価値が上がり、着順ブレ幅 σ は変更後のログから自動で校正し直します。")
+            st.markdown("**区間重み**（レースの序盤・中盤・終盤で、どのステータスが効くか）")
             st.dataframe(pd.DataFrame([
-                {"指標": "1着を当てる確率", "モデル予測": f"{cal['p_top1']*100:.1f}%",
-                 "実測": f"{cal['a_top1']*100:.1f}%"},
-                {"指標": "本命3連単の的中率", "モデル予測": f"{cal['p_tri']*100:.2f}%",
-                 "実測": f"{cal['a_tri']*100:.2f}%"}]),
-                **_wide(hide_index=True))
-            st.caption("実測がモデル予測より高い＝弱気（安全側）。低い＝強気で過剰投資の危険。")
+                {"区間": k, "スピード": v[0], "パワー": v[1], "スタミナ": v[2]}
+                for k, v in oc.INTERNAL_PHASE_WEIGHTS.items()],
+                ), **_wide(hide_index=True))
+            st.markdown("**距離バランス**（距離ごとの、ステータスの重み付け）")
+            st.dataframe(pd.DataFrame([
+                {"距離": k, "スピード": v[0], "パワー": v[1], "スタミナ": v[2]}
+                for k, v in oc.INTERNAL_DIST_BALANCE.items()],
+                ), **_wide(hide_index=True))
+            st.markdown("**実効重み**（区間重み×距離バランスを合算し、スピード=1 で正規化）")
+            st.dataframe(pd.DataFrame([
+                {"距離": d, "スピード": 1.0,
+                 "パワー": oc.internal_stat_weights(d)["norm"][1],
+                 "スタミナ": oc.internal_stat_weights(d)["norm"][2]}
+                for d in oc.DIST_LIST]), **_wide(hide_index=True))
+            st.caption("短距離はスピード偏重、長距離はスタミナ偏重。この写像がスコアの本質です。")
+
+        with st.expander("② このツールが予測に使う式（学習済みモデル）", expanded=True):
+            mf = oc.model_formula(bundle)
+            st.markdown(
+                "予測値（レース内で中心化した相対 log スコア）は、距離ごとに次を合算します。\n\n"
+                "> pred ＝ 切片 ＋ **b_log**·log(実効stat) ＋ **b_lin**·(実効stat/100) "
+                "＋ 状態係数 ＋ 未取得パッシブの係数\n\n"
+                "実効stat にはスペック済みパッシブの倍率が畳み込まれています。"
+                "log 項は「比率で効く」頑健な土台、線形項は内部式の加法構造（特に長距離のスタミナ）を捉えます。")
+            st.dataframe(pd.DataFrame([{
+                "距離": r["dist"], "切片": round(r["intercept"], 3),
+                "log(SP)": round(r["log_SP"], 3), "log(PW)": round(r["log_PW"], 3),
+                "log(ST)": round(r["log_ST"], 3), "lin(SP)": round(r["lin_SP"], 3),
+                "lin(PW)": round(r["lin_PW"], 3), "lin(ST)": round(r["lin_ST"], 3),
+                "内部式比(SP:PW:ST)":
+                    f"1 : {r['internal_norm'][1]:.2f} : {r['internal_norm'][2]:.2f}",
+            } for r in mf["per_dist"]]), **_wide(hide_index=True))
+            cc = mf["condition"]
+            st.caption(
+                f"状態係数: 好調 {cc['好調']:+.3f} / 不調 {cc['不調']:+.3f}"
+                "（log スコアへの加算。値が小さいのは新スコア式のサンプルが少ないため）。"
+                "　右端は参考として内部式のステータス比を並べたもので、モデルの係数と傾向が一致していれば妥当です。")
 
         st.markdown("### ✨ パッシブスキルの効き目")
         c1, c2 = st.columns(2)
@@ -678,6 +860,34 @@ with tab_model:
         st.caption("※ 適性系（○○得意）は距離・馬場が一致したときだけ効くので、"
                    "上のセレクタを合わせないと 0% と表示されます。"
                    "同族嫌悪は『同じおあしすっちが同レースにいる場合』のみ発動する前提の値です。")
+
+        with st.expander("パッシブの係数（ステータス倍率）一覧"):
+            st.caption("スペック済みのパッシブは、実効ステータスに掛かる**倍率**で計算します"
+                       "（例: スピードスターは スピード×1.35・スタミナ×0.9）。"
+                       "空欄は等倍（1.0）、未取得のパッシブは倍率がなく実ログから直接学習します。")
+            pct = oc.passive_coef_table(bundle.get("spec"))
+            kind_ja2 = {"stat": "ステータス系", "aptitude": "適性系", "phase": "展開系"}
+            scope_ja = {"always": "常時", "aptitude": "距離/馬場一致時",
+                        "phase": "区間限定", "conditional": "状況限定",
+                        "same_species": "同族が居る時", "variance": "ブレ低減"}
+
+            def _mx(v, has_mult):
+                if v is not None:
+                    return f"×{v:.2f}"
+                return "×1.00" if has_mult else "—"
+            st.dataframe(pd.DataFrame([{
+                "パッシブ": r["passive"], "種別": kind_ja2.get(r["kind"], r["kind"]),
+                "SP": _mx(r["SP"], r["SP"] is not None or r["PW"] is not None or r["ST"] is not None),
+                "PW": _mx(r["PW"], r["SP"] is not None or r["PW"] is not None or r["ST"] is not None),
+                "ST": _mx(r["ST"], r["SP"] is not None or r["PW"] is not None or r["ST"] is not None),
+                "発動": scope_ja.get(r["scope"], r["scope"])
+                        + (f"（{r['scope_arg']}）" if r["scope_arg"] else ""),
+                "稼働率": (f"{r['duty']:.0%}" if r["duty"] else ""),
+                "σ×": (f"{r['sigma_mult']:.2f}" if r["sigma_mult"] != 1.0 else ""),
+                "説明": r["desc"]} for r in pct]),
+                **_wide(hide_index=True, height=460))
+            st.caption("「—」は倍率なし（実測から直接学習）、「×1.00」は等倍を表します。"
+                       "σ× はブレ低減スキル（安定感など）の効き。")
 
         with st.expander("正則化パラメータ α の選択結果"):
             st.dataframe(pd.DataFrame(bundle["cv_rows"]).round(4),
@@ -725,15 +935,15 @@ with tab_log:
                                  & (_df["bet_type"] == "単勝")).any()
             if _dup:
                 st.error(f"レース『{rid2}』の単勝は記録済みです。取消してから記録してください。")
-                st.stop()
-            picks = [((r["name"],), r["p"], (r.get("eff_od") or r.get("odds")), r["units"])
-                     for r in result["win_picks"]]
-            wunit = int(result.get("win_unit") or oc.WIN_STAKE_UNIT)
-            try:
-                n = betlog.record(rid2, picks, wunit, bet_type="単勝")
-                st.success(f"レース『{rid2}』に単勝 {n}点を記録しました。")
-            except Exception as e:
-                st.error(f"保存に失敗しました: {e}")
+            else:
+                picks = [((r["name"],), r["p"], (r.get("eff_od") or r.get("odds")), r["units"])
+                         for r in result["win_picks"]]
+                wunit = int(result.get("win_unit") or oc.WIN_STAKE_UNIT)
+                try:
+                    n = betlog.record(rid2, picks, wunit, bet_type="単勝")
+                    st.success(f"レース『{rid2}』に単勝 {n}点を記録しました。")
+                except Exception as e:
+                    st.error(f"保存に失敗しました: {e}")
         if not can_log:
             st.caption("先に『解析』を実行し、✅推奨が出ている状態で押してください。")
 
@@ -755,12 +965,23 @@ with tab_log:
         o1 = cc[0].selectbox("実1着", options=(horses or ["—"]), key="o1")
         o2 = cc[1].selectbox("実2着", options=(horses or ["—"]), key="o2")
         o3 = cc[2].selectbox("実3着", options=(horses or ["—"]), key="o3")
+        st.caption("**最終オッズ**（分かれば入力・0なら購入時オッズで概算）。"
+                   "パリミュチュエルなのでオッズは締切まで動きます。購入時オッズのままだと"
+                   "払戻とROIが系統的にずれるため、「市場に勝てているか」を検証したいなら"
+                   "ゲーム画面の最終オッズを入れてください。")
+        fc = st.columns(2)
+        fo_tri = fc[0].number_input("最終オッズ（3連単）", min_value=0.0, value=0.0,
+                                    step=1.0, format="%.1f", key="fo_tri")
+        fo_win = fc[1].number_input("最終オッズ（単勝）", min_value=0.0, value=0.0,
+                                    step=0.1, format="%.2f", key="fo_win")
         if st.button("🏁 精算", disabled=not pend_ids, **_wide()):
             if len({o1, o2, o3}) < 3:
                 st.error("1〜3着に同じ馬が選ばれています。")
             else:
                 try:
-                    cnt = betlog.settle(rid_settle, (o1, o2, o3))
+                    cnt = betlog.settle(rid_settle, (o1, o2, o3),
+                                        final_odds={"3連単": (fo_tri or None),
+                                                    "単勝": (fo_win or None)})
                     if cnt == 0:
                         st.warning(f"レース『{rid_settle}』に精算対象がありませんでした。")
                     else:
@@ -776,6 +997,7 @@ with tab_log:
     with rc1:
         show_report = st.button("📊 成績レポート", **_wide())
     with rc2:
+        st.caption("↩ は直近レースの記録を**精算済みの行も含めて**すべて削除します。")
         if st.button("↩ 直近レースを取消", **_wide()):
             rid_del, ndel = betlog.undo_last()
             st.success(f"レース『{rid_del}』の {ndel}件を取消しました。") if ndel \
@@ -798,6 +1020,10 @@ with tab_log:
                     "予測帯": b["label"], "件数": b["n"], "予測": f"{b['pred']:.2f}%",
                     "実測": f"{b['real']:.2f}%", "損益": f"{b['pnl']:+,.0f}"}
                     for b in rep["buckets"]]), **_wide(hide_index=True))
+            if rep.get("n_payout_est"):
+                st.caption(f"※ 的中 {rep['n_won']}件のうち **{rep['n_payout_est']}件は"
+                           "購入時オッズ換算の概算**払戻です（最終オッズ未入力）。"
+                           "損益・ROIはその分ずれています。精算時に最終オッズを入れると実績になります。")
             if rep.get("calib_hint"):
                 st.info("🔧 " + rep["calib_hint"])
         if betlog.load().empty:

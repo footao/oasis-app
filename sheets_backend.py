@@ -19,7 +19,7 @@ import pandas as pd
 
 # BetLog と同じ列順（oasis_core.LOG_COLUMNS と一致させる）
 LOG_COLUMNS = ['bet_id', 'time', 'race_id', 'bet_type', 'combo', 'model_prob',
-               'odds', 'stake', 'status', 'result', 'payout', 'pnl']
+               'odds', 'stake', 'status', 'result', 'payout', 'pnl', 'payout_kind']
 
 
 class SheetsStore:

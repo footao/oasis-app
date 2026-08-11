@@ -1,0 +1,8 @@
+{
+ "placeholder": true,
+ "core_version": "3.5.0",
+ "n_races": 0,
+ "note": "これは雛形です。build_autopilot.py を実ログで実行して上書きしてください。",
+ "coef": {},
+ "spec": {}
+}

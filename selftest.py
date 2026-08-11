@@ -138,7 +138,169 @@ def main(log_path='logg'):
     print(f'  ROI {rep["overall"]["roi"]:+.1f}%   {rep["calib_hint"]}')
     os.remove(path)
 
+    if regression_tests() != 0:
+        return 1
+
     hr('✅ すべて完了')
+    return 0
+
+
+# =====================================================================
+#  回帰テスト — 一度直したバグが戻っていないかを機械的に確認する
+# =====================================================================
+def _result_block(rank, nm, sp, st, pw, score, owner='@someone'):
+    mark = {1: '🥇', 2: '🥈', 3: '🥉'}.get(rank, f'{rank}着')
+    return '\n'.join([f'{mark} {nm}', owner, f'🏃 スピード {sp}', f'🫀 スタミナ {st}',
+                      f'💥 パワー {pw}', f'📊 score {score}'])
+
+
+def _discord_race(no, horses, date='2026/08/02', time='10:30'):
+    """Discordエクスポート書式の1レース（同日同時刻・レース番号違いを作れる）。"""
+    L = [f'[{date} {time}] bot', f'🏁 第{no}レース 結果', f'🕘 {time}｜中距離｜芝｜良']
+    for rank, h in enumerate(horses, 1):
+        L.append(_result_block(rank, h[0], h[1], h[2], h[3], 1000 - rank * 10))
+    L.append('')
+    return '\n'.join(L)
+
+
+def _harvest_race(sid, horses, date='2026/08/02', time='0:00'):
+    """harvest.js 書式（owner は常に @Unknown、レース番号は schedule_id）。"""
+    L = [f'[{date} {time}] Oasis-API', '', f'🏁 第{sid}レース 結果',
+         f'🕘 {time}｜中距離｜芝｜良']
+    for rank, h in enumerate(horses, 1):
+        L.append(_result_block(rank, h[0], h[1], h[2], h[3], 1000 - rank * 10,
+                               owner='@Unknown'))
+    L.append('')
+    return '\n'.join(L)
+
+
+def regression_tests():
+    hr('6) 回帰テスト（過去に直したバグの再発防止）')
+    A = [(f'馬A{i}', 100 + i, 90 + i, 80 + i) for i in range(4)]
+    B = [(f'馬B{i}', 120 + i, 70 + i, 60 + i) for i in range(4)]
+    discord = _discord_race(1, A) + '\n' + _discord_race(2, B)
+    harvest = _harvest_race(9001, A) + '\n' + _harvest_race(9002, B)
+    fails = []
+
+    def check(label, cond, detail=''):
+        print(f'  {"✅" if cond else "❌"} {label}' + (f'  {detail}' if detail else ''))
+        if not cond:
+            fails.append(label)
+
+    # --- R3: 同日同時刻の別レースが1レースに合成されないこと ---
+    d = oc.parse_race_log(texts=[discord])
+    check('R3 同日同時刻の2レースが分かれている',
+          d['race_key'].nunique() == 2 and set(d['n_field']) == {4},
+          f'races={d["race_key"].nunique()} n_field={sorted(set(d["n_field"]))}')
+
+    # --- R2: Discordログ + harvest採取ログの併用で二重カウントしないこと ---
+    d2 = oc.parse_race_log(texts=[discord, harvest])
+    check('R2 別ソースの同一レースを二重カウントしない',
+          d2['race_key'].nunique() == 2 and len(d2) == 8 and set(d2['n_field']) == {4},
+          f'races={d2["race_key"].nunique()} rows={len(d2)} '
+          f'n_field={sorted(set(d2["n_field"]))}')
+    check('R2 harvest単体でも別レースが潰れない',
+          oc.parse_race_log(texts=[harvest])['race_key'].nunique() == 2)
+    check('同じログを2回読んでも増えない',
+          len(oc.parse_race_log(texts=[discord, discord])) == 8)
+
+    # --- R1: オッズ 1.5 の「未投票」と「下限張り付きの大本命」を取り違えないこと ---
+    fl = oc.diagnose_floor_odds([2.0, 4.0, 4.0, 1.5])          # Σ(1/od)=1.0
+    check('R1 本当に未投票の馬を未投票と判定',
+          fl['unbet'] == [False, False, False, True] and not fl['ambiguous'])
+
+    shares = np.array([0.70, 0.15, 0.10, 0.05])
+    od = np.round(1 / shares, 2)
+    od[0] = oc.ODDS_FLOOR                                      # 下限に張り付いた本命
+    fl = oc.diagnose_floor_odds(od)
+    check('R1 下限張り付きの大本命を未投票と誤判定しない',
+          not any(fl['unbet']) and abs(fl['odds_eff'][0] - 1 / 0.70) < 0.02,
+          f'residual={fl["residual"]:.2f} 本当のod={fl["odds_eff"][0]:.2f}')
+
+    fl = oc.diagnose_floor_odds([1.5, 1.5, 4.0, 10.0])         # 本命と未投票が混在
+    check('R1 判別不能なら推奨から外す（安全側）',
+          fl['ambiguous'] and np.isnan(fl['odds_eff'][0]) and np.isnan(fl['odds_eff'][1]))
+
+    fl = oc.diagnose_floor_odds([1.5, 2.0, 4.0, 4.0], my_amounts=[3000, 0, 0, 0])
+    check('R1 自分が買った1.5表示馬は未投票扱いにしない', fl['unbet'][0] is False)
+
+    # 配分まで通して、ありえない実効オッズが出ないこと
+    picks, _ = oc.win_bet_picks_pool(
+        ['大本命', 'B', 'C', 'D'], [0.72, 0.14, 0.09, 0.05], od, 200_000,
+        1_200_000, 0.25, 0.15, stake_unit=oc.WIN_STAKE_UNIT,
+        unbet=oc.diagnose_floor_odds(od)['unbet'])
+    worst = max([p['eff_od'] for p in picks], default=0)
+    check('R1 大本命に非現実的な高配当を付けない', worst < 10,
+          f'最大実効od={worst:.1f}')
+
+    # --- M1: settings に None を渡しても既定値が生きること ---
+    try:
+        s = dict(oc.DEFAULT_SETTINGS)
+        s.update({k: v for k, v in dict(model_weight=None).items() if v is not None})
+        check('M1 None は既定値を上書きしない', s['model_weight'] is not None,
+              f'model_weight={s["model_weight"]}')
+    except Exception as e:                                     # pragma: no cover
+        check('M1 None は既定値を上書きしない', False, str(e))
+
+    # --- M3: プール取得APIで画面をブロックしないこと ---
+    import time as _t
+    t0 = _t.time()
+    pool, _err = oc._fetch_pool_api('g', '1')
+    check('M3 プールAPIでブロックしない', (_t.time() - t0) < 0.5 and pool is None,
+          f'{(_t.time()-t0)*1000:.0f}ms / ENABLE_POOL_API={oc.ENABLE_POOL_API}')
+
+    # --- M4: 精算時に最終オッズを反映できること ---
+    import tempfile as _tf
+    lp = os.path.join(_tf.gettempdir(), 'oasis_m4_regress.csv')
+    if os.path.exists(lp):
+        os.remove(lp)
+    _bl = oc.BetLog(lp)
+    _bl.record('X1', [(('A', 'B', 'C'), 0.1, 50.0, 1)], oc.STAKE_UNIT)
+    _bl.record('X2', [(('A', 'B', 'C'), 0.1, 50.0, 1)], oc.STAKE_UNIT)
+    _bl.settle('X1', ('A', 'B', 'C'))                              # 最終オッズなし
+    _bl.settle('X2', ('A', 'B', 'C'), final_odds={'3連単': 32.0})   # 最終オッズあり
+    _d = _bl.load()
+    r1 = _d[_d['race_id'] == 'X1'].iloc[0]
+    r2 = _d[_d['race_id'] == 'X2'].iloc[0]
+    check('M4 最終オッズ未入力なら購入時オッズで概算',
+          r1['payout'] == 500_000 and r1['payout_kind'] == '概算')
+    check('M4 最終オッズを入れると払戻が実績になる',
+          r2['payout'] == 320_000 and r2['payout_kind'] == '実績',
+          f"od {50.0}→{r2['odds']:.1f} 払戻{r2['payout']:,.0f}")
+    _rep = _bl.report()
+    check('M4 レポートが概算払戻の件数を出す', _rep.get('n_payout_est') == 1,
+          f"的中{_rep.get('n_won')}件 / 概算{_rep.get('n_payout_est')}件")
+    _old = pd.read_csv(lp, encoding='utf-8-sig').drop(columns=['payout_kind'])
+    _old.to_csv(lp, index=False, encoding='utf-8-sig')
+    check('M4 payout_kind 列が無い旧ログも読める',
+          'payout_kind' in oc.BetLog(lp).load().columns and len(oc.BetLog(lp).load()) == 2)
+    os.remove(lp)
+
+    # --- M2: 同σならMCを1回で済ませる（結果は変わらないこと）---
+    _base = np.array([0.10, 0.05, 0.0, -0.03, -0.05, -0.08, -0.10, -0.12])
+    _sig = np.full(len(_base), 0.05)
+    _w_full, _c_full = oc.simulate_trifecta(_base, _sig, n_sim=40_000)
+    _w_win, _c_win = oc.simulate_trifecta(_base, _sig, n_sim=40_000, need_combo=False)
+    check('M2 need_combo=False でも勝率は完全一致',
+          np.array_equal(_w_full, _w_win) and not _c_win,
+          f'最大差={np.abs(_w_full - _w_win).max():.1e}')
+
+    # --- 軽微1: bare() が2種類の重複マーカーを外すこと ---
+    check('軽微1 bare() が \' #1\' と \'#1\' の両方を外す',
+          oc.bare('ぴよ #1') == 'ぴよ' and oc.bare('ぴよ#1') == 'ぴよ'
+          and oc.bare('ぴよ') == 'ぴよ',
+          f"' #1'→{oc.bare('ぴよ #1')} / '#1'→{oc.bare('ぴよ#1')}")
+    _disp = oc.disambiguate(['ぴよ#1', 'ぴよ#2', 'ほげ'])
+    _cnt = {}
+    for _d in _disp:
+        _cnt[oc.bare(_d)] = _cnt.get(oc.bare(_d), 0) + 1
+    check('軽微1 同名馬は素名フォールバックの対象外のまま（確率コピー防止）',
+          _cnt.get('ぴよ') == 2, f'素名カウント={_cnt}')
+
+    if fails:
+        print('\n  ❌ 失敗:', ', '.join(fails))
+        return 1
+    print('\n  すべての回帰テストに合格')
     return 0
 
 

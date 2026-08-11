@@ -44,13 +44,26 @@ const own=pets0.reduce((s,h)=>s+(Number(h.my_amount)||0),0);
 let lower=0;
 real.forEach(h=>{ const m=Number(h.my_amount)||0; if(m>0) lower=Math.max(lower,Number(h.odds)*m); });
 
+// 1.5 は「未投票」と「本命すぎてオッズが下限に張り付いた」の両方を意味する。
+// 純パリミュチュエル（控除0%）なので、お金の入っている馬だけで Σ(1/od)=1。
+// 実オッズ側の合計が 1 を大きく割るなら、不足分は 1.5 表示の馬が抱えている＝未投票ではない。
+const invSum=real.reduce((s,h)=>s+1/Number(h.odds),0);
+const residual=1-invSum;
+const floorHasMoney=(real.length>0 && residual>0.10);
 let probe=null, mode='normal';
-if(real.length===0){ mode='empty'; }
+if(real.length===0){ mode = own>0 ? 'hidden' : 'empty'; }
 else if(real.length===1){ mode='single'; probe=unbet[0]||null; if(!probe) mode='empty'; }
 else { probe=real[0]; real.forEach(h=>{ if(Number(h.odds)<Number(probe.odds)) probe=h; }); }
 const already=own;
 $('_ask').style.display='block';
-if(mode==='empty' || !probe){
+if(mode==='hidden'){
+ $('_ask').innerHTML='<b style="color:#ffb74d">全馬のオッズが '+PH+' ですが、プールは空ではありません。</b><br>'
+  +'このレースには自分の掛け金 '+own.toLocaleString()+' rrc が入っています。'
+  +'1頭がプールの大半を集めるとオッズが下限 '+PH+' に張り付き、未投票の馬と見分けがつきません。<br>'
+  +'<span style="color:#aaa;font-size:.92em">誤った実効オッズで買わないよう、試し買いはせずデータ取得だけ行います。'
+  +'ゲーム画面で各馬の投票額を確認してください。</span>';
+ $('_go').textContent='データ取得だけ実行';
+}else if(mode==='empty' || !probe){
  $('_ask').innerHTML='<b style="color:#ffb74d">単勝プールが空です（まだ誰も賭けていません）。</b><br>'
   +'全馬のオッズが初期値 '+PH+' のままなので、動かすものがなく測定できません。<br>'
   +'この状態で単勝を買っても<b>自分の掛け金を自分で取り返すだけ</b>（実効オッズ 1.0）で、'
@@ -66,6 +79,10 @@ if(mode==='empty' || !probe){
   +'推定精度が ±'+Math.round(TARGET_ERR*200)+'%（95%目安）を切った時点で自動的に止めます。</span>'
   +(already?'<br>このレースで購入済み: '+already.toLocaleString()+' rrc':'')
   +(lower?'<br>現時点で分かるプールの下限: <b>'+Math.round(lower).toLocaleString()+' rrc 以上</b>':'')
+  +(floorHasMoney?'<br><span style="color:#ffb74d">⚠ Σ(1/od)='+invSum.toFixed(3)+' が 1 を割っています。'
+     +'オッズ '+PH+' 表示の馬は未投票ではなく、プールの約 '+Math.round(residual*100)+'% を集めた'
+     +'<b>大本命</b>です（表示が下限に張り付いているだけ）。その馬を「投入額0」とみなすと'
+     +'実効オッズを大幅に過大評価するので注意してください。</span>':'')
   +(mode==='single'?'<br><span style="color:#ffb74d">⚠ 実オッズを持つ馬が1頭しかありません。'
      +'その馬を測定の基準として残すため、未投票の馬に試し買いします。'
      +'プールが小さい可能性が高いので結果をよく確認してください。</span>':'')
@@ -77,7 +94,7 @@ $('_go').onclick=async()=>{
  $('_go').disabled=true; $('_go').style.opacity=.5; $('_ask').style.display='none';
  const odds0={}; pets0.forEach(h=>{odds0[h.pet_id]=Number(h.odds);});
  const D_unit=WIN_UNIT;
- let spent=0, pool=null, relErr=null, spread=null, ests=[], rows=[], pets1=pets0, lastBal=null;
+ let spent=0, pool=null, relErr=null, spread=null, ests=[], rows=[], pets1=pets0, lastBal=null, poolExact=false;
 
  // od の丸め（±ODD_STEP/2 の一様分布）を踏まえた重み付き推定。
  // ratio_j = od_j後/od_j前 は買っていない馬すべてで (P+Δ)/P に等しい。
@@ -98,14 +115,18 @@ $('_go').onclick=async()=>{
   if(!n||sw<=0) return {pool:null,relErr:null,spread:null,per:per,n:0};
   const R=sr/sw;
   if(!(R>1)) return {pool:null,relErr:null,spread:null,per:per,n:n};
-  const P=D/(R-1);
+  let P=D/(R-1);
   // 重み付き平均の標準偏差
   const sdR=(ODD_STEP/Math.sqrt(12))*Math.sqrt(2/sw);
   // P の相対誤差
-  const rel=sdR*P/D;
+  let rel=sdR*P/D;
+  // 単勝プール総額は 1000 rrc 単位。連続推定が十分精密なら最も近い格子へスナップして値を確定する。
+  const Q=1000, sdAbs=rel*P; let snapped=false, exact=false;
+  if(sdAbs<Q){ const snap=Math.round(P/Q)*Q; if(snap>0){ P=snap; snapped=true;
+    if(sdAbs<Q/4){ exact=true; rel=(Q/4)/P; } else { rel=sdAbs/P; } } }
   const vals=per.map(x=>x.est).filter(x=>x&&isFinite(x)&&x>0).sort((a,b)=>a-b);
   const sp=vals.length>1?(vals[vals.length-1]-vals[0])/P:0;
-  return {pool:P,relErr:rel,spread:sp,per:per,n:n};
+  return {pool:P,relErr:rel,spread:sp,per:per,n:n,snapped:snapped,exact:exact};
  };
 
  if(mode==='empty'){
@@ -133,13 +154,18 @@ $('_go').onclick=async()=>{
      return isFinite(a)&&isFinite(b)&&Math.abs(b-a)>1e-9;});
   }
   const r=estimate(pets1, spent);
-  pool=r.pool; relErr=r.relErr; spread=r.spread; rows=r.per;
+  pool=r.pool; relErr=r.relErr; spread=r.spread; rows=r.per; poolExact=r.exact;
   ests=r.per.map(x=>x.est).filter(Boolean);
   if(pool===null){
    log(round+'口目（累計 '+spent.toLocaleString()+' rrc）→ まだオッズが動かず推定不能','#888');
+  }else if(poolExact){
+   log(round+'口目（累計 '+spent.toLocaleString()+' rrc）→ ✅ プール総額を1000rrc単位に確定 '
+       +Math.round(pool+spent).toLocaleString()+' rrc','#81c784');
+   log('✅ プールが確定したので試し買いを終了します。','#81c784'); break;
   }else{
    log(round+'口目（累計 '+spent.toLocaleString()+' rrc）→ 現在のプール推定 '
-       +Math.round(pool+spent).toLocaleString()+' rrc　精度 ±'+(relErr*200).toFixed(0)+'%',
+       +Math.round(pool+spent).toLocaleString()+' rrc　精度 ±'+(relErr*200).toFixed(0)+'%'
+       +(r.snapped?'（1000rrc単位にスナップ）':''),
        relErr<=TARGET_ERR?'#81c784':'#aaa');
    if(relErr<=TARGET_ERR){ log('✅ 目標精度に到達したので試し買いを終了します。','#81c784'); break; }
   }
@@ -192,7 +218,9 @@ $('_go').onclick=async()=>{
 
  const head=['guild='+G,'schedule_id='+S,'pool='+poolAmt];
  // own は試し買い後の自分の総投入額（＝出力するオッズと同じ時点に揃える）
- const ownNow=pets1.reduce((a,h)=>a+(Number(h.my_amount)||0),0) || (own+spent);
+ // pets1 の再取得に失敗すると my_amount が試し買い前のまま＝spent を取りこぼす。
+ // own+spent は「自分が入れた額」の下限として確実なので、大きい方を採る。
+ const ownNow=Math.max(pets1.reduce((a,h)=>a+(Number(h.my_amount)||0),0), own+spent);
  head.push('win_market='+mode,'win_own='+ownNow);
  if(lower>0) head.push('win_pool_min='+Math.round(lower));
  // pool は試し買い"前"の総額。出力するオッズは試し買い"後"なので、対応させて spent を足す。
@@ -200,6 +228,7 @@ $('_go').onclick=async()=>{
    'win_pool_delta='+spent,
    'win_pool_n='+rows.filter(r=>r.est).length,
    'win_pool_err='+(relErr!==null?relErr.toFixed(4):''),
+   'win_pool_exact='+(poolExact?'1':'0'),
    'win_pool_spread='+(spread!==null?spread.toFixed(4):'')); }
  const clip=head.concat(['',
   '=== 出走馬一覧 ===',horseHeader,...horseRows,'',

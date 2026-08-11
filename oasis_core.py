@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.0.0'
+CORE_VERSION = '3.5.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -56,6 +56,7 @@ MAX_TOTAL_UNITS     = 20       # 1レース合計口数の上限（2026/04/17 �
 WIN_MAX_UNITS       = 100      # 単勝の1頭あたり上限口数
 WIN_MAX_TOTAL_UNITS = 100      # 単勝は【1レース合計】100口まで（全頭の合算）
 WIN_STAKE_UNIT      = 1_000    # 単勝は 1口 = 1,000 rrc（購入画面の表記）
+WIN_POOL_QUANTUM    = 1_000    # 単勝プール総額は 1,000 rrc 単位で決まる（全ベットが1口=1000rrcの倍数のため）
 MIN_FIELD_TRIFECTA  = 8        # 2026/06/17: 7頭以下は3連単なし
 MAX_FIELD           = 16       # 2026/04/20: 当選 8→16頭
 
@@ -222,13 +223,57 @@ PASSIVE_CODE_MAP = {v['code']: k for k, v in PASSIVE_SPEC_SEED.items() if v.get(
 
 # レース中のブレのうち「ゲーム側のランダム性」が占める割合。残りはモデルの推定誤差。
 # 安定感のような分散低減スキルは、この割合の部分にだけ効かせる（安全側）。
-VARIANCE_SHARE = 0.5
+#
+# 2026/08 プチ修正: レース中のステータス乱数幅が 1.5% → 3%（std 2倍＝分散4倍）に。
+#   旧: game_var ≒ model_var（割合0.5）
+#   新: game_var ×4 → 4·model_var。総分散 = 4+1 = 5·model_var。割合 = 4/5 = 0.8
+# ゲーム側RNGが総ブレの主成分になったので 0.5 → 0.8 に更新。
+# これにより「安定感」など分散低減スキルの価値が正しく上がる。
+# （σそのものは自動校正に任せる。手動での水増しはロングショット過大評価につながり逆効果。）
+VARIANCE_SHARE = 0.8
+
+# レース中、各馬の実効ステータスにレースごとに掛かる乱数幅（±割合）。
+# 2026/08 プチ修正で 1.5% → 3% に拡大。表示・資料用の定数（σは自動校正なので直接は使わない）。
+STAT_RNG_WIDTH = 0.03
+STAT_RNG_WIDTH_PREV = 0.015
 
 SPEC_FILE = 'passive_spec.json'      # 学習した数値を貯めるファイル（アプリと同じ場所）
 
 DIST_LIST  = ['短距離', 'マイル', '中距離', '長距離']
 TRACK_LIST = ['芝', 'ダート']
 COND_LIST  = ['好調', '普通', '不調']
+
+# ---------------------------------------------------------------------
+# ゲーム内部の着順スコア式（閲覧サイトの result API から逆解析）
+#   rating ＝ 定数 × Σ_区間 Σ_stat( 区間重み[区間][stat] × 距離バランス[距離][stat]
+#                                     × 実効ステータス ) × 疲労補正
+#   ・stat の順序は [スピード, パワー, スタミナ]
+#   ・疲労補正は 1.0 近辺の小さな係数（スタミナ切れの馬だけ下がる）
+# 予測モデルはこの式を「丸写し」にせず参考にとどめる（リスケール・未知の相互作用に強く
+# するため）。表示用にここへ確定値として置いておく。
+INTERNAL_PHASE_WEIGHTS = {           # 区間重み[区間] = [SP, PW, ST]
+    '序盤': [0.60, 0.30, 0.10],
+    '中盤': [0.45, 0.20, 0.35],
+    '終盤': [0.35, 0.35, 0.30],
+}
+INTERNAL_DIST_BALANCE = {            # 距離バランス[距離] = [SP, PW, ST]
+    '短距離': [1.4, 0.8, 0.5],
+    'マイル': [1.0, 1.0, 1.0],
+    '中距離': [0.9, 1.3, 1.3],
+    '長距離': [0.6, 1.0, 1.4],
+}
+
+
+def internal_stat_weights(dist):
+    """距離ごとの「実効重み」= 距離バランス × 区間重みの合計（区間の長さは等しいと近似）。
+    -> {'SP':.., 'PW':.., 'ST':..} と、SP=1 に正規化した比。"""
+    phase_sum = [sum(INTERNAL_PHASE_WEIGHTS[p][k] for p in INTERNAL_PHASE_WEIGHTS)
+                 for k in range(3)]                      # [1.40, 0.85, 0.75]
+    bal = INTERNAL_DIST_BALANCE.get(dist, [1.0, 1.0, 1.0])
+    w = [bal[k] * phase_sum[k] for k in range(3)]
+    base = w[0] if w[0] else 1.0
+    return {'SP': w[0], 'PW': w[1], 'ST': w[2],
+            'norm': [round(x / base, 3) for x in w]}
 
 # 適性スキル → (照合する列, 照合する値)
 APTITUDE_MATCH = {
@@ -535,6 +580,26 @@ def _date_before(text, pos):
     return dm[-1] if dm else '????'
 
 
+def _race_key(date, r_time, race_no):
+    """レースを識別するキー。
+
+    従来は「日付 時刻」だけだったため、同日同時刻の別レース（レース番号違い・
+    harvest の time フォールバック等）が **1レースに合成** されてしまった。
+    レース番号が取れている場合はキーに含めて衝突を防ぐ。
+    先頭2トークン（日付 時刻）は「ベースキー」として、ソース間の突合に使う。"""
+    key = f"{date} {r_time}"
+    if race_no:
+        key += f" 第{race_no}R"
+    return key
+
+
+def _base_key(race_key):
+    """race_key からレース番号を除いた「日付 時刻」部分。
+    Discordログと harvest ログでレース番号の表記が違っても、同一レースなら
+    ベースキーは一致するので、ソースをまたいだ重複除去に使う。"""
+    return ' '.join(str(race_key).split(' ')[:2])
+
+
 def horse_identity(name, owner, sp, st, pw):
     return (str(name).strip(), str(owner).strip(), int(sp), int(st), int(pw))
 
@@ -548,7 +613,7 @@ def parse_entries(text):
         dist, track, g_cond = (g.strip().rstrip('\r') for g in m.group(3, 4, 5))
         body = m.group(6)
         date = _date_before(text, m.start())
-        r_key = f"{date} {r_time}"
+        r_key = _race_key(date, r_time, race_no)
 
         fm = re.search(r'出走頭数[:：]\s*(\d+)\s*/\s*(\d+)', body)
         field_n = int(fm.group(1)) if fm else None
@@ -586,7 +651,7 @@ def parse_results(text):
         dist, track, g_cond = (g.strip().rstrip('\r') for g in m.group(3, 4, 5))
         body = m.group(6)
         date = _date_before(text, m.start())
-        r_key = f"{date} {r_time}"
+        r_key = _race_key(date, r_time, race_no)
 
         for block in re.split(r'(?=🥇|🥈|🥉|(?<!\d)\d{1,2}着)', body):
             if not block.strip():
@@ -643,11 +708,21 @@ def parse_race_log(log_path=None, texts=None):
         all_entries.update(parse_entries(text))
         all_rows.extend(parse_results(text))
 
+    # レース番号の表記ゆれ（結果側に番号が無い等）に備えたベースキーの照合表。
+    # 同じ「日付 時刻」に複数エントリがある場合は曖昧なのでフォールバックしない。
+    base_entries = {}
+    for k, e in all_entries.items():
+        base_entries.setdefault(_base_key(k), []).append(e)
+
     out = []
     for r in all_rows:
         passives = r['passives']
         condition = r.get('condition') or '不明'
         ent = all_entries.get(r['race_key'])
+        if ent is None:
+            cand = base_entries.get(_base_key(r['race_key']))
+            if cand and len(cand) == 1:
+                ent = cand[0]
         if ent:
             target = horse_identity(r['name'], r['owner'], r['speed'], r['stamina'], r['power'])
             for h in ent['horses']:
@@ -669,14 +744,41 @@ def parse_race_log(log_path=None, texts=None):
         })
     df = pd.DataFrame(out)
     if len(df):
-        # 同じログを重ねて置いた場合の二重カウントを防ぐ（新旧エクスポートの期間が重なる等）
         before = len(df)
+        # --- (1) 行レベル: 同じログを2回読んだ場合の完全重複 ---
+        # 重要: キーに owner・name を使ってはいけない。harvest 採取ログは owner を
+        # 常に '@Unknown' で出力し、同名馬の表記（'名前' vs '名前#1'）もソース間で
+        # ずれるため、それらを含めると重複除去が一切効かなくなる。
         df = df.drop_duplicates(
-            subset=['race_key', 'name', 'owner', 'speed', 'stamina', 'power', 'rank'],
+            subset=['race_key', 'rank', 'speed', 'stamina', 'power'],
             keep='first').reset_index(drop=True)
+
+        # --- (2) レースレベル: ソースをまたいだ同一レース ---
+        # Discordログと harvest 採取ログでは race_key の作られ方が違う
+        # （レース番号 vs schedule_id、時刻が取れず 0:00 になる等）ので、
+        # キー文字列の一致では重複を検出できない。
+        # 「距離・馬場＋(着順, SP, ST, PW) の並び」= レースの中身そのものを指紋にして
+        # 突き合わせる。8頭立てでこれが偶然一致することは実質ありえない。
+        def _sig(g):
+            return (g['dist'].iloc[0], g['track'].iloc[0],
+                    tuple(sorted(zip(g['rank'], g['speed'], g['stamina'], g['power']))))
+
+        seen_sig, drop_keys = {}, []
+        for k, g in df.groupby('race_key', sort=False):
+            s = _sig(g)
+            if s in seen_sig:
+                drop_keys.append(k)
+            else:
+                seen_sig[s] = k
+        df.attrs['n_dup_races'] = len(drop_keys)
+        if drop_keys:
+            df = df[~df['race_key'].isin(drop_keys)].reset_index(drop=True)
+
         df.attrs['n_duplicates'] = before - len(df)
         df['n_field'] = df.groupby('race_key')['score'].transform('size')
         df['_d'] = pd.to_datetime(df['date'], format='%Y/%m/%d', errors='coerce')
+        # 日付が拾えなかった行（'????'）は学習フィルタで無言で消えるので数えておく
+        df.attrs['n_bad_date'] = int(df['_d'].isna().sum())
     return df
 
 
@@ -812,7 +914,6 @@ def _truth_top(g, k=3):
 
 def _order_loglik(base, truth, sigma, z):
     """base(予測相対スコア) + sigma*z のモンテカルロで、実際の上位着順が出る確率の log。"""
-    n = len(base)
     k = len(truth)
     sim = base[None, :] + sigma * z
     order = np.argsort(-sim, axis=1)[:, :k]
@@ -833,9 +934,10 @@ def _recent_races(df, limit=MAX_CALIB_RACES, min_field=4):
     return races[-limit:]
 
 
-def _calibrate_sigma(oof, df, resid_std, n_draw=40_000, seed=7):
-    """OOF予測に対して、実際の上位3着順の尤度が最大になる σ を選ぶ。"""
-    races = _recent_races(df)
+def _calibrate_sigma(oof, df, resid_std, n_draw=40_000, seed=7, min_field=4):
+    """OOF予測に対して、実際の上位3着順の尤度が最大になる σ を選ぶ。
+    min_field を上げると（例: 8）3連単が実在する頭数のレースだけで校正できる。"""
+    races = _recent_races(df, min_field=min_field)
     if len(races) < 6:
         return max(resid_std * 0.6, 1e-4), []
     # 乱数を全レース分まとめて持つと 500MB 超になるので、レースごとに使い捨てる。
@@ -885,6 +987,18 @@ def train_model(log_path=None, sigma_override=None, train_from=DEFAULT_TRAIN_FRO
         return {'ok': False, 'model': None, 'warnings': [],
                 'messages': ['ログを解析できませんでした（中身を確認してください）。'
                              'Discordエクスポートの .txt をそのまま指定してください。']}
+
+    n_dup_races = int(df_all.attrs.get('n_dup_races', 0) or 0)
+    if n_dup_races:
+        msgs.append(
+            f'ℹ 別ソースに同じレースが {n_dup_races}件 あったので1件ずつに集約しました'
+            '（Discordログと harvest 採取ログの併用など）。')
+    n_bad_date = int(df_all.attrs.get('n_bad_date', 0) or 0)
+    if n_bad_date:
+        warns.append(
+            f'⚠ 日付を特定できない行が {n_bad_date}行 あり、学習から除外しました'
+            '（ログの [YYYY/MM/DD HH:MM] 行が遠すぎる・欠けている可能性。'
+            'エクスポートをそのまま使っているか確認してください）。')
 
     df_all = df_all[df_all['n_field'] >= min_field].copy()
     cut = pd.to_datetime(train_from, format='%Y/%m/%d')
@@ -952,8 +1066,29 @@ def train_model(log_path=None, sigma_override=None, train_from=DEFAULT_TRAIN_FRO
                       '※σを膨らませても安全にはなりません。資金の保険は'
                       '分数ケリーとモデル信頼度λが担います）')
 
+    # --- 3連単専用 σ ---
+    # 3連単は 8頭以上でしか成立せず、2・3着の「順番」に敏感。全頭数で校正した σ は
+    # 小頭数レース（順番が当てやすい）に引っ張られて小さめになり、実際の 8頭以上レースでは
+    # 本命1点を過信する（検証: 予測44% vs 実測37%）。そこで 8頭以上のレースだけで
+    # 順番的中に合わせた tri_sigma を別に持ち、3連単のシミュレーションに使う。単勝は race_sigma のまま。
+    if sigma_override:
+        tri_sigma = race_sigma
+        tri_note = '（単勝と同じ・手動上書き）'
+    else:
+        tri_mle, _ = _calibrate_sigma(oof, df, resid_std, min_field=MIN_FIELD_TRIFECTA)
+        n_tri_races = len(_recent_races(df, min_field=MIN_FIELD_TRIFECTA))
+        if n_tri_races >= 8 and tri_mle > 0:
+            tri_sigma = tri_mle * max(float(sigma_safety), 0.1)
+            tri_note = (f'（8頭以上{n_tri_races}レースの順番的中で校正した最適値 {tri_mle:.4f}。'
+                        f'単勝用 {race_sigma:.4f} より大きめ＝3連単の順番のブレを正しく反映）')
+        else:
+            tri_sigma = race_sigma
+            tri_note = f'（8頭以上のレースが{n_tri_races}件と少ないため単勝と同じ {race_sigma:.4f} を使用）'
+
     # --- 校正チェック: OOF予測の「予測確率 vs 実測」 ---
+    # 単勝は race_sigma、3連単は tri_sigma（8頭以上のみ）で別々に見る。
     calib = _calibration_check(oof, df, race_sigma)
+    calib_tri = _calibration_check(oof, df, tri_sigma, min_field=MIN_FIELD_TRIFECTA)
 
     # --- 学習に現れたパッシブ ---
     seen = {}
@@ -979,17 +1114,21 @@ def train_model(log_path=None, sigma_override=None, train_from=DEFAULT_TRAIN_FRO
     n_none = len(unspecced_passives(spec))
     msgs.append(f'パッシブ {len(PASSIVE_NAMES)}種中: 数値を計算に使用 {n_num}種 / '
                 f'実測から学習 {n_none}種（ゲーム内表記から取得済み {n_game}種）')
-    msgs.append(f'RACE_SIGMA={race_sigma:.4f} {sigma_note}')
+    msgs.append(f'RACE_SIGMA（単勝）={race_sigma:.4f} {sigma_note}')
+    msgs.append(f'TRI_SIGMA（3連単）={tri_sigma:.4f} {tri_note}')
     if calib:
         msgs.append(
-            f'校正チェック(OOF {calib["n_races"]}レース)  '
-            f'1着: 予測{calib["p_top1"]*100:.0f}% vs 実測{calib["a_top1"]*100:.0f}%   '
-            f'3連単: 予測{calib["p_tri"]*100:.2f}% vs 実測{calib["a_tri"]*100:.2f}%')
+            f'校正チェック 単勝(OOF {calib["n_races"]}レース)  '
+            f'1着: 予測{calib["p_top1"]*100:.0f}% vs 実測{calib["a_top1"]*100:.0f}%')
         if calib['a_top1'] > calib['p_top1'] * 1.35:
             warns.append('△ モデルは実測よりやや弱気（σが大きめ）。実績ログが貯まったら σ を'
                          '少し下げると期待値が上がる可能性があります。')
         elif calib['p_top1'] > calib['a_top1'] * 1.35:
             warns.append('⚠ モデルが実測より強気（σが小さめ）。σを上げないと過剰投資になります。')
+    if calib_tri:
+        msgs.append(
+            f'校正チェック 3連単(8頭以上 OOF {calib_tri["n_races"]}レース)  '
+            f'本命1点: 予測{calib_tri["p_tri"]*100:.0f}% vs 実測{calib_tri["a_tri"]*100:.0f}%')
     if 未出現:
         warns.append('⚠ 学習データに出てこないパッシブ（効果0として扱う）: ' + ', '.join(未出現))
     if thin:
@@ -1004,6 +1143,7 @@ def train_model(log_path=None, sigma_override=None, train_from=DEFAULT_TRAIN_FRO
     return {
         'ok': True, 'model': model, 'alpha': best_alpha, 'spec': spec,
         'feature_names': feature_names(spec), 'race_sigma': race_sigma,
+        'tri_sigma': float(tri_sigma), 'calibration_tri': calib_tri,
         'sigma_curve': sigma_curve, 'resid_std': resid_std,
         'sigma_mle': float(sigma_mle), 'sigma_safety': float(sigma_safety),
         'race_spearman': race_rho, 'top1_acc': top1,
@@ -1019,9 +1159,10 @@ def train_model(log_path=None, sigma_override=None, train_from=DEFAULT_TRAIN_FRO
     }
 
 
-def _calibration_check(oof, df, sigma, n_draw=60_000, seed=11):
-    """OOF予測 + σ で作った確率が、実測とどれくらい合っているかを見る。"""
-    races = _recent_races(df)
+def _calibration_check(oof, df, sigma, n_draw=60_000, seed=11, min_field=4):
+    """OOF予測 + σ で作った確率が、実測とどれくらい合っているかを見る。
+    min_field=8 にすると 3連単が実在する頭数のレースだけで確認できる。"""
+    races = _recent_races(df, min_field=min_field)
     if len(races) < 5:
         return None
     rng = np.random.default_rng(seed)
@@ -1130,6 +1271,106 @@ def passive_effects(bundle, dist=None, track=None, same_species=True):
     return out
 
 
+def model_formula(bundle):
+    """学習済みモデルの「予測スコア式」を表形式で返す。
+
+    予測値（レース内で中心化した相対log）:
+      pred = 距離ごとに [ 切片 + b_log·log(実効stat) + b_lin·(実効stat/100) ] を合算
+             ＋ 好調/不調の係数 ＋ スペック未知パッシブの係数
+    実効stat にはスペック済みパッシブの倍率が畳み込まれている。
+    """
+    coef = dict(zip(bundle['feature_names'], bundle['model'].coef_))
+    rows = []
+    for d in DIST_LIST:
+        w = internal_stat_weights(d)
+        rows.append({
+            'dist': d,
+            'intercept': float(coef.get(f'{d}:切片', 0.0)),
+            'log_SP': float(coef.get(f'{d}:log(SP)', 0.0)),
+            'log_PW': float(coef.get(f'{d}:log(PW)', 0.0)),
+            'log_ST': float(coef.get(f'{d}:log(ST)', 0.0)),
+            'lin_SP': float(coef.get(f'{d}:lin(SP)', 0.0)),
+            'lin_PW': float(coef.get(f'{d}:lin(PW)', 0.0)),
+            'lin_ST': float(coef.get(f'{d}:lin(ST)', 0.0)),
+            'internal_norm': w['norm'],       # 参考: 内部式のSP=1正規化重み
+        })
+    cond = {'好調': float(coef.get('好調', 0.0)), '不調': float(coef.get('不調', 0.0))}
+    intc = getattr(bundle.get('model'), 'intercept_', 0.0)
+    try:
+        intc = float(intc)
+    except (TypeError, ValueError):
+        intc = 0.0
+    return {'per_dist': rows, 'condition': cond, 'intercept0': intc}
+
+
+def export_model_json(bundle, path=None):
+    """学習済みモデルをブラウザ（autobet.js）で使えるJSONに書き出す。
+
+    予測は「線形結合＋正規乱数のモンテカルロ」だけなので、係数さえ渡せば
+    ブラウザ側で完全に同じ計算ができる。**特徴量は名前で対応付ける**こと
+    （位置で対応させると、パッシブが増減した瞬間に静かにズレる）。
+    """
+    if not bundle or not bundle.get('ok'):
+        raise ValueError('学習済み bundle が必要です')
+    names = list(bundle['feature_names'])
+    coef = [float(x) for x in bundle['model'].coef_]
+    if len(names) != len(coef):
+        raise ValueError(f'特徴量名 {len(names)} と係数 {len(coef)} の数が違います')
+    spec = bundle.get('spec') or default_spec()
+    payload = {
+        'core_version': CORE_VERSION,
+        'trained_at': datetime.now().isoformat(timespec='seconds'),
+        'n_races': int(bundle.get('n_races', 0)),
+        'date_min': bundle.get('date_min'), 'date_max': bundle.get('date_max'),
+        'race_spearman': float(bundle.get('race_spearman') or 0),
+        # 名前→係数。JS側は名前で引くので順序に依存しない。
+        'coef': {n: round(c, 10) for n, c in zip(names, coef)},
+        'intercept': float(getattr(bundle['model'], 'intercept_', 0.0)),
+        'race_sigma': float(bundle['race_sigma']),
+        'tri_sigma': float(bundle.get('tri_sigma') or bundle['race_sigma']),
+        'spec': {k: {'mult': v.get('mult', {}), 'scope': v.get('scope', 'always'),
+                     'scope_arg': v.get('scope_arg'), 'duty': float(v.get('duty', 1.0)),
+                     'sigma_mult': float(v.get('sigma_mult', 1.0))}
+                 for k, v in spec.items() if k in PASSIVE_CATALOG},
+        'unspecced': unspecced_passives(spec),
+        'catalog': dict(PASSIVE_CATALOG),
+        'code_map': dict(PASSIVE_CODE_MAP),
+        'aptitude_match': {k: list(v) for k, v in APTITUDE_MATCH.items()},
+        'dist_list': list(DIST_LIST), 'track_list': list(TRACK_LIST),
+        'variance_share': VARIANCE_SHARE, 'interaction_shrink': INTERACTION_SHRINK,
+        'odds_floor': ODDS_FLOOR, 'stake_unit': STAKE_UNIT,
+        'max_total_units': MAX_TOTAL_UNITS, 'min_field_trifecta': MIN_FIELD_TRIFECTA,
+    }
+    if path:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, separators=(',', ':'))
+    return payload
+
+
+def passive_coef_table(spec=None):
+    """パッシブの「係数（倍率）」を表形式で返す。スペック済み＝ゲーム/推定の倍率、
+    未スペック＝実測学習（倍率なし）。"""
+    spec = spec or default_spec()
+    rows = []
+    for p in PASSIVE_NAMES:
+        sp_ = spec.get(p) or {}
+        mult = sp_.get('mult') or {}
+        rows.append({
+            'passive': p,
+            'kind': PASSIVE_CATALOG.get(p, 'phase'),
+            'SP': mult.get('speed'),
+            'PW': mult.get('power'),
+            'ST': mult.get('stamina'),
+            'scope': sp_.get('scope', ''),
+            'scope_arg': sp_.get('scope_arg', ''),
+            'duty': sp_.get('duty'),
+            'sigma_mult': sp_.get('sigma_mult', 1.0),
+            'source': sp_.get('source', ''),
+            'desc': sp_.get('desc', ''),
+        })
+    return rows
+
+
 # =====================================================================
 #  6. 予測とモンテカルロ
 # =====================================================================
@@ -1155,24 +1396,32 @@ def horse_sigmas(bundle, horses, sigma):
                      for h in horses], dtype=float)
 
 
-def simulate_trifecta(base, sigma, n_sim=N_SIM, seed=SIM_SEED, chunk=SIM_CHUNK):
-    """メモリを抑えたチャンク実行。 -> (win_prob[n], {(i,j,k): prob})"""
+def simulate_trifecta(base, sigma, n_sim=N_SIM, seed=SIM_SEED, chunk=SIM_CHUNK,
+                      need_combo=True):
+    """メモリを抑えたチャンク実行。 -> (win_prob[n], {(i,j,k): prob})
+
+    need_combo=False にすると3連単の組の集計（np.unique + dict更新）を省く。
+    単勝の勝率だけが欲しい呼び出しではこれが処理時間の大半なので、明確に効く。"""
     n = len(base)
     sig = np.broadcast_to(np.asarray(sigma, dtype=float), (n,))
     rng = np.random.default_rng(seed)
     win = np.zeros(n)
     counts = {}
+    want_combo = need_combo and n >= 3
     done = 0
     while done < n_sim:
         m = min(chunk, n_sim - done)
         sim = base[None, :] + rng.standard_normal((m, n)) * sig[None, :]
-        order = np.argsort(-sim, axis=1)[:, :3]
-        np.add.at(win, order[:, 0], 1)
-        if n >= 3:
+        if want_combo:
+            order = np.argsort(-sim, axis=1)[:, :3]
+            np.add.at(win, order[:, 0], 1)
             key = (order[:, 0] * n * n + order[:, 1] * n + order[:, 2])
             u, c = np.unique(key, return_counts=True)
             for kk, cc in zip(u.tolist(), c.tolist()):
                 counts[kk] = counts.get(kk, 0) + cc
+        else:
+            # 1着だけ分かればよいので argsort（O(n log n)）ではなく argmax（O(n)）
+            np.add.at(win, np.argmax(sim, axis=1), 1)
         done += m
     win /= n_sim
     combo = {(k // (n * n), (k // n) % n, k % n): c / n_sim for k, c in counts.items()}
@@ -1186,12 +1435,118 @@ def simulate_rankings(base, sigma, n_sim=N_SIM, seed=SIM_SEED):
     return np.argsort(-sim, axis=1)
 
 
-def market_win_prob(odds):
+def market_win_prob(odds, floor=ODDS_FLOOR):
+    """表示オッズ → 市場の暗黙勝率。
+
+    floor 以下のオッズは「まだ誰も賭けていない（プレースホルダ）」とみなして除外する。
+    下限に張り付いた本命の**本当の**オッズ（1/シェア < 1.5）を渡すときは
+    floor=1.0 にして除外されないようにすること（diagnose_floor_odds を参照）。"""
     odds = np.asarray(odds, dtype=float)
-    raw = np.where((odds > ODDS_FLOOR) & np.isfinite(odds), 1.0 / odds, 0.0)
+    raw = np.where((odds > floor) & np.isfinite(odds), 1.0 / odds, 0.0)
     if raw.sum() <= 0:
         return None
     return raw / raw.sum()
+
+
+# 下限表示（1.5）の馬が抱えているシェアの判定しきい値。
+# 丸め誤差（オッズは小数2桁）で Σ(1/od) は ±0.01 程度ぶれるので、余裕をとる。
+FLOOR_RESIDUAL_UNBET = 0.02    # これ以下 → 下限表示の馬は本当に未投票
+FLOOR_RESIDUAL_REAL = 0.10     # これ以上 → 下限表示の馬に実際のお金が入っている
+
+
+def diagnose_floor_odds(odds, my_amounts=None):
+    """表示オッズ 1.5 の馬が「未投票」なのか「本命すぎて下限に張り付いた」のかを判定する。
+
+    **なぜ必要か**: 1.5 は未投票馬のプレースホルダであると同時に、ゲームの
+    最低オッズ（下限）でもある。シェアが 2/3 を超える大本命は、実際にお金が
+    入っていても 1.50 と表示される。これを「投入額0」と誤認すると、
+    実効オッズを (P+u)/u と桁違いに過大評価して、**大本命に超高配当の買い推奨**を
+    出してしまう（小さいプールほど起きやすい）。
+
+    **判定の原理**: 単勝は控除0%の純パリミュチュエルなので、お金が入っている馬だけで
+        Σ(1/od) = 1
+    が成り立つ。下限表示の馬を除いた合計 S = Σ_{od>1.5}(1/od) が 1 を大きく割るなら、
+    不足分 residual = 1 - S は下限表示の馬が抱えているシェアである。
+
+    **一意性**: 下限に張り付くのは P_j >= P/1.5（シェア 2/3 以上）の時だけなので、
+    張り付ける馬は1レースに高々1頭（2頭なら合計 4/3 > 1 で矛盾）。
+    よって下限表示が1頭だけなら、その馬のシェア = residual と確定できる。
+
+    -> dict(unbet=[bool], odds_eff=[float], ambiguous=bool, residual=float|None,
+            messages=[str])
+       odds_eff は下限に張り付いた馬の表示オッズを「本当のオッズ」1/シェアに
+       置き換えたもの（判定できない馬は NaN にして推奨から外す）。
+    """
+    od = np.asarray(odds, dtype=float)
+    n = len(od)
+    mine = (np.zeros(n) if my_amounts is None
+            else np.nan_to_num(np.asarray(my_amounts, dtype=float), nan=0.0))
+    at_floor = np.isfinite(od) & (np.abs(od - ODDS_FLOOR) < 1e-9)
+    priced = np.isfinite(od) & (od > ODDS_FLOOR)
+    out = {'unbet': [False] * n, 'odds_eff': od.astype(float).copy(),
+           'ambiguous': False, 'residual': None, 'messages': []}
+    if not at_floor.any():
+        return out
+
+    # 自分で買った馬は、下限表示でも「お金が入っている」ことが確定している
+    known_bet = at_floor & (mine > 0)
+    cand = at_floor & ~known_bet          # 未投票かもしれない馬
+
+    if not priced.any():
+        # 全馬が下限表示。誰も賭けていない（プール空）か、1頭が総取りしている状態。
+        # 自分の購入額があるならプールは空ではない。
+        if mine.sum() > 0:
+            out['ambiguous'] = True
+            out['odds_eff'][at_floor] = np.nan
+            out['messages'].append(
+                '⚠ 全馬のオッズが下限 1.5 のままですが、自分の購入額があるためプールは'
+                '空ではありません。どの馬にお金が入っているか判別できないため、'
+                '単勝の推奨は出しません。')
+        else:
+            for i in np.flatnonzero(cand):
+                out['unbet'][i] = True
+        return out
+
+    S = float(np.sum(1.0 / od[priced]))
+    residual = 1.0 - S
+    out['residual'] = residual
+
+    if residual <= FLOOR_RESIDUAL_UNBET:
+        # Σ(1/od) がほぼ 1 → 下限表示の馬にはお金が入っていない
+        for i in np.flatnonzero(cand):
+            out['unbet'][i] = True
+        if known_bet.any():
+            out['odds_eff'][known_bet] = np.nan
+        return out
+
+    if residual < FLOOR_RESIDUAL_REAL:
+        # どちらとも言い切れない中間帯（丸め誤差・データの取得ずれなど）。安全側に倒す。
+        out['ambiguous'] = True
+        out['odds_eff'][at_floor] = np.nan
+        out['messages'].append(
+            f'△ 単勝オッズの合計 Σ(1/od)={S:.3f} がわずかに 1 を割っています'
+            f'（残り {residual*100:.1f}%）。オッズ 1.5 表示の馬が未投票か'
+            '本命かを判別できないため、その馬は単勝の推奨から外します。')
+        return out
+
+    # residual が大きい＝下限表示の馬に実際のお金が入っている
+    idx = np.flatnonzero(cand)
+    if len(idx) == 1 and not known_bet.any():
+        i = int(idx[0])
+        out['odds_eff'][i] = 1.0 / residual     # 下限で隠れていた本当のオッズ
+        out['messages'].append(
+            f'⚠ オッズ 1.5 表示の馬は「未投票」ではなく、プールの約 {residual*100:.0f}% を'
+            f'集めた大本命です（Σ(1/od)={S:.3f}）。表示は下限に張り付いているだけなので、'
+            f'本当のオッズ ≒ {1.0/residual:.2f} 倍として計算します。')
+    else:
+        out['ambiguous'] = True
+        out['odds_eff'][at_floor] = np.nan
+        out['messages'].append(
+            f'⚠ オッズ 1.5 表示の馬が {int(at_floor.sum())}頭 あり、そのうち1頭が'
+            f'プールの約 {residual*100:.0f}% を集めた大本命です（Σ(1/od)={S:.3f}）。'
+            'どの馬かはオッズだけでは判別できないため、1.5 表示の馬は'
+            '単勝の推奨から外します（ゲーム画面の投票額を確認してください）。')
+    return out
 
 
 # =====================================================================
@@ -1211,16 +1566,27 @@ def disambiguate(names):
     return out
 
 
+_DUP_RE = re.compile(r'\s*#\s*\d+\s*$')
+
+
 def bare(name):
-    return re.sub(re.escape(DUP_MARK) + r'\d+$', '', str(name))
+    """表示名から重複マーカーを外す。
+
+    マーカーには2種類ある:
+      - ' #1' … このツールの `disambiguate()` が付ける（DUP_MARK）
+      - '#1'  … ゲーム／ブックマークレットが同名馬に付ける（スペース無し）
+    以前は前者しか外せず、ブックマークレット由来の '名前#1' に対して
+    素名フォールバックが機能していなかった。両方に対応する。
+    """
+    return _DUP_RE.sub('', str(name)).strip()
 
 
-_SPECIES_RE = re.compile(r'\s*#\s*\d+\s*$')
+_SPECIES_RE = _DUP_RE          # 後方互換（同じ正規表現）
 
 
 def species_name(name):
-    """おあしすっちの種類名。ゲームが同名馬に付ける '#2' と、こちらの重複マーカーを外す。"""
-    return _SPECIES_RE.sub('', bare(name)).strip()
+    """おあしすっちの種類名。同名馬に付く '#2' 等のマーカーを外す。"""
+    return bare(name)
 
 
 def same_species_flags(names, species=None):
@@ -1309,7 +1675,8 @@ def parse_unified(text):
     if pm:
         pool = int(pm.group(1))
     for key in ('win_pool', 'win_pool_before', 'win_pool_delta', 'win_pool_n',
-                'win_pool_spread', 'win_pool_err', 'win_own', 'win_pool_min'):
+                'win_pool_spread', 'win_pool_err', 'win_own', 'win_pool_min',
+                'win_pool_exact'):
         m = re.search(rf'^{key}=([0-9.]+)', text, re.M)
         if m:
             meta[key] = float(m.group(1))
@@ -1480,7 +1847,21 @@ def resolve_payout_pool(pool, odds_iter, manual_co=None, trust=True):
     return payout, info
 
 
-def _fetch_pool_api(guild, schedule_id, timeout=5):
+# 3連単プールをサーバから直接APIで取りに行くか。**既定は False**。
+# デプロイ先（Streamlit Community Cloud など）からは api.oasis.red に到達できない
+# （403 / 無応答）ため、有効にすると「必ず失敗する通信」の完了を待つあいだ画面が固まる。
+# Streamlit は1セッション内で処理が直列なので、待ち時間はそのまま操作不能時間になる。
+# ブックマークレット（bm.js / probe.js）は常に `pool=` 行を出力するので、
+# 通常の運用ではこの経路自体が不要。ローカル等で到達できる環境なら True にしてよい。
+ENABLE_POOL_API = False
+POOL_API_TIMEOUT = 2.0        # 有効にする場合でも短く。待ち時間＝画面が固まる時間。
+
+
+def _fetch_pool_api(guild, schedule_id, timeout=POOL_API_TIMEOUT):
+    if not ENABLE_POOL_API:
+        return None, ('貼り付けデータに `pool=` の行がないため、3連単プール総額が不明です'
+                      '（口数計算はスキップ）。ブックマークレットで取り直すと自動で入ります。'
+                      'サーバからAPIを直接叩くことはできないので、取りに行きません。')
     try:
         import requests
         r = requests.get(
@@ -1708,10 +2089,28 @@ def estimate_win_pool(before, after, floor=None):
     pool = total_delta / (R - 1.0)
     sd_R = (ODDS_STEP / math.sqrt(12)) * math.sqrt(2.0 / sw)
     rel_err = float(sd_R * pool / total_delta)          # 1σ の相対誤差
+    sd_abs = rel_err * pool                             # 1σ の絶対誤差（rrc）
     pos = sorted(x for x in singles if x > 0)
     spread = float((pos[-1] - pos[0]) / pool) if len(pos) > 1 else 0.0
 
-    if rel_err > 0.05:
+    # 単勝プール総額は 1,000 rrc 単位で決まる。連続推定が十分精密なら、その最も近い
+    # グリッド点にスナップすると値が“確定”する（丸め誤差より格子間隔が広いとき有効）。
+    q = WIN_POOL_QUANTUM
+    snapped = exact = False
+    if sd_abs < q:                                     # 1σ が1格子未満 → 丸めが期待誤差を減らす
+        snap_before = round(pool / q) * q
+        if snap_before > 0:
+            pool = float(snap_before)
+            snapped = True
+            if sd_abs < q / 4:                         # 2σ が半格子未満 → 95%で正しい格子
+                exact = True
+                rel_err = float(q / 4) / pool          # 実質“確定”（残差は半格子未満）
+            else:
+                rel_err = float(sd_abs / pool)         # スナップしても誤差は正直に残す
+
+    if exact:
+        msgs.append(f'✅ プール総額を 1,000 rrc 単位に確定：{pool + total_delta:,.0f} rrc。')
+    elif rel_err > 0.05:
         msgs.append(f'△ 推定精度は ±{rel_err*200:.0f}%（95%目安）。オッズが小数2桁までしか'
                     '出ないため、プールが大きいと1口の影響が小さく精度が出ません。'
                     'もう一度試し買いすると累積で精度が上がります。')
@@ -1720,12 +2119,15 @@ def estimate_win_pool(before, after, floor=None):
                     '試し買いの前後で他の人も投票した可能性があります。')
     if len(pos) < 3:
         msgs.append('△ 推定に使えた馬が少ないため精度は粗いです。')
-    msgs.append(f'自分の投入 {total_delta:,.0f} rrc の前後で、{len(pos)}頭のオッズ変化から'
-                f'推定しました（推定精度 ±{rel_err*200:.0f}%）。')
+    if not exact:
+        msgs.append(f'自分の投入 {total_delta:,.0f} rrc の前後で、{len(pos)}頭のオッズ変化から'
+                    f'推定しました（推定精度 ±{rel_err*200:.0f}%'
+                    + ('・1000rrc単位にスナップ済み' if snapped else '') + '）。')
     # pool は試し買い"前"の総額。②のオッズは"後"なので、そちらに合わせた値も返す。
     return {'ok': True, 'pool': float(pool + total_delta), 'pool_before': float(pool),
             'per_horse': detail, 'n_used': len(pos), 'rel_err': rel_err,
-            'spread': spread, 'delta': total_delta, 'messages': msgs}
+            'spread': spread, 'delta': total_delta, 'snapped': snapped,
+            'exact': exact, 'messages': msgs}
 
 
 def win_bet_picks_pool(names, win_p, odds, pool, bankroll, kelly_frac, edge_min,
@@ -1892,7 +2294,10 @@ DEFAULT_SETTINGS = dict(
 def analyze(raw_text, bundle, settings=None):
     s = dict(DEFAULT_SETTINGS)
     if settings:
-        s.update({k: v for k, v in settings.items() if v is not None or k in DEFAULT_SETTINGS})
+        # None は「指定なし」＝既定値を使う、の意味。
+        # 以前は「既知キーなら None でも上書き」になっており、model_weight=None を
+        # 渡すと後段の float(None) で TypeError になっていた。
+        s.update({k: v for k, v in settings.items() if v is not None})
     if not bundle or not bundle.get('ok'):
         return {'ok': False, 'error': 'モデル未学習。先にログを読み込んで学習してください。'}
 
@@ -2001,11 +2406,21 @@ def analyze(raw_text, bundle, settings=None):
     res['dist'], res['track'], res['ground'] = s['dist'], s['track'], s['ground']
 
     # --- 予測 + シミュレーション ---
+    # 単勝の勝率は race_sigma、3連単は tri_sigma（8頭以上の順番的中で校正した大きめの σ）で
+    # 別々にシミュレーションする。1着は頑健で小さめσが合い、3連単は順番のブレが大きいため。
     base = predict_base(bundle, horses, s['dist'], s['track'])
     sigma = bundle['race_sigma']
+    tri_sigma = float(bundle.get('tri_sigma') or sigma)
     n_sim = int(s.get('n_sim') or N_SIM)
     sig_vec = horse_sigmas(bundle, horses, sigma)
-    win_p, combo_prob = simulate_trifecta(base, sig_vec, n_sim=n_sim)
+    if abs(tri_sigma - sigma) < 1e-9:
+        # σが同じなら、単勝用と3連単用のシミュレーションは（シードも同じなので）
+        # 完全に同一の結果になる。1回で両方受け取る。
+        win_p, combo_prob = simulate_trifecta(base, sig_vec, n_sim=n_sim)
+    else:
+        win_p, _ = simulate_trifecta(base, sig_vec, n_sim=n_sim, need_combo=False)
+        sig_vec_tri = horse_sigmas(bundle, horses, tri_sigma)
+        _, combo_prob = simulate_trifecta(base, sig_vec_tri, n_sim=n_sim)
     n_steady = int((sig_vec < sigma * 0.999).sum())
     if n_steady:
         res['messages'].append(
@@ -2014,7 +2429,19 @@ def analyze(raw_text, bundle, settings=None):
     disp = disambiguate([h['name'] for h in horses])
 
     odds = np.array([h.get('odds', np.nan) for h in horses], dtype=float)
-    mkt_p = market_win_prob(odds)
+    # 表示オッズ 1.5 は「未投票」と「本命すぎて下限に張り付いた」の両方を意味しうる。
+    # Σ(1/od) から区別し、張り付きなら本当のオッズに直す（誤ると実効オッズを
+    # 桁違いに過大評価して大本命に高配当の買い推奨を出してしまう）。
+    _fl = diagnose_floor_odds(odds, [h.get('my_amount') for h in horses])
+    odds_eff = np.asarray(_fl['odds_eff'], dtype=float)
+    unbet_flags = list(_fl['unbet'])
+    res['floor_diag'] = {'residual': _fl['residual'], 'ambiguous': _fl['ambiguous']}
+    for _m in _fl['messages']:
+        res['messages'].append(_m)
+    # 市場確率は「未投票馬を除外し、下限に張り付いた本命は本当のオッズで」計算する
+    odds_mkt = odds_eff.copy()
+    odds_mkt[np.array(unbet_flags, dtype=bool)] = np.nan
+    mkt_p = market_win_prob(odds_mkt, floor=1.0)
 
     # 寄与の内訳（なぜこの馬が強い/弱いか）
     contrib = _contributions(bundle, horses, s['dist'], s['track'])
@@ -2032,8 +2459,12 @@ def analyze(raw_text, bundle, settings=None):
             row['market_p'] = float(mkt_p[i])
             od = odds[i]
             row['odds'] = float(od) if np.isfinite(od) else None
-            if (not np.isfinite(od)) or od <= ODDS_FLOOR:
+            if unbet_flags[i]:
                 row['tag'] = '（未投票）'
+            elif not np.isfinite(od):
+                row['tag'] = '（オッズ不明）'
+            elif np.isfinite(odds_eff[i]) and odds_eff[i] < od - 1e-9:
+                row['tag'] = '◆下限張り付き(大本命)'
             elif win_p[i] > mkt_p[i] * MARKET_EDGE_RATIO and win_p[i] > MARKET_MIN_PROB:
                 row['tag'] = '★割安'
             elif mkt_p[i] > win_p[i] * MARKET_EDGE_RATIO and mkt_p[i] > MARKET_MIN_PROB:
@@ -2056,15 +2487,28 @@ def analyze(raw_text, bundle, settings=None):
             'delta': meta.get('win_pool_delta'), 'n': meta.get('win_pool_n'),
             'spread': meta.get('win_pool_spread'), 'err': meta.get('win_pool_err')}
         err = meta.get('win_pool_err')
-        res['messages'].append(
-            f'🔬 単勝プールの実測値を取り込みました: {res["win_pool"]:,.0f} rrc'
-            + (f'（試し買い {meta["win_pool_delta"]:,.0f} rrc / '
-               f'{int(meta.get("win_pool_n", 0))}頭から' if meta.get('win_pool_delta') else '')
-            + (f' / 精度 ±{err*200:.0f}%）' if err else '）'))
-        if err and err > 0.05:
+        is_exact = bool(meta.get('win_pool_exact'))
+        res['win_pool_info']['exact'] = is_exact
+        if is_exact:
+            res['messages'].append(
+                f'✅ 単勝プール総額を 1,000 rrc 単位で確定: {res["win_pool"]:,.0f} rrc'
+                + (f'（試し買い {meta["win_pool_delta"]:,.0f} rrc / '
+                   f'{int(meta.get("win_pool_n", 0))}頭から）' if meta.get('win_pool_delta') else '）'))
+        else:
+            res['messages'].append(
+                f'🔬 単勝プールの実測値を取り込みました: {res["win_pool"]:,.0f} rrc'
+                + (f'（試し買い {meta["win_pool_delta"]:,.0f} rrc / '
+                   f'{int(meta.get("win_pool_n", 0))}頭から' if meta.get('win_pool_delta') else '')
+                + (f' / 精度 ±{err*200:.0f}%）' if err else '）'))
+        if not is_exact and err and err > 0.05:
             res['messages'].append(
                 f'⚠ 単勝プールの推定精度が ±{err*200:.0f}% と粗いです。'
                 'もう一度実測すると精度が上がります。口数は控えめに。')
+    if str(meta.get('win_market', '')) == 'hidden':
+        res['messages'].append(
+            '⚠ 全馬のオッズが下限のままですが、プールは空ではありません'
+            '（1頭が大半を集めるとオッズが下限に張り付き、未投票の馬と見分けがつきません）。'
+            'どの馬にお金が入っているか判別できないため、単勝の推奨は出しません。')
     if meta.get('win_market') == 'empty' or str(meta.get('win_market', '')) == 'empty':
         res['messages'].append(
             '⚠ 単勝プールが空です（全馬のオッズが初期値のまま）。'
@@ -2091,16 +2535,16 @@ def analyze(raw_text, bundle, settings=None):
     win_p_bet = (lam_w * win_p + (1 - lam_w) * mkt_p) if mkt_p is not None else lam_w * win_p
     if s.get('win_bets') and mkt_p is not None and res['win_pool'] and others_ok:
         my_units = [int((h.get('my_amount') or 0) // win_unit) for h in horses]
-        unbet = [bool(np.isfinite(odds[i]) and abs(odds[i] - UNBET_ODDS) < 1e-9
-                      and not (horses[i].get('my_amount') or 0)) for i in range(n)]
+        unbet = list(unbet_flags)
         if any(unbet):
             res['messages'].append(
-                f'ℹ 未投票（オッズ {UNBET_ODDS} のまま）の馬が {sum(unbet)}頭 あります。'
+                f'ℹ 未投票（オッズ {UNBET_ODDS} のまま・Σ(1/od) で確認済み）の馬が '
+                f'{sum(unbet)}頭 あります。'
                 'この馬たちは「その馬への投入額0」として実効オッズを計算します'
                 '（当たれば非常に高配当ですが、高分散です）。')
         names_o = [disp[i] for i in range(n)]
         picks, summ = win_bet_picks_pool(
-            names_o, win_p_bet, odds, res['win_pool'], s['bankroll'], s['kelly_fraction'],
+            names_o, win_p_bet, odds_eff, res['win_pool'], s['bankroll'], s['kelly_fraction'],
             s.get('win_edge_min', 0.15), stake_unit=win_unit,
             risk_cap_frac=s['max_risk_frac'], my_units=my_units, unbet=unbet)
         res['win_picks'] = picks
@@ -2108,7 +2552,7 @@ def analyze(raw_text, bundle, settings=None):
         res['win_pool_mode'] = '実測プール（希薄化込み）'
     elif s.get('win_bets') and mkt_p is not None:
         res['win_picks'] = win_bet_picks(
-            disp, win_p_bet, odds, s['bankroll'], s['kelly_fraction'],
+            disp, win_p_bet, odds_eff, s['bankroll'], s['kelly_fraction'],
             s.get('win_edge_min', 0.15), stake_unit=win_unit,
             risk_cap_frac=s['max_risk_frac'])
         if res['win_picks']:
@@ -2158,8 +2602,10 @@ def analyze(raw_text, bundle, settings=None):
     res['purchase_lines'] = []
     res['pool'] = P_total
     res['has_csv'] = bool(csv_odds)
-    res['mc_note'] = (f'モンテカルロ {n_sim:,} 試行 / σ={sigma:.4f}。'
-                      f'確率 0.01% 付近の組は±10%程度のブレがあります。')
+    res['mc_note'] = (
+        f'モンテカルロ {n_sim:,} 試行 / σ=単勝 {sigma:.4f}'
+        + (f'・3連単 {tri_sigma:.4f}' if abs(tri_sigma - sigma) > 1e-9 else '（3連単も同じ）')
+        + '。確率 0.01% 付近の組は±10%程度のブレがあります。')
 
     odds_exact, odds_bare = {}, {}
     if csv_odds:
@@ -2403,8 +2849,10 @@ def _contributions(bundle, horses, dist, track):
 # =====================================================================
 #  11. ベットログ
 # =====================================================================
+# payout_kind: 払戻額の出どころ。'実績'=精算時に最終オッズを入力した / '概算'=購入時オッズ換算。
+# パリミュチュエルなのでオッズは締切時に変動する。購入時オッズのままだと ROI が系統的にずれる。
 LOG_COLUMNS = ['bet_id', 'time', 'race_id', 'bet_type', 'combo', 'model_prob',
-               'odds', 'stake', 'status', 'result', 'payout', 'pnl']
+               'odds', 'stake', 'status', 'result', 'payout', 'pnl', 'payout_kind']
 
 
 class BetLogReadError(RuntimeError):
@@ -2432,7 +2880,8 @@ class BetLog:
             return pd.DataFrame(columns=LOG_COLUMNS)
         if 'bet_type' not in df.columns:
             df['bet_type'] = '3連単'
-        for c in ['race_id', 'combo', 'status', 'result', 'time', 'bet_type']:
+        for c in ['race_id', 'combo', 'status', 'result', 'time', 'bet_type',
+                  'payout_kind']:
             if c in df.columns:
                 df[c] = df[c].fillna('').astype(str)
         for c in ['bet_id', 'model_prob', 'odds', 'stake', 'payout', 'pnl']:
@@ -2440,7 +2889,7 @@ class BetLog:
                 df[c] = pd.to_numeric(df[c], errors='coerce')
         for c in LOG_COLUMNS:
             if c not in df.columns:
-                df[c] = '' if c in ('result', 'combo', 'status') else 0
+                df[c] = '' if c in ('result', 'combo', 'status', 'payout_kind') else 0
         return df[LOG_COLUMNS]
 
     def load(self, strict=False):
@@ -2516,13 +2965,24 @@ class BetLog:
         self._save(df)
         return len(new)
 
-    def settle(self, race_id, order3):
+    def settle(self, race_id, order3, final_odds=None):
+        """レースを精算する。
+
+        final_odds: {'3連単': 最終オッズ, '単勝': 最終オッズ} を渡すと、その値で払戻を
+            計算し直して記録する（payout_kind='実績'）。
+            渡さない場合は購入時オッズで概算する（payout_kind='概算'）。
+            **パリミュチュエルなのでオッズは締切時まで変動する**。購入時オッズのままだと
+            払戻・ROI が系統的にずれるので、「市場に勝てているか」を検証したいなら
+            最終オッズを入れること。
+        """
         df = self.load(strict=True)
         for col in ('payout', 'pnl', 'odds', 'stake'):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
         actual = ' → '.join(order3)
         winner = order3[0]
+        fo = {k: float(v) for k, v in (final_odds or {}).items()
+              if v is not None and float(v) > 0}
         mask = (df['race_id'].astype(str) == str(race_id)) & (df['status'] == 'pending')
         cnt = 0
         for idx in df[mask].index:
@@ -2531,7 +2991,19 @@ class BetLog:
                 else (df.at[idx, 'combo'] == actual)
             df.at[idx, 'status'] = 'won' if won else 'lost'
             df.at[idx, 'result'] = actual
-            pay = float(df.at[idx, 'odds']) * float(df.at[idx, 'stake']) if won else 0.0
+            kind = ''
+            if won:
+                od = float(df.at[idx, 'odds'])
+                if bt in fo:
+                    od = fo[bt]
+                    df.at[idx, 'odds'] = od      # 最終オッズで上書きして記録を正しくする
+                    kind = '実績'
+                else:
+                    kind = '概算'
+                pay = od * float(df.at[idx, 'stake'])
+            else:
+                pay = 0.0
+            df.at[idx, 'payout_kind'] = kind
             df.at[idx, 'payout'] = pay
             df.at[idx, 'pnl'] = pay - float(df.at[idx, 'stake'])
             cnt += 1
@@ -2564,6 +3036,13 @@ class BetLog:
         ret = float(settled['payout'].sum())
         pnl = ret - stake
         hits = int((settled['status'] == 'won').sum())
+        # 的中のうち、最終オッズを入れずに購入時オッズで概算した件数。
+        # これが残っていると払戻・ROI は「概算」であって実績ではない。
+        won_rows = settled[settled['status'] == 'won']
+        out['n_won'] = int(len(won_rows))
+        out['n_payout_est'] = int((won_rows.get(
+            'payout_kind', pd.Series([''] * len(won_rows)))
+            .astype(str) != '実績').sum()) if len(won_rows) else 0
         out['overall'] = {
             'stake': stake, 'payout': ret, 'pnl': pnl,
             'roi': (pnl / stake * 100 if stake else 0), 'hits': hits,

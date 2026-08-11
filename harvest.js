@@ -54,7 +54,11 @@ const oneRace=async(s)=>{
   }).filter(Boolean);
   if(!rows.length||rows.length!==info.pets.length)return {sid:s,state:'partial'};
   rows.sort((a,b)=>a.rank-b.rank);
-  const lines=[`[${dstr(date)} ${time}] Oasis-API`,'',`🏁 レース 結果`,
+  // レース番号として schedule_id をそのまま入れる。
+  // ツール側の race_key は「日付＋時刻＋レース番号」で作るため、番号が無いと
+  // 同日同時刻の別レース（とくに race_time が取れず 0:00 になったもの）が
+  // 1レースに合成されてしまう。schedule_id は一意なので衝突しない。
+  const lines=[`[${dstr(date)} ${time}] Oasis-API`,'',`🏁 第${s}レース 結果`,
               `🕘 ${time}｜${dist}｜${surf}｜${ground}`];
   rows.forEach(r=>{
     lines.push(`${RANK(r.rank)} ${r.name}`,`@Unknown`,
@@ -70,25 +74,31 @@ try{
   const blocks=[];
   let done=0, okCount=0, miss=0, unfinished=0, minDate=null, maxDate=null;
   const ids=[];for(let i=0;i<N;i++)ids.push(S-i);
-  const BATCH=6;
+  const BATCH=6, STOP_AFTER_MISSES=18;   // 連続欠番がこれだけ続いたら打ち切り
+  let streak=0, stopped=false;
   for(let i=0;i<ids.length;i+=BATCH){
     const part=ids.slice(i,i+BATCH);
     const got=await Promise.all(part.map(oneRace));
     for(const g of got){
       done++;
-      if(g.state==='ok'){okCount++;blocks.push([g.sid,g.text]);
+      if(g.state==='ok'){okCount++;streak=0;blocks.push([g.sid,g.text]);
         if(!minDate||g.date<minDate)minDate=g.date;
         if(!maxDate||g.date>maxDate)maxDate=g.date;}
-      else if(g.state==='unfinished'||g.state==='partial')unfinished++;
-      else miss++;
+      else if(g.state==='unfinished'||g.state==='partial'){unfinished++;streak=0;}
+      else {miss++;streak++;}
     }
     btn.textContent=`📥 採取中 ${done}/${N}（確定 ${okCount}）...`;
-    // ギルド開始より前まで来たら早めに終了（連続で欠損が続いたら打ち切り）
+    // schedule_id は降順に遡るので、欠番が続く＝ギルド開始より前まで来た可能性が高い。
+    // それ以上叩いても無駄なので打ち切る（APIへの無駄な負荷も避ける）。
+    if(streak>=STOP_AFTER_MISSES){stopped=true;break;}
   }
+  if(stopped) console.info('Oasis: 欠番が'+STOP_AFTER_MISSES+'件続いたため'+done+'件で打ち切りました');
   // schedule_id 昇順（古い→新しい）で並べる
   blocks.sort((a,b)=>a[0]-b[0]);
+  const lo=blocks.length?blocks[0][0]:(S-done+1), hi=blocks.length?blocks[blocks.length-1][0]:S;
   const header=`# おあしすっち 結果採取（result API）\n`+
-    `# guild=${G}  対象 schedule_id ${S-N+1}〜${S}  確定 ${okCount}レース\n`+
+    `# guild=${G}  採取した schedule_id ${lo}〜${hi}  確定 ${okCount}レース`+
+    `${stopped?`（欠番が続いたため ${done}/${N} で打切り）`:''}\n`+
     `# 期間 ${minDate||'?'} 〜 ${maxDate||'?'}\n\n`;
   const out=header+blocks.map(b=>b[1]).join('');
   let copied=true;
@@ -104,7 +114,8 @@ try{
   if(unknown.size)console.warn('Oasis: 辞書に無いパッシブコード:',[...unknown]);
   btn.style.background=okCount?'#1b5e20':'#e65100';btn.style.color='#fff';
   btn.style.borderColor=okCount?'#4caf50':'#ff9800';
-  btn.textContent=`${copied?'✅':'📋'} 確定${okCount}レース採取 | 未確定${unfinished} | 欠番${miss} | `+
+  btn.textContent=`${copied?'✅':'📋'} 確定${okCount}レース採取 | 未確定${unfinished} | 欠番${miss}`+
+    `${stopped?`（欠番が続いたため${done}/${N}で打切り）`:''} | `+
     `${copied?'コピー完了→txtで保存しloggへ':'下の枠を手動コピー'}${warn}`;
   setTimeout(()=>btn.remove(),unknown.size?15000:10000);
 }catch(e){btn.style.background='#b71c1c';btn.style.borderColor='#ef5350';btn.textContent='❌ エラー: '+e.message;setTimeout(()=>btn.remove(),8000);}
