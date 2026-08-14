@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.5.0'
+CORE_VERSION = '3.6.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -262,6 +262,39 @@ INTERNAL_DIST_BALANCE = {            # 距離バランス[距離] = [SP, PW, ST]
     '中距離': [0.9, 1.3, 1.3],
     '長距離': [0.6, 1.0, 1.4],
 }
+
+
+# --- スタミナの消費法則（result API の timeline から実測 / 現行版 106レース）---
+# 消費/100m = clamp(c[距離] × Σ(序盤重み × 距離バランス × 実効ステータス), lo, hi)
+# 必要スタミナ = 消費 × 区間数。持ちスタミナで足りない分だけ最後に減速する。
+#   ・c が距離ごとに違うのは INTERNAL_DIST_BALANCE の絶対倍率のズレを吸収しているため。
+#     レース内の順位には影響しない（同一レースの全馬が同じ距離）ので、これで正しい。
+#   ・lo/hi は観測された最小・最大。外挿すると偽のスタミナ切れを量産するので外挿しない。
+#     クランプが確定しているのはマイルだけ（下限に67頭・上限に90頭が同値で張り付き）。
+#     ⚠ 短距離/中距離/長距離の lo は観測1頭しかない。データが増えたら要再測定。
+#       「下限なし(lo=0)」も試したが 8分割中7分割の改善に留まり、観測最小の方が良かった。
+STAMINA_COST_LAW = {
+    '短距離': {'c': 0.01282, 'lo': 1.955, 'hi': 3.220, 'n_seg': 10},
+    'マイル': {'c': 0.01836, 'lo': 2.267, 'hi': 3.067, 'n_seg': 15},
+    '中距離': {'c': 0.02931, 'lo': 2.496, 'hi': 3.737, 'n_seg': 20},
+    '長距離': {'c': 0.03989, 'lo': 2.312, 'hi': 3.680, 'n_seg': 25},
+}
+
+
+def stamina_shortfall(eff, dist):
+    """完走に必要なスタミナと持ちスタミナの差（足りていれば 0）。
+
+    eff は effective_stats() の戻り値。パッシブの倍率は既に効いている。
+    """
+    L = STAMINA_COST_LAW.get(dist)
+    if not L:
+        return 0.0
+    w = INTERNAL_PHASE_WEIGHTS['序盤']
+    b = INTERNAL_DIST_BALANCE.get(dist, [1.0, 1.0, 1.0])
+    base = (eff['speed'] * w[0] * b[0] + eff['power'] * w[1] * b[1]
+            + eff['stamina'] * w[2] * b[2])
+    cost = min(max(L['c'] * base, L['lo']), L['hi'])
+    return max(0.0, cost * L['n_seg'] - math.floor(eff['stamina']))
 
 
 def internal_stat_weights(dist):
@@ -796,6 +829,11 @@ def feature_names(spec):
         # 線形項を併用する（新式34レースの検証で held-out スピアマン 0.898→0.926）。
         names += [f'{d}:切片', f'{d}:log(SP)', f'{d}:log(PW)', f'{d}:log(ST)',
                   f'{d}:lin(SP)', f'{d}:lin(PW)', f'{d}:lin(ST)']
+    # スタミナ不足（1列）。timeline から実測した消費法則で「完走に足りない量」を作る。
+    # Ridge は既にスタミナの線形項を持つが、不足は**閾値を割った馬だけ**に効く非線形量で、
+    # 線形項では表せない。現行版106レースの検証で 8/8 分割改善（スピアマン +0.0065、
+    # 1着的中 50.0%→53.9%）。距離ごとに分ける案(4列)はデータ不足で不採用。
+    names += ['スタミナ不足']
     names += ['好調', '不調']
     for p in unspecced_passives(spec):
         names.append(p)
@@ -832,6 +870,7 @@ def _row_features(speed, power, stamina, condition, passives, dist, track, spec,
     for d in DIST_LIST:
         m = 1.0 if dist == d else 0.0
         f += [m, m * sp, m * pw, m * st, m * lsp, m * lpw, m * lst]
+    f.append(stamina_shortfall(e, dist) / 10.0)      # 他の線形項と桁を揃える
     f += [1.0 if condition == '好調' else 0.0, 1.0 if condition == '不調' else 0.0]
     pset = set(passives or ())
     for p in unspecced_passives(spec):
@@ -1338,6 +1377,10 @@ def export_model_json(bundle, path=None):
         'aptitude_match': {k: list(v) for k, v in APTITUDE_MATCH.items()},
         'dist_list': list(DIST_LIST), 'track_list': list(TRACK_LIST),
         'variance_share': VARIANCE_SHARE, 'interaction_shrink': INTERACTION_SHRINK,
+        # スタミナ不足の特徴量を JS 側でも作るために必要な定数一式
+        'stamina_cost_law': {d: dict(v) for d, v in STAMINA_COST_LAW.items()},
+        'phase_early': list(INTERNAL_PHASE_WEIGHTS['序盤']),
+        'dist_balance': {d: list(v) for d, v in INTERNAL_DIST_BALANCE.items()},
         'odds_floor': ODDS_FLOOR, 'stake_unit': STAKE_UNIT,
         'max_total_units': MAX_TOTAL_UNITS, 'min_field_trifecta': MIN_FIELD_TRIFECTA,
     }
@@ -2806,7 +2849,14 @@ def _contributions(bundle, horses, dist, track):
         c_sp = b_sp * sp + l_sp * lsp0
         c_pw = b_pw * pw + l_pw * lpw0
         c_st = b_st * st + l_st * lst0
-        c_spec = (b_sp * (math.log(e['speed']) - sp)
+        # スタミナ不足の寄与（素ステータス基準）。実効との差は c_spec 側で拾う。
+        b_sh = coef.get('スタミナ不足', 0.0)
+        e0 = {'speed': float(h['speed']), 'power': float(h['power']),
+              'stamina': float(h['stamina'])}
+        c_st += b_sh * stamina_shortfall(e0, dist) / 10.0
+        c_spec = (b_sh * (stamina_shortfall(e, dist)
+                          - stamina_shortfall(e0, dist)) / 10.0
+                  + b_sp * (math.log(e['speed']) - sp)
                   + b_pw * (math.log(e['power']) - pw)
                   + b_st * (math.log(e['stamina']) - st)
                   + l_sp * (e['speed'] - float(h['speed'])) / 100.0
@@ -2821,7 +2871,9 @@ def _contributions(bundle, horses, dist, track):
             if sp_ and sp_.get('mult'):
                 e1 = effective_stats(h['speed'], h['power'], h['stamina'], (p,),
                                      dist, track, spec, ctx)
-                v = (b_sp * (math.log(e1['speed']) - sp)
+                v = (b_sh * (stamina_shortfall(e1, dist)
+                             - stamina_shortfall(e0, dist)) / 10.0
+                     + b_sp * (math.log(e1['speed']) - sp)
                      + b_pw * (math.log(e1['power']) - pw)
                      + b_st * (math.log(e1['stamina']) - st)
                      + l_sp * (e1['speed'] - float(h['speed'])) / 100.0

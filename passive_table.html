@@ -1,0 +1,136 @@
+<!DOCTYPE html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>おあしすっち パッシブ一覧</title>
+<style>
+:root{color-scheme:light dark;
+ --surface:#fcfcfb; --surface-2:#f4f4f1; --ink:#0b0b0b; --ink-2:#52514e; --ink-3:#83827c;
+ --line:#e3e2dd; --neg:#d03b3b;
+ --p0:#eef5fd;--p1:#cde2fb;--p2:#b7d3f6;--p3:#9ec5f4;--p4:#86b6ef;--p5:#6da7ec;}
+@media (prefers-color-scheme:dark){:root{
+ --surface:#1a1a19; --surface-2:#232322; --ink:#fff; --ink-2:#c3c2b7; --ink-3:#8a8980;
+ --line:#333330; --neg:#e66767;
+ --p0:#12233a;--p1:#16304f;--p2:#1a3a63;--p3:#1c4a7f;--p4:#1c5cab;--p5:#256abf;}}
+body{margin:0;padding:1.5rem 1rem 4rem;background:var(--surface);color:var(--ink);
+ font:15px/1.7 system-ui,-apple-system,sans-serif;max-width:1080px;margin:0 auto}
+h1{font-size:1.5rem;margin:0 0 .3rem} h2{font-size:1.1rem;margin:2rem 0 .6rem;color:var(--ink)}
+p.sub{color:var(--ink-2);margin:.2rem 0 1.2rem;font-size:.92rem}
+table{border-collapse:collapse;width:100%;font-size:.86rem}
+th,td{border-bottom:1px solid var(--line);padding:.42rem .5rem;text-align:right;
+ white-space:nowrap}
+th{color:var(--ink-2);font-weight:600;text-align:right;position:sticky;top:0;
+ background:var(--surface);border-bottom:2px solid var(--line)}
+th.l,td.l{text-align:left}
+td.p{color:var(--ink);font-variant-numeric:tabular-nums}
+td.p[data-lv="0"]{background:var(--p0)} td.p[data-lv="1"]{background:var(--p1)}
+td.p[data-lv="2"]{background:var(--p2)} td.p[data-lv="3"]{background:var(--p3)}
+td.p[data-lv="4"]{background:var(--p4)} td.p[data-lv="5"]{background:var(--p5)}
+@media (prefers-color-scheme:dark){td.p[data-lv="3"],td.p[data-lv="4"],td.p[data-lv="5"]{color:#fff}}
+td.neg{color:var(--neg);font-weight:600}
+td.z,.z{color:var(--ink-3)}
+tr:hover td{background:var(--surface-2)}
+tr:hover td.p[data-lv]{filter:brightness(1.04)}
+.tag{display:inline-block;font-size:.72rem;padding:.05rem .4rem;border-radius:3px;
+ background:var(--surface-2);color:var(--ink-2);margin-left:.3rem}
+.best{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:.8rem}
+.card{background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:.7rem .9rem}
+.card h3{margin:0 0 .4rem;font-size:.95rem}
+.card ol{margin:0;padding-left:1.2rem;font-size:.85rem;color:var(--ink-2)}
+.card b{color:var(--ink)}
+.note{background:var(--surface-2);border-left:3px solid var(--p4);padding:.7rem 1rem;
+ border-radius:4px;font-size:.9rem;color:var(--ink-2);margin:1rem 0}
+.note b{color:var(--ink)}
+
+/* --- 印刷（PDF）用 --- */
+@page{size:A4 landscape;margin:11mm 10mm 12mm}
+@media print{
+ :root{--surface:#fff;--surface-2:#f4f4f1;--ink:#0b0b0b;--ink-2:#52514e;--ink-3:#83827c;
+       --line:#dcdbd6;--neg:#c0322f;
+       --p0:#eef5fd;--p1:#cde2fb;--p2:#b7d3f6;--p3:#9ec5f4;--p4:#86b6ef;--p5:#6da7ec;}
+ *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+ body{padding:0;max-width:none;font-size:10pt;line-height:1.45}
+ h1{font-size:15pt;margin:0 0 .15rem} h2{font-size:11.5pt;margin:.9rem 0 .35rem}
+ p.sub{font-size:8.6pt;margin:.1rem 0 .7rem}
+ table{font-size:8.2pt} th,td{padding:.22rem .38rem}
+ th{position:static;border-bottom:1.5px solid #999}
+ thead{display:table-header-group}      /* 改ページ後もヘッダを繰り返す */
+ tr{break-inside:avoid;page-break-inside:avoid}
+ tr:hover td{background:none}           /* 印刷にホバーは無い */
+ td.p[data-lv]{filter:none}
+ .best{gap:.5rem;break-inside:avoid} .card{padding:.45rem .6rem}
+ .card h3{font-size:8.8pt;margin:0 0 .2rem} .card ol{font-size:8pt;padding-left:1rem}
+ .note{font-size:8.4pt;padding:.45rem .7rem;margin:.6rem 0;break-inside:avoid}
+ h2+table{break-before:avoid}
+}
+</style>
+<h1>おあしすっち パッシブ35種</h1>
+<p class="sub">倍率・発動条件と、<b>距離ごとの実効効果</b>。効果は素100/100/100の馬に1枠付けたときの内部レート変化率で、ゲーム内部の着順式（区間重み×距離バランス）から計算しています。色が濃いほど効果大。赤字はマイナス（付けると損）。</p>
+<h2>距離別のおすすめ</h2><div class="best">
+<div class="card"><h3>短距離</h3><ol>
+<li><b>スピードスター</b> +21.5%</li>
+<li><b>同族嫌悪</b> +20.0%</li>
+<li><b>スピード大アップ</b> +16.3%</li>
+<li><b>短距離得意</b> +15.0%</li>
+<li><b>芝得意</b> +10.0%</li>
+</ol></div>
+<div class="card"><h3>マイル</h3><ol>
+<li><b>同族嫌悪</b> +20.0%</li>
+<li><b>マイル得意</b> +15.0%</li>
+<li><b>スピードスター</b> +13.8%</li>
+<li><b>スピード大アップ</b> +11.7%</li>
+<li><b>芝得意</b> +10.0%</li>
+</ol></div>
+<div class="card"><h3>中距離</h3><ol>
+<li><b>同族嫌悪</b> +20.0%</li>
+<li><b>中距離得意</b> +15.0%</li>
+<li><b>スピードスター</b> +10.3%</li>
+<li><b>芝得意</b> +10.0%</li>
+<li><b>ダート得意</b> +10.0%</li>
+</ol></div>
+<div class="card"><h3>長距離</h3><ol>
+<li><b>同族嫌悪</b> +20.0%</li>
+<li><b>長距離得意</b> +15.0%</li>
+<li><b>マイペース</b> +10.3%</li>
+<li><b>芝得意</b> +10.0%</li>
+<li><b>ダート得意</b> +10.0%</li>
+</ol></div>
+</div>
+<div class="note"><b>適性系（○○得意）は一致した距離でだけ +15%。</b>それ以外の距離では完全に無効なので、装備の2枠を丸ごと捨てることになります。また短距離ではスピード×1.25（+16.3%）が全ステ×1.15（+15.0%）を上回るため、<b>短距離得意より スピード大アップのほうが強い</b>という逆転が起きます。</div>
+<h2>全35種</h2>
+<table><thead><tr><th class="l">パッシブ</th><th class="l">種別</th><th>SP</th><th>PW</th><th>ST</th><th class="l">発動条件</th><th>稼働率</th><th>短距離</th><th>マイル</th><th>中距離</th><th>長距離</th></tr></thead><tbody>
+<tr><td class="l">スピードスター</td><td class="l z">ステータス</td><td>×1.35</td><td><span class="z">—</span></td><td>×0.90</td><td class="l z">常時</td><td>100%</td><td class="p" data-lv="5">+21.5%</td><td class="p" data-lv="3">+13.8%</td><td class="p" data-lv="2">+10.3%</td><td class="p" data-lv="1">+6.9%</td></tr>
+<tr><td class="l">同族嫌悪</td><td class="l z">ステータス</td><td>×1.20</td><td>×1.20</td><td>×1.20</td><td class="l z">同族が居る時</td><td>100%</td><td class="p" data-lv="5">+20.0%</td><td class="p" data-lv="5">+20.0%</td><td class="p" data-lv="5">+20.0%</td><td class="p" data-lv="5">+20.0%</td></tr>
+<tr><td class="l">スピード大アップ</td><td class="l z">ステータス</td><td>×1.25</td><td><span class="z">—</span></td><td><span class="z">—</span></td><td class="l z">常時</td><td>100%</td><td class="p" data-lv="4">+16.3%</td><td class="p" data-lv="3">+11.7%</td><td class="p" data-lv="2">+9.4%</td><td class="p" data-lv="2">+7.7%</td></tr>
+<tr><td class="l">中距離得意</td><td class="l z">適性</td><td>×1.15</td><td>×1.15</td><td>×1.15</td><td class="l z">距離/馬場が一致（中距離）</td><td>100%</td><td class="z">—</td><td class="z">—</td><td class="p" data-lv="4">+15.0%</td><td class="z">—</td></tr>
+<tr><td class="l">短距離得意</td><td class="l z">適性</td><td>×1.15</td><td>×1.15</td><td>×1.15</td><td class="l z">距離/馬場が一致（短距離）</td><td>100%</td><td class="p" data-lv="4">+15.0%</td><td class="z">—</td><td class="z">—</td><td class="z">—</td></tr>
+<tr><td class="l">マイル得意</td><td class="l z">適性</td><td>×1.15</td><td>×1.15</td><td>×1.15</td><td class="l z">距離/馬場が一致（マイル）</td><td>100%</td><td class="z">—</td><td class="p" data-lv="4">+15.0%</td><td class="z">—</td><td class="z">—</td></tr>
+<tr><td class="l">長距離得意</td><td class="l z">適性</td><td>×1.15</td><td>×1.15</td><td>×1.15</td><td class="l z">距離/馬場が一致（長距離）</td><td>100%</td><td class="z">—</td><td class="z">—</td><td class="z">—</td><td class="p" data-lv="4">+15.0%</td></tr>
+<tr><td class="l">マイペース</td><td class="l z">ステータス</td><td><span class="z">—</span></td><td>×0.90</td><td>×1.35</td><td class="l z">常時</td><td>100%</td><td class="p" data-lv="0">+2.1%</td><td class="p" data-lv="1">+5.9%</td><td class="p" data-lv="1">+6.9%</td><td class="p" data-lv="2">+10.3%</td></tr>
+<tr><td class="l">芝得意</td><td class="l z">適性</td><td>×1.10</td><td>×1.10</td><td>×1.10</td><td class="l z">距離/馬場が一致（芝）</td><td>100%</td><td class="p" data-lv="2">+10.0%</td><td class="p" data-lv="2">+10.0%</td><td class="p" data-lv="2">+10.0%</td><td class="p" data-lv="2">+10.0%</td></tr>
+<tr><td class="l">ダート得意</td><td class="l z">適性</td><td>×1.10</td><td>×1.10</td><td>×1.10</td><td class="l z">距離/馬場が一致（ダート）</td><td>100%</td><td class="p" data-lv="2">+10.0%</td><td class="p" data-lv="2">+10.0%</td><td class="p" data-lv="2">+10.0%</td><td class="p" data-lv="2">+10.0%</td></tr>
+<tr><td class="l">スピード小アップ</td><td class="l z">ステータス</td><td>×1.15</td><td><span class="z">—</span></td><td><span class="z">—</span></td><td class="l z">常時</td><td>100%</td><td class="p" data-lv="2">+9.8%</td><td class="p" data-lv="1">+7.0%</td><td class="p" data-lv="1">+5.7%</td><td class="p" data-lv="1">+4.6%</td></tr>
+<tr><td class="l">スタミナ大アップ</td><td class="l z">ステータス</td><td><span class="z">—</span></td><td><span class="z">—</span></td><td>×1.25</td><td class="l z">常時</td><td>100%</td><td class="p" data-lv="0">+3.1%</td><td class="p" data-lv="1">+6.2%</td><td class="p" data-lv="2">+7.3%</td><td class="p" data-lv="2">+9.6%</td></tr>
+<tr><td class="l">パワー大アップ</td><td class="l z">ステータス</td><td><span class="z">—</span></td><td>×1.25</td><td><span class="z">—</span></td><td class="l z">常時</td><td>100%</td><td class="p" data-lv="1">+5.6%</td><td class="p" data-lv="1">+7.1%</td><td class="p" data-lv="2">+8.3%</td><td class="p" data-lv="2">+7.8%</td></tr>
+<tr><td class="l">脳筋</td><td class="l z">ステータス</td><td>×0.90</td><td>×1.35</td><td><span class="z">—</span></td><td class="l z">常時</td><td>100%</td><td class="p" data-lv="0">+1.4%</td><td class="p" data-lv="1">+5.2%</td><td class="p" data-lv="2">+7.8%</td><td class="p" data-lv="2">+7.8%</td></tr>
+<tr><td class="l">スタミナ小アップ</td><td class="l z">ステータス</td><td><span class="z">—</span></td><td><span class="z">—</span></td><td>×1.15</td><td class="l z">常時</td><td>100%</td><td class="p" data-lv="0">+1.9%</td><td class="p" data-lv="1">+3.8%</td><td class="p" data-lv="1">+4.4%</td><td class="p" data-lv="1">+5.7%</td></tr>
+<tr><td class="l">器用貧乏</td><td class="l z">ステータス</td><td>×1.05</td><td>×1.05</td><td>×1.05</td><td class="l z">常時</td><td>100%</td><td class="p" data-lv="1">+5.0%</td><td class="p" data-lv="1">+5.0%</td><td class="p" data-lv="1">+5.0%</td><td class="p" data-lv="1">+5.0%</td></tr>
+<tr><td class="l">パワー小アップ</td><td class="l z">ステータス</td><td><span class="z">—</span></td><td>×1.15</td><td><span class="z">—</span></td><td class="l z">常時</td><td>100%</td><td class="p" data-lv="0">+3.4%</td><td class="p" data-lv="1">+4.2%</td><td class="p" data-lv="1">+5.0%</td><td class="p" data-lv="1">+4.7%</td></tr>
+<tr><td class="l">省エネ走法</td><td class="l z">展開</td><td><span class="z">—</span></td><td><span class="z">—</span></td><td>×1.08</td><td class="l z">常時</td><td>100%</td><td class="p" data-lv="0">+1.0%</td><td class="p" data-lv="0">+2.0%</td><td class="p" data-lv="0">+2.3%</td><td class="p" data-lv="0">+3.1%</td></tr>
+<tr><td class="l">セカンドウインド</td><td class="l z">展開</td><td><span class="z">—</span></td><td><span class="z">—</span></td><td>×1.08</td><td class="l z">常時</td><td>100%</td><td class="p" data-lv="0">+1.0%</td><td class="p" data-lv="0">+2.0%</td><td class="p" data-lv="0">+2.3%</td><td class="p" data-lv="0">+3.1%</td></tr>
+<tr><td class="l">ロケットスタート</td><td class="l z">展開</td><td>×1.12</td><td><span class="z">—</span></td><td><span class="z">—</span></td><td class="l z">区間限定（序盤）</td><td>33%</td><td class="p" data-lv="0">+2.6%</td><td class="p" data-lv="0">+1.9%</td><td class="p" data-lv="0">+1.5%</td><td class="p" data-lv="0">+1.2%</td></tr>
+<tr><td class="l">逃げの心得</td><td class="l z">展開</td><td>×1.08</td><td>×1.08</td><td>×0.95</td><td class="l z">区間限定（序盤）</td><td>33%</td><td class="p" data-lv="0">+2.1%</td><td class="p" data-lv="0">+1.6%</td><td class="p" data-lv="0">+1.4%</td><td class="p" data-lv="0">+1.0%</td></tr>
+<tr><td class="l">ペース配分</td><td class="l z">展開</td><td>×0.95</td><td><span class="z">—</span></td><td>×1.15</td><td class="l z">区間限定（序盤）</td><td>33%</td><td class="neg">-0.5%</td><td class="p" data-lv="0">+0.5%</td><td class="p" data-lv="0">+0.8%</td><td class="p" data-lv="0">+1.4%</td></tr>
+<tr><td class="l">末脚</td><td class="l z">展開</td><td><span class="z">—</span></td><td>×1.12</td><td><span class="z">—</span></td><td class="l z">区間限定（終盤）</td><td>33%</td><td class="p" data-lv="0">+0.9%</td><td class="p" data-lv="0">+1.1%</td><td class="p" data-lv="0">+1.3%</td><td class="p" data-lv="0">+1.2%</td></tr>
+<tr><td class="l">勝負師</td><td class="l z">ステータス</td><td>×1.25</td><td>×1.25</td><td>×1.25</td><td class="l z">状況限定</td><td>5%</td><td class="p" data-lv="0">+1.2%</td><td class="p" data-lv="0">+1.2%</td><td class="p" data-lv="0">+1.3%</td><td class="p" data-lv="0">+1.2%</td></tr>
+<tr><td class="l">緊急回復</td><td class="l z">展開</td><td><span class="z">—</span></td><td><span class="z">—</span></td><td>×1.06</td><td class="l z">状況限定</td><td>50%</td><td class="p" data-lv="0">+0.4%</td><td class="p" data-lv="0">+0.8%</td><td class="p" data-lv="0">+0.9%</td><td class="p" data-lv="0">+1.1%</td></tr>
+<tr><td class="l">中盤加速</td><td class="l z">展開</td><td><span class="z">—</span></td><td>×1.10</td><td><span class="z">—</span></td><td class="l z">区間限定（中盤）</td><td>33%</td><td class="p" data-lv="0">+0.8%</td><td class="p" data-lv="0">+0.9%</td><td class="p" data-lv="0">+1.1%</td><td class="p" data-lv="0">+1.0%</td></tr>
+<tr><td class="l">競り合い</td><td class="l z">展開</td><td><span class="z">—</span></td><td>×1.06</td><td><span class="z">—</span></td><td class="l z">状況限定</td><td>50%</td><td class="p" data-lv="0">+0.7%</td><td class="p" data-lv="0">+0.9%</td><td class="p" data-lv="0">+1.0%</td><td class="p" data-lv="0">+0.9%</td></tr>
+<tr><td class="l">二の脚</td><td class="l z">展開</td><td>×1.08</td><td><span class="z">—</span></td><td><span class="z">—</span></td><td class="l z">区間限定（中盤）</td><td>15%</td><td class="p" data-lv="0">+0.8%</td><td class="p" data-lv="0">+0.6%</td><td class="p" data-lv="0">+0.5%</td><td class="p" data-lv="0">+0.4%</td></tr>
+<tr><td class="l">追い込み</td><td class="l z">展開</td><td><span class="z">—</span></td><td>×1.12</td><td><span class="z">—</span></td><td class="l z">状況限定（終盤）</td><td>17%</td><td class="p" data-lv="0">+0.5%</td><td class="p" data-lv="0">+0.6%</td><td class="p" data-lv="0">+0.7%</td><td class="p" data-lv="0">+0.6%</td></tr>
+<tr><td class="l">独走態勢</td><td class="l z">展開</td><td><span class="z">—</span></td><td><span class="z">—</span></td><td>×1.06</td><td class="l z">状況限定</td><td>20%</td><td class="p" data-lv="0">+0.1%</td><td class="p" data-lv="0">+0.3%</td><td class="p" data-lv="0">+0.4%</td><td class="p" data-lv="0">+0.5%</td></tr>
+<tr><td class="l">差しの構え</td><td class="l z">展開</td><td><span class="z">—</span></td><td>×1.08</td><td><span class="z">—</span></td><td class="l z">状況限定（中盤）</td><td>17%</td><td class="p" data-lv="0">+0.3%</td><td class="p" data-lv="0">+0.4%</td><td class="p" data-lv="0">+0.4%</td><td class="p" data-lv="0">+0.4%</td></tr>
+<tr><td class="l">ロングスパート</td><td class="l z">展開</td><td><span class="z">—</span></td><td>×1.07</td><td>×0.92</td><td class="l z">区間限定（終盤）</td><td>50%</td><td class="p" data-lv="0">+0.3%</td><td class="z">±0.0%</td><td class="z">±0.0%</td><td class="neg">-0.4%</td></tr>
+<tr><td class="l">不屈</td><td class="l z">展開</td><td><span class="z">—</span></td><td>×1.08</td><td><span class="z">—</span></td><td class="l z">状況限定</td><td>10%</td><td class="p" data-lv="0">+0.2%</td><td class="p" data-lv="0">+0.2%</td><td class="p" data-lv="0">+0.3%</td><td class="p" data-lv="0">+0.2%</td></tr>
+<tr><td class="l">安定感<span class="tag">σ×0.50</span></td><td class="l z">展開</td><td><span class="z">—</span></td><td><span class="z">—</span></td><td><span class="z">—</span></td><td class="l z">ブレ低減</td><td>100%</td><td class="z">—</td><td class="z">—</td><td class="z">—</td><td class="z">—</td></tr>
+<tr><td class="l">粘り腰</td><td class="l z">展開</td><td><span class="z">—</span></td><td><span class="z">—</span></td><td><span class="z">—</span></td><td class="l z">実測から学習</td><td>100%</td><td class="z">—</td><td class="z">—</td><td class="z">—</td><td class="z">—</td></tr>
+</tbody></table>
+<div class="note"><b>読み方の注意。</b>効果は素100/100/100を基準にした値です。実際の馬はステータスが偏っているので、得意ステータスを伸ばすパッシブほど表の値より効きます。「安定感」は倍率を持たず着順のブレ幅σを半分にするスキルなので、この表の効果欄は — になります（価値が無いという意味ではありません）。「粘り腰」はスタミナ切れの速度低下を軽減するもので倍率に落とせないため、実ログからの学習に委ねています。</div>

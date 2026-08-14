@@ -84,8 +84,19 @@ def main(log_path='logg'):
         if os.path.exists(tmp):
             os.remove(tmp)
 
-    step(4, '構文チェック')
+    step(4, 'Python↔JS の一致検証')
     ok = True
+    try:
+        r = subprocess.run([sys.executable, os.path.join(HERE, 'parity_test.py')],
+                           capture_output=True, text=True)
+        print('   ' + (r.stdout.strip().replace('\n', '\n   ') or '(出力なし)'))
+        if r.returncode != 0:
+            print('   ❌ model.js が oasis_core.py に追随していません。ここで止めます。')
+            return 1
+    except FileNotFoundError:
+        print('   ⚠ parity_test.py が無いので飛ばしました')
+
+    step(5, '構文チェック')
     for f, label in [('autopilot.bundle.js', 'バンドル')]:
         p = os.path.join(HERE, f)
         try:
