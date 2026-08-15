@@ -20,6 +20,12 @@ import os
 import subprocess
 import sys
 
+# Windows のコンソールは既定 cp932。✅ や → を出すので UTF-8 に切り替える。
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+except (AttributeError, ValueError):
+    pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, 'bookmarklets', 'src')
 sys.path.insert(0, HERE)
@@ -86,21 +92,27 @@ def main(log_path='logg'):
 
     step(4, 'Python↔JS の一致検証')
     ok = True
-    try:
-        r = subprocess.run([sys.executable, os.path.join(HERE, 'parity_test.py')],
-                           capture_output=True, text=True)
-        print('   ' + (r.stdout.strip().replace('\n', '\n   ') or '(出力なし)'))
-        if r.returncode != 0:
-            print('   ❌ model.js が oasis_core.py に追随していません。ここで止めます。')
-            return 1
-    except FileNotFoundError:
+    if not os.path.exists(os.path.join(HERE, 'parity_test.py')):
         print('   ⚠ parity_test.py が無いので飛ばしました')
+    else:
+        r = subprocess.run([sys.executable, os.path.join(HERE, 'parity_test.py')],
+                           capture_output=True, text=True,
+                           encoding='utf-8', errors='replace')
+        for stream in (r.stdout, r.stderr):
+            if stream.strip():
+                print('   ' + stream.strip().replace('\n', '\n   '))
+        if r.returncode != 0:
+            print('   ❌ ここで止めます。上のエラー内容を確認してください。')
+            print('      「不一致」と出ていれば model.js が oasis_core.py に追随していません。')
+            print('      それ以外（Traceback など）は検証スクリプト側の問題です。')
+            return 1
 
     step(5, '構文チェック')
     for f, label in [('autopilot.bundle.js', 'バンドル')]:
         p = os.path.join(HERE, f)
         try:
-            r = subprocess.run(['node', '--check', p], capture_output=True, text=True)
+            r = subprocess.run(['node', '--check', p], capture_output=True, text=True,
+                               encoding='utf-8', errors='replace')
             if r.returncode == 0:
                 print(f'   ✅ {label} 構文OK')
             else:

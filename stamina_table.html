@@ -1,0 +1,120 @@
+<!doctype html><html lang="ja"><meta charset="utf-8">
+<title>必要スタミナ早見表</title>
+<style>
+:root{color-scheme:light dark;
+ --surface:#fcfcfb; --surface-2:#f4f4f1; --ink:#0b0b0b; --ink-2:#52514e; --ink-3:#83827c;
+ --line:#e3e2dd; --neg:#d03b3b;
+ --p0:#eef5fd;--p1:#cde2fb;--p2:#b7d3f6;--p3:#9ec5f4;--p4:#86b6ef;--p5:#6da7ec;}
+@media (prefers-color-scheme:dark){:root{
+ --surface:#1a1a19; --surface-2:#232322; --ink:#fff; --ink-2:#c3c2b7; --ink-3:#8a8980;
+ --line:#333330; --neg:#e66767;
+ --p0:#12233a;--p1:#16304f;--p2:#1a3a63;--p3:#1c4a7f;--p4:#1c5cab;--p5:#256abf;}}
+body{margin:0;padding:1.5rem 1rem 4rem;background:var(--surface);color:var(--ink);
+ font:15px/1.7 system-ui,-apple-system,sans-serif;max-width:1080px;margin:0 auto}
+h1{font-size:1.5rem;margin:0 0 .3rem} h2{font-size:1.1rem;margin:2rem 0 .6rem;color:var(--ink)}
+p.sub{color:var(--ink-2);margin:.2rem 0 1.2rem;font-size:.92rem}
+table{border-collapse:collapse;width:100%;font-size:.86rem}
+th,td{border-bottom:1px solid var(--line);padding:.42rem .5rem;text-align:right;
+ white-space:nowrap}
+th{color:var(--ink-2);font-weight:600;text-align:right;position:sticky;top:0;
+ background:var(--surface);border-bottom:2px solid var(--line)}
+th.l,td.l{text-align:left}
+td.p{color:var(--ink);font-variant-numeric:tabular-nums}
+td.p[data-lv="0"]{background:var(--p0)} td.p[data-lv="1"]{background:var(--p1)}
+td.p[data-lv="2"]{background:var(--p2)} td.p[data-lv="3"]{background:var(--p3)}
+td.p[data-lv="4"]{background:var(--p4)} td.p[data-lv="5"]{background:var(--p5)}
+@media (prefers-color-scheme:dark){td.p[data-lv="3"],td.p[data-lv="4"],td.p[data-lv="5"]{color:#fff}}
+td.neg{color:var(--neg);font-weight:600}
+td.z,.z{color:var(--ink-3)}
+tr:hover td{background:var(--surface-2)}
+tr:hover td.p[data-lv]{filter:brightness(1.04)}
+.tag{display:inline-block;font-size:.72rem;padding:.05rem .4rem;border-radius:3px;
+ background:var(--surface-2);color:var(--ink-2);margin-left:.3rem}
+.best{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:.8rem}
+.card{background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:.7rem .9rem}
+.card h3{margin:0 0 .4rem;font-size:.95rem}
+.card ol{margin:0;padding-left:1.2rem;font-size:.85rem;color:var(--ink-2)}
+.card b{color:var(--ink)}
+.note{background:var(--surface-2);border-left:3px solid var(--p4);padding:.7rem 1rem;
+ border-radius:4px;font-size:.9rem;color:var(--ink-2);margin:1rem 0}
+.note b{color:var(--ink)}
+
+/* --- 印刷（PDF）用 --- */
+@page{size:A4 landscape;margin:11mm 10mm 12mm}
+@media print{
+ :root{--surface:#fff;--surface-2:#f4f4f1;--ink:#0b0b0b;--ink-2:#52514e;--ink-3:#83827c;
+       --line:#dcdbd6;--neg:#c0322f;
+       --p0:#eef5fd;--p1:#cde2fb;--p2:#b7d3f6;--p3:#9ec5f4;--p4:#86b6ef;--p5:#6da7ec;}
+ *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+ body{padding:0;max-width:none;font-size:10pt;line-height:1.45}
+ h1{font-size:15pt;margin:0 0 .15rem} h2{font-size:11.5pt;margin:.9rem 0 .35rem}
+ p.sub{font-size:8.6pt;margin:.1rem 0 .7rem}
+ table{font-size:8.2pt} th,td{padding:.22rem .38rem}
+ th{position:static;border-bottom:1.5px solid #999}
+ thead{display:table-header-group}      /* 改ページ後もヘッダを繰り返す */
+ tr{break-inside:avoid;page-break-inside:avoid}
+ tr:hover td{background:none}           /* 印刷にホバーは無い */
+ td.p[data-lv]{filter:none}
+ .best{gap:.5rem;break-inside:avoid} .card{padding:.45rem .6rem}
+ .card h3{font-size:8.8pt;margin:0 0 .2rem} .card ol{font-size:8pt;padding-left:1rem}
+ .note{font-size:8.4pt;padding:.45rem .7rem;margin:.6rem 0;break-inside:avoid}
+ h2+table{break-before:avoid}
+}
+</style>
+<h1>必要スタミナ早見表</h1>
+<p class="sub">実測 999頭（ステータスは Discordログ、消費は result API の timeline）。スタミナは「速さの燃料」で、余った分は完全に無駄になります。</p>
+<div class="note"><b>仕組み</b>　残スタミナ ＝ 初期スタミナ − Σ(100mごとの消費)。消費は<b>速いほど増える</b>ので、速い馬ほど多くのスタミナが要ります。足りなくなると最後に減速します（余っても速くはなりません）。実測で <b>98.3%</b> の馬がこの式どおりでした。</div>
+<h2>距離ごとの必要スタミナ</h2>
+<table><thead><tr><th class="l">距離</th><th>区間</th><th>必要スタミナ<br>（遅い馬）</th><th>必要スタミナ<br>（速い馬）</th><th>これ以上は増えない</th><th>不足していた馬</th><th>足りた馬の余り<br>（中央値）</th></tr></thead><tbody>
+<tr><td class="l"><b>短距離</b></td><td>10</td><td class="p" data-lv="1">20</td><td class="p" data-lv="4">30</td><td>指標 222 以上</td><td>1 / 287（0%）</td><td class="z">+16</td></tr>
+<tr><td class="l"><b>マイル</b></td><td>15</td><td class="p" data-lv="1">34</td><td class="p" data-lv="4">46</td><td>指標 155 以上</td><td>78 / 218（36%）</td><td class="z">+7</td></tr>
+<tr><td class="l"><b>中距離</b></td><td>20</td><td class="p" data-lv="1">51</td><td class="p" data-lv="4">75</td><td>指標 125 以上</td><td>114 / 275（41%）</td><td class="z">+9</td></tr>
+<tr><td class="l"><b>長距離</b></td><td>25</td><td class="p" data-lv="1">64</td><td class="p" data-lv="4">92</td><td>指標 90 以上</td><td>85 / 219（39%）</td><td class="z">+8</td></tr>
+</tbody></table>
+<h2>自分の馬に何スタミナ要るか</h2>
+<p class="sub">「指標」＝ 序盤の区間重み × 距離バランス × 実効ステータス。パッシブの倍率を掛けた後の値を入れてください。</p>
+<table><thead><tr><th class="l">距離</th><th class="l">指標の計算</th>
+<th>指標 0%tile</th>
+<th>指標 25%tile</th>
+<th>指標 50%tile</th>
+<th>指標 75%tile</th>
+<th>指標 100%tile</th>
+</tr></thead><tbody>
+<tr><td class="l"><b>短距離</b></td><td class="l z">SP×0.84 + PW×0.24 + ST×0.05</td>
+<td class="p" data-lv="0">20<br><span class="z" style="font-size:.8em">指標37</span></td>
+<td class="p" data-lv="2">24<br><span class="z" style="font-size:.8em">指標176</span></td>
+<td class="p" data-lv="3">26<br><span class="z" style="font-size:.8em">指標193</span></td>
+<td class="p" data-lv="5">29<br><span class="z" style="font-size:.8em">指標217</span></td>
+<td class="p" data-lv="5">30<br><span class="z" style="font-size:.8em">指標241</span></td>
+</tr>
+<tr><td class="l"><b>マイル</b></td><td class="l z">SP×0.60 + PW×0.30 + ST×0.10</td>
+<td class="p" data-lv="0">34<br><span class="z" style="font-size:.8em">指標34</span></td>
+<td class="p" data-lv="0">34<br><span class="z" style="font-size:.8em">指標115</span></td>
+<td class="p" data-lv="4">42<br><span class="z" style="font-size:.8em">指標141</span></td>
+<td class="p" data-lv="5">46<br><span class="z" style="font-size:.8em">指標164</span></td>
+<td class="p" data-lv="5">46<br><span class="z" style="font-size:.8em">指標180</span></td>
+</tr>
+<tr><td class="l"><b>中距離</b></td><td class="l z">SP×0.54 + PW×0.39 + ST×0.13</td>
+<td class="p" data-lv="0">51<br><span class="z" style="font-size:.8em">指標37</span></td>
+<td class="p" data-lv="1">58<br><span class="z" style="font-size:.8em">指標97</span></td>
+<td class="p" data-lv="3">66<br><span class="z" style="font-size:.8em">指標109</span></td>
+<td class="p" data-lv="4">71<br><span class="z" style="font-size:.8em">指標118</span></td>
+<td class="p" data-lv="5">75<br><span class="z" style="font-size:.8em">指標163</span></td>
+</tr>
+<tr><td class="l"><b>長距離</b></td><td class="l z">SP×0.36 + PW×0.30 + ST×0.14</td>
+<td class="p" data-lv="0">64<br><span class="z" style="font-size:.8em">指標28</span></td>
+<td class="p" data-lv="2">77<br><span class="z" style="font-size:.8em">指標76</span></td>
+<td class="p" data-lv="3">82<br><span class="z" style="font-size:.8em">指標81</span></td>
+<td class="p" data-lv="4">86<br><span class="z" style="font-size:.8em">指標84</span></td>
+<td class="p" data-lv="5">92<br><span class="z" style="font-size:.8em">指標104</span></td>
+</tr>
+</tbody></table>
+<h2>スタミナ切れは着順にいくら響くか</h2>
+<p class="sub">同じレース内で「指標の順位」と「実際の着順」を比べた差。＋なら速さの割に負けたということ。</p>
+<table><thead><tr><th class="l">距離</th><th>足りた馬</th><th>足りない馬</th><th>差</th></tr></thead><tbody>
+<tr><td class="l"><b>短距離</b></td><td class="z">+1.01着</td><td class="z" colspan="2">不足した馬が 1頭 しか居ないので測れない</td></tr>
+<tr><td class="l"><b>マイル</b></td><td class="z">+1.20着</td><td class="neg">+2.16着</td><td class="p" data-lv="0">+0.95着</td></tr>
+<tr><td class="l"><b>中距離</b></td><td class="z">-1.72着</td><td class="neg">+3.99着</td><td class="p" data-lv="5">+5.71着</td></tr>
+<tr><td class="l"><b>長距離</b></td><td class="z">-0.82着</td><td class="neg">+2.87着</td><td class="p" data-lv="3">+3.70着</td></tr>
+</tbody></table>
+<div class="note"><b>ただし予測モデルには入れていません。</b>　この不足量を特徴量として足すと、実データ103レースで精度が<b>下がりました</b>（スピアマン 0.9455→0.9351、8分割すべて悪化）。モデルは既にスタミナを線形項で評価しており、不足分を足すと二重計上になるためです。この表は<b>馬を育てる／買い目を目で確認する</b>ための資料です。</div>

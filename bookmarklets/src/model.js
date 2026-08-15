@@ -35,15 +35,16 @@ const OasisModel = (() => {
     return Math.sqrt(f * m * m + (1 - f));
   }
 
-  // --- 完走に足りないスタミナ（Python: stamina_shortfall）---
+  // --- スタミナ収支（Python: stamina_budget）---
   // 定数は model.json 経由で Python から来る。JS 側には数値を持たせない。
-  function staminaShortfall(e, dist, M) {
+  function staminaBudget(e, dist, M) {
     const L = (M.stamina_cost_law || {})[dist];
-    if (!L) return 0;
+    if (!L) return [0, 0, 0];
     const w = M.phase_early, b = (M.dist_balance || {})[dist] || [1, 1, 1];
     const base = e.speed * w[0] * b[0] + e.power * w[1] * b[1] + e.stamina * w[2] * b[2];
-    const cost = Math.min(Math.max(L.c * base, L.lo), L.hi);
-    return Math.max(0, cost * L.n_seg - Math.floor(e.stamina));
+    const need = Math.min(Math.max(L.c * base, L.lo), L.hi) * L.n_seg;
+    const have = Math.floor(e.stamina);
+    return [need, Math.max(0, need - have), Math.max(0, have - need)];
   }
 
   // --- 1頭ぶんの特徴量（Python: _row_features）を {名前: 値} で返す ---
@@ -61,7 +62,9 @@ const OasisModel = (() => {
         f[`${d}:lin(${s})`] = m * ln[s];
       }
     }
-    f['スタミナ不足'] = staminaShortfall(e, dist, M) / 10;
+    const bud = staminaBudget(e, dist, M);
+    f['スタミナ余り'] = bud[2] / 10;
+    f['スタミナ不足'] = bud[1] / 10;
     const cond = h.condition || '普通';
     f['好調'] = cond === '好調' ? 1 : 0;
     f['不調'] = cond === '不調' ? 1 : 0;

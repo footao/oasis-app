@@ -39,28 +39,6 @@ tr:hover td.p[data-lv]{filter:brightness(1.04)}
 .note{background:var(--surface-2);border-left:3px solid var(--p4);padding:.7rem 1rem;
  border-radius:4px;font-size:.9rem;color:var(--ink-2);margin:1rem 0}
 .note b{color:var(--ink)}
-
-/* --- 印刷（PDF）用 --- */
-@page{size:A4 landscape;margin:11mm 10mm 12mm}
-@media print{
- :root{--surface:#fff;--surface-2:#f4f4f1;--ink:#0b0b0b;--ink-2:#52514e;--ink-3:#83827c;
-       --line:#dcdbd6;--neg:#c0322f;
-       --p0:#eef5fd;--p1:#cde2fb;--p2:#b7d3f6;--p3:#9ec5f4;--p4:#86b6ef;--p5:#6da7ec;}
- *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
- body{padding:0;max-width:none;font-size:10pt;line-height:1.45}
- h1{font-size:15pt;margin:0 0 .15rem} h2{font-size:11.5pt;margin:.9rem 0 .35rem}
- p.sub{font-size:8.6pt;margin:.1rem 0 .7rem}
- table{font-size:8.2pt} th,td{padding:.22rem .38rem}
- th{position:static;border-bottom:1.5px solid #999}
- thead{display:table-header-group}      /* 改ページ後もヘッダを繰り返す */
- tr{break-inside:avoid;page-break-inside:avoid}
- tr:hover td{background:none}           /* 印刷にホバーは無い */
- td.p[data-lv]{filter:none}
- .best{gap:.5rem;break-inside:avoid} .card{padding:.45rem .6rem}
- .card h3{font-size:8.8pt;margin:0 0 .2rem} .card ol{font-size:8pt;padding-left:1rem}
- .note{font-size:8.4pt;padding:.45rem .7rem;margin:.6rem 0;break-inside:avoid}
- h2+table{break-before:avoid}
-}
 </style>
 <h1>おあしすっち パッシブ35種</h1>
 <p class="sub">倍率・発動条件と、<b>距離ごとの実効効果</b>。効果は素100/100/100の馬に1枠付けたときの内部レート変化率で、ゲーム内部の着順式（区間重み×距離バランス）から計算しています。色が濃いほど効果大。赤字はマイナス（付けると損）。</p>
@@ -128,7 +106,7 @@ tr:hover td.p[data-lv]{filter:brightness(1.04)}
 <tr><td class="l">追い込み</td><td class="l z">展開</td><td><span class="z">—</span></td><td>×1.12</td><td><span class="z">—</span></td><td class="l z">状況限定（終盤）</td><td>17%</td><td class="p" data-lv="0">+0.5%</td><td class="p" data-lv="0">+0.6%</td><td class="p" data-lv="0">+0.7%</td><td class="p" data-lv="0">+0.6%</td></tr>
 <tr><td class="l">独走態勢</td><td class="l z">展開</td><td><span class="z">—</span></td><td><span class="z">—</span></td><td>×1.06</td><td class="l z">状況限定</td><td>20%</td><td class="p" data-lv="0">+0.1%</td><td class="p" data-lv="0">+0.3%</td><td class="p" data-lv="0">+0.4%</td><td class="p" data-lv="0">+0.5%</td></tr>
 <tr><td class="l">差しの構え</td><td class="l z">展開</td><td><span class="z">—</span></td><td>×1.08</td><td><span class="z">—</span></td><td class="l z">状況限定（中盤）</td><td>17%</td><td class="p" data-lv="0">+0.3%</td><td class="p" data-lv="0">+0.4%</td><td class="p" data-lv="0">+0.4%</td><td class="p" data-lv="0">+0.4%</td></tr>
-<tr><td class="l">ロングスパート</td><td class="l z">展開</td><td><span class="z">—</span></td><td>×1.07</td><td>×0.92</td><td class="l z">区間限定（終盤）</td><td>50%</td><td class="p" data-lv="0">+0.3%</td><td class="z">±0.0%</td><td class="z">±0.0%</td><td class="neg">-0.4%</td></tr>
+<tr><td class="l">ロングスパート</td><td class="l z">展開</td><td><span class="z">—</span></td><td>×1.07</td><td>×0.92</td><td class="l z">区間限定（終盤）</td><td>50%</td><td class="p" data-lv="0">+0.3%</td><td class="neg">-0.0%</td><td class="neg">-0.0%</td><td class="neg">-0.4%</td></tr>
 <tr><td class="l">不屈</td><td class="l z">展開</td><td><span class="z">—</span></td><td>×1.08</td><td><span class="z">—</span></td><td class="l z">状況限定</td><td>10%</td><td class="p" data-lv="0">+0.2%</td><td class="p" data-lv="0">+0.2%</td><td class="p" data-lv="0">+0.3%</td><td class="p" data-lv="0">+0.2%</td></tr>
 <tr><td class="l">安定感<span class="tag">σ×0.50</span></td><td class="l z">展開</td><td><span class="z">—</span></td><td><span class="z">—</span></td><td><span class="z">—</span></td><td class="l z">ブレ低減</td><td>100%</td><td class="z">—</td><td class="z">—</td><td class="z">—</td><td class="z">—</td></tr>
 <tr><td class="l">粘り腰</td><td class="l z">展開</td><td><span class="z">—</span></td><td><span class="z">—</span></td><td><span class="z">—</span></td><td class="l z">実測から学習</td><td>100%</td><td class="z">—</td><td class="z">—</td><td class="z">—</td><td class="z">—</td></tr>

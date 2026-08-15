@@ -1,6 +1,6 @@
 # デプロイ手順（このフォルダをまとめて push する）
 
-CORE_VERSION **3.5.0** 時点の一式です。`oasis_app.py` と `oasis_core.py` は
+CORE_VERSION **3.6.0** 時点の一式です。`oasis_app.py` と `oasis_core.py` は
 **必ずセットで**差し替えてください（版が合わないと起動時に止まります）。
 
 ---
@@ -33,6 +33,9 @@ python build_autopilot.py
 | `autopilot.bundle.js` | model.js + モデル + autopilot.js を1つにしたもの（外部fetch不要） |
 | `oasis_autopilot_setup.html` | 全部入りブックマークレットを最新コードで作り直す |
 
+`build_autopilot.py` はステップ4で `parity_test.py` を回します。`oasis_core.py` に
+特徴量を足して `bookmarklets/src/model.js` を直し忘れていると、**ここで止まります**。
+
 **再学習したら毎回これを実行してください。** 忘れると画面のモデルと
 オートパイロットのモデルがズレます。
 
@@ -44,7 +47,7 @@ python build_autopilot.py
 
 ```bash
 git add -A
-git commit -m "v3.5.0: レビュー是正 + オートパイロット"
+git commit -m "v3.6.0: スタミナ不足を特徴量に追加 + Python↔JS一致テスト"
 git push
 ```
 

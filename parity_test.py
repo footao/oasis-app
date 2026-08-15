@@ -15,6 +15,13 @@ import sys
 import numpy as np
 from sklearn.linear_model import Ridge
 
+# パイプ経由で呼ばれると Windows では出力が cp932 になり、記号で落ちる。
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except (AttributeError, ValueError):
+    pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import oasis_core as oc  # noqa: E402
@@ -56,19 +63,27 @@ def main():
     with open(os.path.join(HERE, '_parity_cases.json'), 'w', encoding='utf-8') as f:
         json.dump(cases, f, ensure_ascii=False)
 
-    r = subprocess.run(['node', os.path.join(HERE, 'parity_test.js')],
-                       capture_output=True, text=True)
-    sys.stdout.write(r.stdout)
-    if r.stderr:
-        sys.stderr.write(r.stderr)
+    try:
+        # Windows の既定は cp932 で、✅ や ⚠ を書けずに落ちる。明示的に UTF-8 で受ける。
+        r = subprocess.run(['node', os.path.join(HERE, 'parity_test.js')],
+                           capture_output=True, text=True,
+                           encoding='utf-8', errors='replace')
+        code, out, err = r.returncode, r.stdout, r.stderr
+    except FileNotFoundError:
+        # node が無い環境（Windows の素の状態など）。検証はできないが失敗ではない。
+        code, out, err = 0, ('⚠ node が見つからないので Python↔JS の一致検証を飛ばしました。\n'
+                             '   model.js を触ったなら https://nodejs.org から入れて再実行してください。\n'), ''
+    sys.stdout.write(out)
+    if err:
+        sys.stderr.write(err)
     for f in ('_parity_model.json', '_parity_cases.json'):
         try:
             os.remove(os.path.join(HERE, f))
         except OSError:
             pass
-    print(f'  特徴量 {len(names)}列 / スタミナ不足 '
-          f'{"あり" if "スタミナ不足" in names else "★なし★"}')
-    return r.returncode
+    print(f'  特徴量 {len(names)}列 / スタミナ収支 '
+          f'{"あり" if "スタミナ余り" in names else "★なし★"}')
+    return code
 
 
 if __name__ == '__main__':

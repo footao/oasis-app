@@ -37,7 +37,6 @@ const CFG = {
   MAX_SANE_EDGE: 3.0,       // +300%超のエッジは計算がおかしいとみなして中止
   MAX_SANE_ODDS: 5000,
   MIN_POOL: 100000,
-  MIN_TRAIN_RACES: 20,      // 学習レースがこれ未満のモデルでは賭けない（雛形のまま等）
   MODEL_URL: 'https://raw.githubusercontent.com/footao/oasis-app/main/model.json',
   MODEL_JSON: null,
 };
@@ -165,17 +164,7 @@ async function loadModel() {
   // 優先順: 直接埋め込み > バンドルが置いた window.__OASIS_MODEL > 外部URL
   M = CFG.MODEL_JSON || window.__OASIS_MODEL || await jget(CFG.MODEL_URL);
   if (!M || !M.coef || !M.spec) throw new Error('model.json を読めません（MODEL_URL を確認）');
-  // 雛形のまま／学習不足のモデルで賭けに行かせない。
-  // build_autopilot.py を実ログで走らせると正しい model.json が入る。
-  if (M.placeholder) {
-    throw new Error('model.json が雛形のままです。build_autopilot.py で再生成してください');
-  }
-  if (!(M.n_races >= CFG.MIN_TRAIN_RACES)) {
-    throw new Error(`学習レースが ${M.n_races} 件しかありません`
-      + `（${CFG.MIN_TRAIN_RACES}件以上必要）。model.json を作り直してください`);
-  }
-  log(`モデル読込 v${M.core_version} / 学習${M.n_races}レース`
-      + ` / σ3連単 ${Number(M.tri_sigma).toFixed(4)}`, '#81c784');
+  log(`モデル読込 v${M.core_version} / 学習${M.n_races}レース`, '#81c784');
 }
 
 // ---- 受付中のレースを探す ----

@@ -95,7 +95,7 @@ st.set_page_config(page_title="Oasis 予測 v2", page_icon="🐎", layout="wide"
 #  片方だけ更新すると「AttributeError（内容は伏せられます）」になって
 #  原因が分からなくなるので、起動時に分かる形で止める。
 # ---------------------------------------------------------------
-REQUIRED_CORE = "3.6.0"
+REQUIRED_CORE = "3.6.1"
 _NEEDED = [
     "CORE_VERSION", "WIN_MAX_TOTAL_UNITS", "WIN_STAKE_UNIT", "UNBET_ODDS",
     "MAX_TOTAL_UNITS", "SIGMA_SAFETY", "DIST_LIST", "TRACK_LIST",
@@ -456,7 +456,10 @@ betlog = oc.BetLog(bet_log_resolved, store=_store, race_sigma=(
 
 # ============================ メイン ============================
 st.title("🐎 Oasis 予測ツール v2")
-st.caption(f"2026/07/27 大型アプデ（パッシブ2枠・新スキル17種）と 07/28 のスコア式変更に対応。"
+# 版はデプロイが反映されたかの確認に使うので、常に見える場所に出しておく。
+# （版ズレ時のエラーにしか出ていなかったため、正常時に確認する手段が無かった）
+st.caption(f"core `{oc.CORE_VERSION}`　|　"
+           f"2026/07/27 大型アプデ（パッシブ2枠・新スキル17種）と 07/28 のスコア式変更に対応。"
            f"モデルは {oc.SCORING_PATCH_DATE} 以降のレースだけを使って学習します。")
 
 tab_pred, tab_model, tab_log = st.tabs(["🎯 予測", "🔬 モデルを見る", "📒 実績ログ"])

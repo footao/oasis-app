@@ -5,3 +5,19 @@ __pycache__/
 build/
 dist/
 .venv/
+
+# --- 追加 ---
+_combined.js
+*.log
+.DS_Store
+Thumbs.db
+# トークンや購入リンクを含むメモを置かないこと
+*.token
+secrets*.toml
+
+# 採取した生データ（5MB超・アプリの動作には不要・馬名を含む）
+races.jsonl
+_parity_*.json
+
+# 匿名化前のログのバックアップ（実名が入っている）
+*.bak

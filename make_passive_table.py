@@ -20,6 +20,7 @@ SPEC = oc.load_passive_spec(os.path.join(HERE, 'passive_spec.json'))
 
 # 青の連続ランプ（大きさ）。負の値だけ status-critical で明示する。
 RAMP_LIGHT = ['#eef5fd', '#cde2fb', '#b7d3f6', '#9ec5f4', '#86b6ef', '#6da7ec']
+RAMP_DARK = ['#12233a', '#153ып', '#1a3a63', '#1c4a7f', '#1c5cab', '#256abf']
 RAMP_DARK = ['#12233a', '#16304f', '#1a3a63', '#1c4a7f', '#1c5cab', '#256abf']
 NEG = '#d03b3b'
 
@@ -54,13 +55,9 @@ def collect():
 
 
 def cell(v, vmax):
-    """効果値のセル。大きさは青の濃さ、負の値は赤字で明示。
-
-    表示は小数1桁なので、|v| < 0.05 は「-0.0%」と出て
-    マイナスに見えてしまう。実質ゼロなので中立表示に寄せる。
-    """
-    if abs(v) < 0.05:
-        return '<td class="z">±0.0%</td>' if abs(v) > 1e-9 else '<td class="z">—</td>'
+    """効果値のセル。大きさは青の濃さ、負の値は赤字で明示。"""
+    if abs(v) < 1e-9:
+        return '<td class="z">—</td>'
     if v < 0:
         return f'<td class="neg">{v:+.1f}%</td>'
     i = min(len(RAMP_LIGHT) - 1, int(v / vmax * len(RAMP_LIGHT)))
@@ -120,28 +117,6 @@ tr:hover td.p[data-lv]{filter:brightness(1.04)}
 .note{background:var(--surface-2);border-left:3px solid var(--p4);padding:.7rem 1rem;
  border-radius:4px;font-size:.9rem;color:var(--ink-2);margin:1rem 0}
 .note b{color:var(--ink)}
-
-/* --- 印刷（PDF）用 --- */
-@page{size:A4 landscape;margin:11mm 10mm 12mm}
-@media print{
- :root{--surface:#fff;--surface-2:#f4f4f1;--ink:#0b0b0b;--ink-2:#52514e;--ink-3:#83827c;
-       --line:#dcdbd6;--neg:#c0322f;
-       --p0:#eef5fd;--p1:#cde2fb;--p2:#b7d3f6;--p3:#9ec5f4;--p4:#86b6ef;--p5:#6da7ec;}
- *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
- body{padding:0;max-width:none;font-size:10pt;line-height:1.45}
- h1{font-size:15pt;margin:0 0 .15rem} h2{font-size:11.5pt;margin:.9rem 0 .35rem}
- p.sub{font-size:8.6pt;margin:.1rem 0 .7rem}
- table{font-size:8.2pt} th,td{padding:.22rem .38rem}
- th{position:static;border-bottom:1.5px solid #999}
- thead{display:table-header-group}      /* 改ページ後もヘッダを繰り返す */
- tr{break-inside:avoid;page-break-inside:avoid}
- tr:hover td{background:none}           /* 印刷にホバーは無い */
- td.p[data-lv]{filter:none}
- .best{gap:.5rem;break-inside:avoid} .card{padding:.45rem .6rem}
- .card h3{font-size:8.8pt;margin:0 0 .2rem} .card ol{font-size:8pt;padding-left:1rem}
- .note{font-size:8.4pt;padding:.45rem .7rem;margin:.6rem 0;break-inside:avoid}
- h2+table{break-before:avoid}
-}
 </style>''')
 
     A('<h1>おあしすっち パッシブ35種</h1>')

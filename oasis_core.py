@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.6.0'
+CORE_VERSION = '3.6.1'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -264,37 +264,38 @@ INTERNAL_DIST_BALANCE = {            # 距離バランス[距離] = [SP, PW, ST]
 }
 
 
-# --- スタミナの消費法則（result API の timeline から実測 / 現行版 106レース）---
-# 消費/100m = clamp(c[距離] × Σ(序盤重み × 距離バランス × 実効ステータス), lo, hi)
-# 必要スタミナ = 消費 × 区間数。持ちスタミナで足りない分だけ最後に減速する。
-#   ・c が距離ごとに違うのは INTERNAL_DIST_BALANCE の絶対倍率のズレを吸収しているため。
-#     レース内の順位には影響しない（同一レースの全馬が同じ距離）ので、これで正しい。
-#   ・lo/hi は観測された最小・最大。外挿すると偽のスタミナ切れを量産するので外挿しない。
-#     クランプが確定しているのはマイルだけ（下限に67頭・上限に90頭が同値で張り付き）。
-#     ⚠ 短距離/中距離/長距離の lo は観測1頭しかない。データが増えたら要再測定。
-#       「下限なし(lo=0)」も試したが 8分割中7分割の改善に留まり、観測最小の方が良かった。
+# --- スタミナ収支（result API の timeline から実測 / 999頭）---
+# 残スタミナ = 初期スタミナ − Σ(100mごとの消費)。実測 98.3パーセントがこの式どおり。
+#   消費/100m = clamp(c[距離] × Σ(序盤重み × 距離バランス × 実効ステータス), lo, hi)
+#   必要スタミナ = 消費 × 区間数
+# c が距離ごとに違うのは INTERNAL_DIST_BALANCE の絶対倍率のズレを吸収しているため。
+# 同一レースの全馬が同じ距離なのでレース内順位には影響しない。
+# lo/hi は観測された最小・最大。外挿すると偽のスタミナ切れを量産するので外挿しない。
 STAMINA_COST_LAW = {
-    '短距離': {'c': 0.01282, 'lo': 1.955, 'hi': 3.220, 'n_seg': 10},
-    'マイル': {'c': 0.01836, 'lo': 2.267, 'hi': 3.067, 'n_seg': 15},
-    '中距離': {'c': 0.02931, 'lo': 2.496, 'hi': 3.737, 'n_seg': 20},
-    '長距離': {'c': 0.03989, 'lo': 2.312, 'hi': 3.680, 'n_seg': 25},
+    '短距離': {'c': 0.01335, 'lo': 1.955, 'hi': 2.967, 'n_seg': 10},
+    'マイル': {'c': 0.01976, 'lo': 2.234, 'hi': 3.067, 'n_seg': 15},
+    '中距離': {'c': 0.02999, 'lo': 2.541, 'hi': 3.737, 'n_seg': 20},
+    '長距離': {'c': 0.04077, 'lo': 2.57, 'hi': 3.68, 'n_seg': 25},
 }
 
 
-def stamina_shortfall(eff, dist):
-    """完走に必要なスタミナと持ちスタミナの差（足りていれば 0）。
+def stamina_budget(eff, dist):
+    """(必要スタミナ, 不足, 余り) を返す。eff は effective_stats() の戻り値。
 
-    eff は effective_stats() の戻り値。パッシブの倍率は既に効いている。
+    「余り」は完全に無駄（必要量を超えたスタミナは速さに変わらない）。
+    「不足」は最後に減速する量。**両方を特徴量にするのが肝**で、片方だけだと
+    「必要量のところでスタミナの価値が折れる」形を表現できず、かえって精度が落ちる。
     """
     L = STAMINA_COST_LAW.get(dist)
     if not L:
-        return 0.0
+        return 0.0, 0.0, 0.0
     w = INTERNAL_PHASE_WEIGHTS['序盤']
     b = INTERNAL_DIST_BALANCE.get(dist, [1.0, 1.0, 1.0])
     base = (eff['speed'] * w[0] * b[0] + eff['power'] * w[1] * b[1]
             + eff['stamina'] * w[2] * b[2])
-    cost = min(max(L['c'] * base, L['lo']), L['hi'])
-    return max(0.0, cost * L['n_seg'] - math.floor(eff['stamina']))
+    need = min(max(L['c'] * base, L['lo']), L['hi']) * L['n_seg']
+    have = math.floor(eff['stamina'])
+    return need, max(0.0, need - have), max(0.0, have - need)
 
 
 def internal_stat_weights(dist):
@@ -829,11 +830,12 @@ def feature_names(spec):
         # 線形項を併用する（新式34レースの検証で held-out スピアマン 0.898→0.926）。
         names += [f'{d}:切片', f'{d}:log(SP)', f'{d}:log(PW)', f'{d}:log(ST)',
                   f'{d}:lin(SP)', f'{d}:lin(PW)', f'{d}:lin(ST)']
-    # スタミナ不足（1列）。timeline から実測した消費法則で「完走に足りない量」を作る。
-    # Ridge は既にスタミナの線形項を持つが、不足は**閾値を割った馬だけ**に効く非線形量で、
-    # 線形項では表せない。現行版106レースの検証で 8/8 分割改善（スピアマン +0.0065、
-    # 1着的中 50.0%→53.9%）。距離ごとに分ける案(4列)はデータ不足で不採用。
-    names += ['スタミナ不足']
+    # スタミナ収支（2列）。「余り＝無駄」と「不足＝減速」を別々の列にすることで、
+    # 必要量のところでスタミナの価値が折れる形を表現できる。
+    # 実測103レースで 1着的中 88.7→93.3、3着セット的中 60.7→70.5（ともに8/8分割で改善）。
+    # レース内スピアマンは -0.006 と僅かに落ちるが、3連単で効くのは上位3頭の当たり方。
+    # ⚠ 片方だけ足すと逆効果（余りだけ -6.2pt / 不足だけ +1.3pt で不安定）。必ず2列セットで。
+    names += ['スタミナ余り', 'スタミナ不足']
     names += ['好調', '不調']
     for p in unspecced_passives(spec):
         names.append(p)
@@ -870,7 +872,8 @@ def _row_features(speed, power, stamina, condition, passives, dist, track, spec,
     for d in DIST_LIST:
         m = 1.0 if dist == d else 0.0
         f += [m, m * sp, m * pw, m * st, m * lsp, m * lpw, m * lst]
-    f.append(stamina_shortfall(e, dist) / 10.0)      # 他の線形項と桁を揃える
+    _, _short, _sur = stamina_budget(e, dist)
+    f += [_sur / 10.0, _short / 10.0]           # 他の線形項と桁を揃える
     f += [1.0 if condition == '好調' else 0.0, 1.0 if condition == '不調' else 0.0]
     pset = set(passives or ())
     for p in unspecced_passives(spec):
@@ -973,25 +976,42 @@ def _recent_races(df, limit=MAX_CALIB_RACES, min_field=4):
     return races[-limit:]
 
 
-def _calibrate_sigma(oof, df, resid_std, n_draw=40_000, seed=7, min_field=4):
-    """OOF予測に対して、実際の上位3着順の尤度が最大になる σ を選ぶ。
-    min_field を上げると（例: 8）3連単が実在する頭数のレースだけで校正できる。"""
+def _calibrate_sigma(oof, df, resid_std, n_draw=40_000, seed=7, min_field=4, top_k=3):
+    """OOF予測に対して、実際の上位 top_k 着順の尤度が最大になる σ を選ぶ。
+
+    top_k は**そのσを何に使うか**に合わせること。
+      ・単勝用 → top_k=1（1着が誰かだけ当てればよい）
+      ・3連単用 → top_k=3, min_field=8（順番まで当てる必要がある）
+    2026/08/15 まで単勝用も top_k=3 で校正しており、σが大きく出て
+    本命の勝率を過小評価していた（実測 予測72% vs 実測94%）。
+    """
     races = _recent_races(df, min_field=min_field)
     if len(races) < 6:
         return max(resid_std * 0.6, 1e-4), []
     # 乱数を全レース分まとめて持つと 500MB 超になるので、レースごとに使い捨てる。
     # σの比較で同じ乱数を使いたいので、レースごとに固定シードで作り直す。
     rng_seeds = {k: seed * 1000003 + i for i, (k, g) in enumerate(races)}
-    grid = np.unique(np.round(np.concatenate([
-        np.linspace(0.15, 2.0, 20) * max(resid_std, 1e-4),
-        np.array([0.01, 0.02, 0.03, 0.05, 0.08, 0.12, 0.2])]), 5))
-    curve = []
-    for s in grid:
+    def score(s):
         tot = 0.0
         for k, g in races:
             z = np.random.default_rng(rng_seeds[k]).standard_normal((n_draw, len(g)))
-            tot += _order_loglik(oof[g.index.values], _truth_top(g), s, z)
-        curve.append((float(s), tot / len(races)))
+            tot += _order_loglik(oof[g.index.values], _truth_top(g, top_k), s, z)
+        return tot / len(races)
+
+    # 粗く対数グリッドで当たりを付けてから、その周りだけ細かく見る。
+    # 全域を細かく舐めると σ1つあたり数十万回のシミュレーションが要り重すぎる。
+    # 旧実装は下限を resid_std の 0.15倍で切っていたため、モデルが強いときに
+    # 必要な小さいσ（0.006 など）へ**構造的に到達できなかった**。
+    coarse = np.unique(np.round(np.geomspace(0.002, max(resid_std * 2.0, 0.05), 15), 5))
+    curve = [(float(s), score(s)) for s in coarse]
+    i = int(np.argmax([c[1] for c in curve]))
+    lo = curve[max(i - 1, 0)][0]
+    hi = curve[min(i + 1, len(curve) - 1)][0]
+    if hi > lo:
+        for s in np.round(np.linspace(lo, hi, 9)[1:-1], 5):
+            if all(abs(s - c[0]) > 1e-9 for c in curve):
+                curve.append((float(s), score(float(s))))
+    curve.sort()
     best = max(curve, key=lambda t: t[1])[0]
     return max(best, 1e-4), curve
 
@@ -1099,7 +1119,8 @@ def train_model(log_path=None, sigma_override=None, train_from=DEFAULT_TRAIN_FRO
         sigma_mle = race_sigma
         sigma_note = '（手動上書き）'
     else:
-        sigma_mle, sigma_curve = _calibrate_sigma(oof, df, resid_std)
+        # 単勝は「1着が誰か」だけ当てればよいので top_k=1 で校正する
+        sigma_mle, sigma_curve = _calibrate_sigma(oof, df, resid_std, top_k=1)
         race_sigma = sigma_mle * max(float(sigma_safety), 0.1)
         sigma_note = (f'（着順尤度の最適値 {sigma_mle:.4f} × 係数 {sigma_safety:g}。'
                       '※σを膨らませても安全にはなりません。資金の保険は'
@@ -1114,12 +1135,16 @@ def train_model(log_path=None, sigma_override=None, train_from=DEFAULT_TRAIN_FRO
         tri_sigma = race_sigma
         tri_note = '（単勝と同じ・手動上書き）'
     else:
-        tri_mle, _ = _calibrate_sigma(oof, df, resid_std, min_field=MIN_FIELD_TRIFECTA)
+        tri_mle, _ = _calibrate_sigma(oof, df, resid_std,
+                                      min_field=MIN_FIELD_TRIFECTA, top_k=3)
         n_tri_races = len(_recent_races(df, min_field=MIN_FIELD_TRIFECTA))
         if n_tri_races >= 8 and tri_mle > 0:
             tri_sigma = tri_mle * max(float(sigma_safety), 0.1)
+            _cmp = ('より大きめ＝3連単の順番のブレを正しく反映'
+                    if tri_sigma > race_sigma * 1.001 else
+                    ('とほぼ同じ' if tri_sigma > race_sigma * 0.999 else 'より小さめ'))
             tri_note = (f'（8頭以上{n_tri_races}レースの順番的中で校正した最適値 {tri_mle:.4f}。'
-                        f'単勝用 {race_sigma:.4f} より大きめ＝3連単の順番のブレを正しく反映）')
+                        f'単勝用 {race_sigma:.4f} {_cmp}）')
         else:
             tri_sigma = race_sigma
             tri_note = f'（8頭以上のレースが{n_tri_races}件と少ないため単勝と同じ {race_sigma:.4f} を使用）'
@@ -1377,7 +1402,7 @@ def export_model_json(bundle, path=None):
         'aptitude_match': {k: list(v) for k, v in APTITUDE_MATCH.items()},
         'dist_list': list(DIST_LIST), 'track_list': list(TRACK_LIST),
         'variance_share': VARIANCE_SHARE, 'interaction_shrink': INTERACTION_SHRINK,
-        # スタミナ不足の特徴量を JS 側でも作るために必要な定数一式
+        # スタミナ収支の特徴量を JS 側でも作るための定数一式
         'stamina_cost_law': {d: dict(v) for d, v in STAMINA_COST_LAW.items()},
         'phase_early': list(INTERNAL_PHASE_WEIGHTS['序盤']),
         'dist_balance': {d: list(v) for d, v in INTERNAL_DIST_BALANCE.items()},
@@ -2849,13 +2874,15 @@ def _contributions(bundle, horses, dist, track):
         c_sp = b_sp * sp + l_sp * lsp0
         c_pw = b_pw * pw + l_pw * lpw0
         c_st = b_st * st + l_st * lst0
-        # スタミナ不足の寄与（素ステータス基準）。実効との差は c_spec 側で拾う。
-        b_sh = coef.get('スタミナ不足', 0.0)
+        b_sur, b_sh = coef.get('スタミナ余り', 0.0), coef.get('スタミナ不足', 0.0)
         e0 = {'speed': float(h['speed']), 'power': float(h['power']),
               'stamina': float(h['stamina'])}
-        c_st += b_sh * stamina_shortfall(e0, dist) / 10.0
-        c_spec = (b_sh * (stamina_shortfall(e, dist)
-                          - stamina_shortfall(e0, dist)) / 10.0
+
+        def _bud(ee):
+            _, sh_, su_ = stamina_budget(ee, dist)
+            return (b_sur * su_ + b_sh * sh_) / 10.0
+        c_st += _bud(e0)
+        c_spec = (_bud(e) - _bud(e0)
                   + b_sp * (math.log(e['speed']) - sp)
                   + b_pw * (math.log(e['power']) - pw)
                   + b_st * (math.log(e['stamina']) - st)
@@ -2871,8 +2898,7 @@ def _contributions(bundle, horses, dist, track):
             if sp_ and sp_.get('mult'):
                 e1 = effective_stats(h['speed'], h['power'], h['stamina'], (p,),
                                      dist, track, spec, ctx)
-                v = (b_sh * (stamina_shortfall(e1, dist)
-                             - stamina_shortfall(e0, dist)) / 10.0
+                v = (_bud(e1) - _bud(e0)
                      + b_sp * (math.log(e1['speed']) - sp)
                      + b_pw * (math.log(e1['power']) - pw)
                      + b_st * (math.log(e1['stamina']) - st)
