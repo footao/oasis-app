@@ -23,6 +23,7 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import oasis_core as oc  # noqa: E402
+from harvest_results import load_races  # noqa: E402
 
 SPEC = oc.load_passive_spec(os.path.join(HERE, 'passive_spec.json'))
 PHASES = ['序盤', '中盤', '終盤']
@@ -44,38 +45,34 @@ def _is_current(r):
 def load(path):
     """旧スコア式のレースは捨てる。混ぜると係数が汚れる。"""
     races, n_old = [], 0
-    with open(path, encoding='utf-8') as f:
-        for line in f:
-            try:
-                r = json.loads(line)
-            except Exception:
-                continue
-            if not _is_current(r):
-                n_old += 1
-                continue
-            hs = r['horses']
-            same = oc.same_species_flags([h['name'] for h in hs],
-                                         [h.get('adult_key') for h in hs])
-            keep = []
-            for i, h in enumerate(hs):
-                pas = tuple(x for x in (oc.passive_from_code(h.get('passive_skill')),
-                                        oc.passive_from_code(h.get('passive_skill_2'))) if x)
-                e = oc.effective_stats(h['speed'], h['power'], h['stamina'], pas,
-                                       r['distance'], r['surface'], SPEC,
-                                       {'same_species': same[i]})
-                v = np.array([e['speed'], e['power'], e['stamina']])
-                tl = h.get('timeline') or []
-                seen = {}
-                for t in tl:
-                    ph = PH_EN.get(t.get('phase'), t.get('phase'))
-                    if ph and t.get('rating') and ph not in seen:
-                        seen[ph] = float(t['rating'])
-                costs = [t.get('stamina_cost') for t in tl if t.get('stamina_cost')]
-                keep.append(dict(eff=v, rank=h.get('rank'), ratings=seen,
-                                 cost=costs[0] if costs else None, n_seg=len(costs),
-                                 stamina0=np.floor(v[2])))
-            if len(keep) >= 5 and all(k['rank'] for k in keep):
-                races.append(dict(sid=r['schedule_id'], dist=r['distance'], horses=keep))
+    # ステータスを使うので、レース後日に採取した行は捨てる（値が「今」に化けている）
+    for r in load_races(path, need_stats=True):
+        if not _is_current(r):
+            n_old += 1
+            continue
+        hs = r['horses']
+        same = oc.same_species_flags([h['name'] for h in hs],
+                                     [h.get('adult_key') for h in hs])
+        keep = []
+        for i, h in enumerate(hs):
+            pas = tuple(x for x in (oc.passive_from_code(h.get('passive_skill')),
+                                    oc.passive_from_code(h.get('passive_skill_2'))) if x)
+            e = oc.effective_stats(h['speed'], h['power'], h['stamina'], pas,
+                                   r['distance'], r['surface'], SPEC,
+                                   {'same_species': same[i]})
+            v = np.array([e['speed'], e['power'], e['stamina']])
+            tl = h.get('timeline') or []
+            seen = {}
+            for t in tl:
+                ph = PH_EN.get(t.get('phase'), t.get('phase'))
+                if ph and t.get('rating') and ph not in seen:
+                    seen[ph] = float(t['rating'])
+            costs = [t.get('stamina_cost') for t in tl if t.get('stamina_cost')]
+            keep.append(dict(eff=v, rank=h.get('rank'), ratings=seen,
+                             cost=costs[0] if costs else None, n_seg=len(costs),
+                             stamina0=np.floor(v[2])))
+        if len(keep) >= 5 and all(k['rank'] for k in keep):
+            races.append(dict(sid=r['schedule_id'], dist=r['distance'], horses=keep))
     if n_old:
         print(f'除外: 旧スコア式（simulation_version≠{SIM_VERSION}）のレース {n_old}件')
     return races

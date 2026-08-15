@@ -223,6 +223,19 @@ c が距離ごとに違うのは `INTERNAL_DIST_BALANCE` の絶対倍率のズ�
 ステータスが要るなら `logg/` を使うこと。上の消費法則の定数も、
 ログのステータス × API の timeline で突き合わせて出したもの。
 
+**ただし「レース当日に採った行」は例外**（2026/08/15〜）。`by-id` は「今」の値を返すので、
+開催日と採取日が同じなら当時の値そのもの。実測の一致率は 当日94% / 1日後78% / 2日後67% /
+2週間後49%。そこで:
+
+- `harvest_results.py` は各行に **`harvested_at`** を書く。`--forward` で前回の続きから採れる。
+- `harvest_daily.bat` ＋ Windows タスクスケジューラで**各レース開始の5分後**に自動採取（1日6回）。
+- **`harvest_results.load_races(path, need_stats=True)` を通すこと。**
+  `harvested_at != race_date` の行（および `harvested_at` が無い旧データ）を落とす。
+  `fit_ridge_stamina.py` / `evaluate.py` / `fit_stamina.py` / `fit_formula.py` は対応済み。
+  `stamina_report.py` は timeline しか使わない（ステータスは logg 側）ので除外しない。
+- 既存の300レースは `harvested_at` が無いので**ステータス用途では全部落ちる**。これは正しい挙動。
+  当日採取が貯まるまで、ステータス系の再検証はできない。
+
 `evaluate.py` / `fit_stamina.py` / `fit_formula.py` は races.jsonl の
 ステータスを使っているので、**それらの「実測重み」の結論も同様に信用できない**
 （実際 B=実測重みは2回とも現行定数より悪かった）。

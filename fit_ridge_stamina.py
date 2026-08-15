@@ -28,6 +28,7 @@ import pandas as pd
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import oasis_core as oc  # noqa: E402
+from harvest_results import load_races  # noqa: E402
 
 SPEC = oc.load_passive_spec(os.path.join(HERE, 'passive_spec.json'))
 
@@ -58,39 +59,35 @@ def load(path):
     rows = []
     n_old = 0
     vers = {}
-    with open(path, encoding='utf-8') as f:
-        for line in f:
-            try:
-                r = json.loads(line)
-            except Exception:
-                continue
-            hs = r.get('horses') or []
-            if len(hs) < 4 or r.get('distance') not in oc.DIST_LIST:
-                continue
-            if not _is_current(r):
-                n_old += 1
-                continue
-            for h in hs:
-                v = h.get('simulation_version')
-                if v is not None:
-                    vers[v] = vers.get(v, 0) + 1
-            if not all(h.get('rank') and h.get('score') is not None for h in hs):
-                continue
-            same = oc.same_species_flags([h['name'] for h in hs],
-                                         [h.get('adult_key') for h in hs])
-            for i, h in enumerate(hs):
-                tl = h.get('timeline') or []
-                costs = [t.get('stamina_cost') for t in tl if t.get('stamina_cost')]
-                rows.append(dict(
-                    race_key=str(r['schedule_id']), name=h['name'],
-                    speed=h['speed'], power=h['power'], stamina=h['stamina'],
-                    condition=h.get('condition') or '普通',
-                    passives=tuple(x for x in (oc.passive_from_code(h.get('passive_skill')),
-                                               oc.passive_from_code(h.get('passive_skill_2'))) if x),
-                    dist=r['distance'], track=r['surface'],
-                    rank=h['rank'], score=float(h['score']),
-                    same_species=bool(same[i]),
-                    _cost=costs[0] if costs else np.nan, _nseg=len(costs) or np.nan))
+    # ステータスを使うので、レース後日に採取した行は捨てる（値が「今」に化けている）
+    for r in load_races(path, need_stats=True):
+        hs = r.get('horses') or []
+        if len(hs) < 4 or r.get('distance') not in oc.DIST_LIST:
+            continue
+        if not _is_current(r):
+            n_old += 1
+            continue
+        for h in hs:
+            v = h.get('simulation_version')
+            if v is not None:
+                vers[v] = vers.get(v, 0) + 1
+        if not all(h.get('rank') and h.get('score') is not None for h in hs):
+            continue
+        same = oc.same_species_flags([h['name'] for h in hs],
+                                     [h.get('adult_key') for h in hs])
+        for i, h in enumerate(hs):
+            tl = h.get('timeline') or []
+            costs = [t.get('stamina_cost') for t in tl if t.get('stamina_cost')]
+            rows.append(dict(
+                race_key=str(r['schedule_id']), name=h['name'],
+                speed=h['speed'], power=h['power'], stamina=h['stamina'],
+                condition=h.get('condition') or '普通',
+                passives=tuple(x for x in (oc.passive_from_code(h.get('passive_skill')),
+                                           oc.passive_from_code(h.get('passive_skill_2'))) if x),
+                dist=r['distance'], track=r['surface'],
+                rank=h['rank'], score=float(h['score']),
+                same_species=bool(same[i]),
+                _cost=costs[0] if costs else np.nan, _nseg=len(costs) or np.nan))
     df = pd.DataFrame(rows).reset_index(drop=True)
     df.attrs['n_old'] = n_old
     df.attrs['versions'] = vers

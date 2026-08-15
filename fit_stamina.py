@@ -22,6 +22,7 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import oasis_core as oc  # noqa: E402
+from harvest_results import load_races  # noqa: E402
 
 SPEC = oc.load_passive_spec(os.path.join(HERE, 'passive_spec.json'))
 PH = oc.INTERNAL_PHASE_WEIGHTS
@@ -43,14 +44,8 @@ def phase_vec(dist, phase):
 
 
 def load(path):
-    races = []
-    with open(path, encoding='utf-8') as f:
-        for line in f:
-            try:
-                races.append(json.loads(line))
-            except Exception:
-                pass
-    return races
+    # ステータスを使うので、レース後日に採取した行は捨てる（値が「今」に化けている）
+    return load_races(path, need_stats=True)
 
 
 def spearman(a, b):

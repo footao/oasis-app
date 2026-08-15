@@ -25,6 +25,7 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import oasis_core as oc  # noqa: E402
+from harvest_results import load_races  # noqa: E402
 
 SPEC = oc.load_passive_spec(os.path.join(HERE, 'passive_spec.json'))
 PHASES = ['序盤', '中盤', '終盤']
@@ -42,12 +43,8 @@ def eff_stats(h, dist, track, same):
 def collect(path):
     """[(距離, 区間, コンディション, 実効[SP,PW,ST], rating)] を集める。"""
     rows = []
-    with open(path, encoding='utf-8') as f:
-        for line in f:
-            try:
-                r = json.loads(line)
-            except Exception:
-                continue
+    # ステータスを使うので、レース後日に採取した行は捨てる（値が「今」に化けている）
+    for r in load_races(path, need_stats=True, quiet=True):
             hs = r['horses']
             same = oc.same_species_flags([h['name'] for h in hs],
                                          [h.get('adult_key') for h in hs])
@@ -75,12 +72,8 @@ def diagnose(path):
     import json as _j
     print('\n■ 診断')
     per_horse = defaultdict(dict)      # (race,horse) -> {phase: (vec, rating, passives, cond)}
-    with open(path, encoding='utf-8') as f:
-        for line in f:
-            try:
-                r = _j.loads(line)
-            except Exception:
-                continue
+    # ステータスを使うので、レース後日に採取した行は捨てる（値が「今」に化けている）
+    for r in load_races(path, need_stats=True, quiet=True):
             hs = r['horses']
             same = oc.same_species_flags([h['name'] for h in hs],
                                          [h.get('adult_key') for h in hs])
@@ -262,12 +255,8 @@ def main(path='races.jsonl'):
     # ---------- ④ 正しい rating で消費係数を測り直す ----------
     print('\n■ ④ 確定した式での消費係数（消費 = 係数 × 序盤rating）')
     per = defaultdict(list)
-    with open(path, encoding='utf-8') as f:
-        for line in f:
-            try:
-                r = json.loads(line)
-            except Exception:
-                continue
+    # ステータスを使うので、レース後日に採取した行は捨てる（値が「今」に化けている）
+    for r in load_races(path, need_stats=True, quiet=True):
             for h in r['horses']:
                 tl = h.get('timeline') or []
                 cs = [t.get('stamina_cost') for t in tl if t.get('stamina_cost')]
