@@ -2398,6 +2398,10 @@ def analyze(raw_text, bundle, settings=None):
         (horses, csv_odds, a_dist, a_track, a_ground,
          guild, schedule_id, clip_pool, n_tri_total) = parse_unified(raw_text)
         res['auto_race_info'] = bool(a_dist and a_track)
+        # ベットログのレースIDに使う。schedule_id にしておくと、精算時に
+        # 結果APIから着順と最終オッズを自動で引ける（settle_bets.py）。
+        res['schedule_id'] = schedule_id
+        res['guild'] = guild
         for key, val, label in [('dist', a_dist, '距離'), ('track', a_track, '馬場'),
                                 ('ground', a_ground, '地面')]:
             if val:

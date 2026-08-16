@@ -914,7 +914,13 @@ with tab_log:
     lc1, lc2 = st.columns(2)
     with lc1:
         st.subheader("① 賭けを記録")
-        rid = st.text_input("レースID", value="", placeholder="空欄なら日時を自動採番")
+        # schedule_id を既定にしておくと settle_bets.py が自動精算できる。
+        _sid = str((result or {}).get("schedule_id") or "") if result else ""
+        rid = st.text_input("レースID", value=_sid,
+                            placeholder="空欄なら日時を自動採番",
+                            help="貼り付けデータに schedule_id があれば自動で入ります。"
+                                 "この番号のままにしておくと、精算を "
+                                 "`python settle_bets.py` で自動化できます。")
         can_log = bool(result and result.get("ok") and result.get("picks"))
         if st.button("✅ 3連単の推奨を記録（pending）", disabled=not can_log,
                      **_wide()):
@@ -969,9 +975,9 @@ with tab_log:
         o2 = cc[1].selectbox("実2着", options=(horses or ["—"]), key="o2")
         o3 = cc[2].selectbox("実3着", options=(horses or ["—"]), key="o3")
         st.caption("**最終オッズ**（分かれば入力・0なら購入時オッズで概算）。"
-                   "パリミュチュエルなのでオッズは締切まで動きます。購入時オッズのままだと"
-                   "払戻とROIが系統的にずれるため、「市場に勝てているか」を検証したいなら"
-                   "ゲーム画面の最終オッズを入れてください。")
+                   "締切2分前に取ったオッズならほぼ最終値なので、そのままでも大きくは"
+                   "ずれません。`python settle_bets.py` を使えば着順も最終オッズも"
+                   "結果APIから自動で入ります（そちらが正確）。")
         fc = st.columns(2)
         fo_tri = fc[0].number_input("最終オッズ（3連単）", min_value=0.0, value=0.0,
                                     step=1.0, format="%.1f", key="fo_tri")
