@@ -297,6 +297,35 @@ def regression_tests():
     check('軽微1 同名馬は素名フォールバックの対象外のまま（確率コピー防止）',
           _cnt.get('ぴよ') == 2, f'素名カウント={_cnt}')
 
+    # --- P1: 3連単の初期プール金（サイト側のバグ）の補正 ---
+    # 表示オッズは (プール総額 − 20万) で計算されているのに、払戻はプール総額から出る。
+    # 補正を戻すと EV を過小評価して買い目を取りこぼすので、ここで固定する。
+    _S = oc.TRIFECTA_POOL_SEED
+    _bets = [3, 5, 1, 12]                       # 各組の口数（1口10,000rrc）
+    _pool = sum(_bets) * oc.STAKE_UNIT + _S
+    _disp_od = [(_pool - _S) / (b * oc.STAKE_UNIT) for b in _bets]   # サイトの表示値
+    _true_od = [_pool / (b * oc.STAKE_UNIT) for b in _bets]          # 実際の払戻
+    _got = [oc.true_trifecta_odds(o, _pool) for o in _disp_od]
+    check('P1 初期プール金20万ぶんオッズを補正する',
+          all(abs(g - t) < 1e-9 for g, t in zip(_got, _true_od)),
+          f'プール{_pool:,} → 補正 x{_pool/(_pool-_S):.3f}')
+    # 補正後のオッズから賭け金を逆算すると、必ず1口(10,000)の倍数に戻ること。
+    # ここが崩れると実効オッズも口数配分も全部ずれる。
+    _back = [_pool / o / oc.STAKE_UNIT for o in _got]
+    check('P1 補正後のオッズから賭け金を逆算すると口数に戻る',
+          all(abs(b - round(b)) < 1e-9 for b in _back), f'口数={[round(b) for b in _back]}')
+    check('P1 プールが初期金以下なら補正しない（0除算・負値の防止）',
+          oc.true_trifecta_odds(10.0, _S) == 10.0
+          and oc.true_trifecta_odds(10.0, _S - 1) == 10.0
+          and oc.true_trifecta_odds(10.0, 0) == 10.0)
+    # キャリーオーバー判定は**補正前**の値で行うこと（補正後だと二重に足す）
+    _pp_raw, _ci_raw = oc.resolve_payout_pool(_pool, _disp_od)
+    _pp_cor, _ci_cor = oc.resolve_payout_pool(_pool, _got)
+    check('P1 CO判定に補正後オッズを渡すと二重計上になる（＝補正前を渡すのが正）',
+          abs(_pp_raw - _pool) < 1e-6 and _pp_cor > _pool * 1.05,
+          f'補正前 {_pp_raw:,.0f}（Σ1/od={_ci_raw["inv_sum"]:.3f}） / '
+          f'補正後 {_pp_cor:,.0f}（Σ1/od={_ci_cor["inv_sum"]:.3f}）')
+
     if fails:
         print('\n  ❌ 失敗:', ', '.join(fails))
         return 1

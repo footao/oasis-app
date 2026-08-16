@@ -45,12 +45,18 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.6.1'
+CORE_VERSION = '3.7.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
 # =====================================================================
 STAKE_UNIT          = 10_000   # 3連単 1口 = 10,000 rrc
+# 3連単プールの初期金。**サイト側のバグ**（2026/08/15 開発者に確認）:
+#   プール総額の表示にはこの20万が含まれているが、購入画面のオッズは
+#   (プール総額 − 20万) を分子にして計算されている。払戻はプール総額から出るので、
+#   実際の払戻は表示オッズの P/(P−20万) 倍になる。プールが小さいほど差が大きい
+#   （プール30万なら3.0倍、100万なら1.25倍、500万なら1.04倍）。
+TRIFECTA_POOL_SEED  = 200_000
 MAX_UNITS           = 20       # 1組あたり上限口数
 MAX_TOTAL_UNITS     = 20       # 1レース合計口数の上限（2026/04/17 で 10→20）
 WIN_MAX_UNITS       = 100      # 単勝の1頭あたり上限口数
@@ -1407,6 +1413,7 @@ def export_model_json(bundle, path=None):
         'phase_early': list(INTERNAL_PHASE_WEIGHTS['序盤']),
         'dist_balance': {d: list(v) for d, v in INTERNAL_DIST_BALANCE.items()},
         'odds_floor': ODDS_FLOOR, 'stake_unit': STAKE_UNIT,
+        'trifecta_pool_seed': TRIFECTA_POOL_SEED,
         'max_total_units': MAX_TOTAL_UNITS, 'min_field_trifecta': MIN_FIELD_TRIFECTA,
     }
     if path:
@@ -1880,6 +1887,19 @@ def parse_trifecta_csv(path):
 CO_DETECT_LO = 0.95
 INV_SUM_SANE = (0.5, 1.10)
 ASSUME_POOL_IS_PAYOUT = False
+
+
+def true_trifecta_odds(od, pool, seed=TRIFECTA_POOL_SEED):
+    """表示オッズ → 実際に払い戻されるオッズ。
+
+    サイトは od = (pool − seed) / その組の賭け金 で表示しているが、
+    払戻は pool から出るので実際は pool / その組の賭け金。
+    よって実オッズ = 表示オッズ × pool / (pool − seed)。
+    pool が seed 以下（ほぼ誰も賭けていない）ときは補正しない。
+    """
+    if not od or od <= 0 or pool is None or pool <= seed:
+        return od
+    return float(od) * float(pool) / (float(pool) - float(seed))
 
 
 def resolve_payout_pool(pool, odds_iter, manual_co=None, trust=True):
@@ -2670,6 +2690,30 @@ def analyze(raw_text, bundle, settings=None):
     res['purchase_lines'] = []
     res['pool'] = P_total
     res['has_csv'] = bool(csv_odds)
+
+    # --- 3連単オッズの補正（サイト側のバグ）---
+    # ここで1回だけ直せば、この先の実効オッズもEVも口数配分も自動的に正しくなる
+    # （どこも「その組の賭け金 = プール総額 ÷ オッズ」で逆算しているため）。
+    # Σ(1/od) を見るキャリーオーバー判定だけは**補正前**の値でないと二重計上になるので、
+    # 元の値を csv_odds_raw に取っておく。
+    csv_odds_raw = dict(csv_odds) if csv_odds else {}
+    if csv_odds and P_total > TRIFECTA_POOL_SEED:
+        _f = P_total / (P_total - TRIFECTA_POOL_SEED)
+        csv_odds = {k: true_trifecta_odds(v, P_total) for k, v in csv_odds.items()}
+        res['pool_msgs'].append(
+            f'3連単オッズを ×{_f:.3f} 補正しました（初期プール金 '
+            f'{TRIFECTA_POOL_SEED:,} rrc が表示オッズに含まれていないサイト側の仕様。'
+            f'実際の払戻はこの補正後の値です）。')
+        if _f > 2.0:
+            res['pool_msgs'].append(
+                f'⚠ 実際の投票額は {P_total - TRIFECTA_POOL_SEED:,} rrc しかありません'
+                f'（プール総額の大半が初期プール金）。補正が ×{_f:.1f} と大きく、'
+                'EVは数学的には正しくても、少額の投票が入るだけで大きく動きます。'
+                '口数を抑えるか見送るのが安全です。')
+    elif csv_odds and 0 < P_total <= TRIFECTA_POOL_SEED:
+        res['pool_msgs'].append(
+            f'⚠ プール総額 {P_total:,} rrc が初期プール金 {TRIFECTA_POOL_SEED:,} rrc 以下です。'
+            'オッズ補正ができないので、表示オッズのまま（＝EVを過小評価）で計算します。')
     res['mc_note'] = (
         f'モンテカルロ {n_sim:,} 試行 / σ=単勝 {sigma:.4f}'
         + (f'・3連単 {tri_sigma:.4f}' if abs(tri_sigma - sigma) > 1e-9 else '（3連単も同じ）')
@@ -2726,7 +2770,7 @@ def analyze(raw_text, bundle, settings=None):
             expected = n * (n - 1) * (n - 2) if n >= 3 else 0
             co_trust = (n_tri_total > 0 and n_tri_total == expected)
             payout_pool, cinfo = resolve_payout_pool(
-                P_total, csv_odds.values(),
+                P_total, csv_odds_raw.values(),      # ← 補正前。補正後だとCOを二重に足す
                 manual_co=s.get('carryover_rrc'), trust=co_trust)
             inv, reg = cinfo['inv_sum'], cinfo['regime']
             if reg == 'takeout':

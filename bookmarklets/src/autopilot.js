@@ -36,7 +36,11 @@ const CFG = {
   DAILY_BUDGET: 200000,     // 1日の上限（rrc）
   MAX_SANE_EDGE: 3.0,       // +300%超のエッジは計算がおかしいとみなして中止
   MAX_SANE_ODDS: 5000,
-  MIN_POOL: 100000,
+  // プール総額の下限。**初期プール金20万を含んだ値**なので、実際の投票額の下限は
+  // これ − 20万。100000 のままだと「誰も賭けていないレース」を通してしまい、
+  // オッズ補正が x20 などに跳ねる（数学的には正しいが、データも薄く危険）。
+  MIN_POOL: 300000,
+  MIN_TRAIN_RACES: 20,      // 学習レースがこれ未満のモデルでは賭けない（雛形のまま等）
   MODEL_URL: 'https://raw.githubusercontent.com/footao/oasis-app/main/model.json',
   MODEL_JSON: null,
 };
@@ -164,7 +168,17 @@ async function loadModel() {
   // 優先順: 直接埋め込み > バンドルが置いた window.__OASIS_MODEL > 外部URL
   M = CFG.MODEL_JSON || window.__OASIS_MODEL || await jget(CFG.MODEL_URL);
   if (!M || !M.coef || !M.spec) throw new Error('model.json を読めません（MODEL_URL を確認）');
-  log(`モデル読込 v${M.core_version} / 学習${M.n_races}レース`, '#81c784');
+  // 雛形のまま／学習不足のモデルで賭けに行かせない。
+  // build_autopilot.py を実ログで走らせると正しい model.json が入る。
+  if (M.placeholder) {
+    throw new Error('model.json が雛形のままです。build_autopilot.py で再生成してください');
+  }
+  if (!(M.n_races >= CFG.MIN_TRAIN_RACES)) {
+    throw new Error(`学習レースが ${M.n_races} 件しかありません`
+      + `（${CFG.MIN_TRAIN_RACES}件以上必要）。model.json を作り直してください`);
+  }
+  log(`モデル読込 v${M.core_version} / 学習${M.n_races}レース`
+      + ` / σ3連単 ${Number(M.tri_sigma).toFixed(4)}`, '#81c784');
 }
 
 // ---- 受付中のレースを探す ----
@@ -215,8 +229,19 @@ async function analyseRace(sid, info) {
   const pool = ((await jget(`${API}/api/trifecta/pool?guild=${AUTH.guild}&schedule_id=${sid}`)) || {}).pool || 0;
   if (pool < CFG.MIN_POOL) { log(`R${sid}: プール ${pool.toLocaleString()} rrc は小さすぎ → 見送り`, '#888'); return null; }
 
-  const odds = await fetchOdds(sid, pets, combo);
+  let odds = await fetchOdds(sid, pets, combo);
   if (!odds.size) { log(`R${sid}: オッズ取得失敗 → 見送り`, '#ffb74d'); return null; }
+  // サイト側のバグ補正: 表示オッズは (プール総額 − 初期プール金) で計算されているが、
+  // 払戻はプール総額から出る。ここを直さないとEVを過小評価して買い目を取りこぼす。
+  // Python 側は oasis_core.true_trifecta_odds()。定数は model.json 経由。
+  const SEED = (M.trifecta_pool_seed == null ? 200000 : M.trifecta_pool_seed);
+  if (pool > SEED) {
+    const f = pool / (pool - SEED);
+    const fixed = new Map();
+    for (const [k, v] of odds) fixed.set(k, v * f);
+    odds = fixed;
+    log(`R${sid}: オッズを x${f.toFixed(3)} 補正（初期プール金 ${SEED.toLocaleString()} rrc）`, '#888');
+  }
   let inv = 0; for (const od of odds.values()) inv += 1 / od;
   const norm = Math.max(inv, 1e-9), U_ = M.stake_unit || 10000;
 
