@@ -39,7 +39,11 @@ def build(rows, law, out='stamina_table.html'):
     a = A.append
     a('<!doctype html><html lang="ja"><meta charset="utf-8">')
     a('<title>必要スタミナ早見表</title>')
-    a('<style>' + io.open('/tmp/style.css', encoding='utf-8').read() + '</style>')
+    # CSS は make_passive_table.py の <style> から取り出して使い回す。
+    # /tmp を決め打ちすると Windows で即クラッシュする。
+    _src = io.open(os.path.join(HERE, 'make_passive_table.py'), encoding='utf-8').read()
+    _i = _src.index("A('''<style>") + len("A('''<style>")
+    a('<style>' + _src[_i:_src.index("</style>''')", _i)] + '</style>')
     a('<h1>必要スタミナ早見表</h1>')
     a(f'<p class="sub">実測 {len(rows)}頭（ステータスは Discordログ、消費は result API の timeline）。'
       'スタミナは「速さの燃料」。足りないと最後に大きく減速し、余ると小さく加速します。</p>')

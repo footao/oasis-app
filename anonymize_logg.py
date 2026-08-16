@@ -49,6 +49,11 @@ def main(path='logg', dry=False):
         changed += n
         print(f'  {os.path.basename(f)[:50]:<52} {n:>6}行')
         if not dry and n:
+            # 2回目の実行で「匿名化済みの本文」を .bak に上書きすると原本が消える。
+            if os.path.exists(f + '.bak'):
+                print(f'    → {os.path.basename(f)}.bak が既にあるので中止'
+                      '（原本を失わないため）。消すか退避してから再実行してください。')
+                continue
             io.open(f + '.bak', 'w', encoding='utf-8').write(src)
             io.open(f, 'w', encoding='utf-8').write(out)
     print(f'\nハンドル {len(mapping)}人 / {changed}行')

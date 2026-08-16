@@ -229,4 +229,7 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    # bare main() だと戻り値が捨てられ、失敗しても終了コード0になる。
+    # harvest_daily.bat が `exit /b %ERRORLEVEL%` を返すので、タスクスケジューラが
+    # 「成功」と記録して**何も採取していないことに永久に気づけない**。
+    sys.exit(main() or 0)

@@ -121,8 +121,8 @@ def score_race(r, W, penalty):
                 return None
             tot += float(h['eff'] @ w)
         short = 0.0
-        if penalty and h['cost'] and h['n_seg']:
-            short = max(0.0, h['cost'] * h['n_seg'] - h['stamina0'])
+        if penalty and h['need']:
+            short = max(0.0, h['need'] - h['stamina0'])
         out.append(tot - penalty * short)
     return out
 

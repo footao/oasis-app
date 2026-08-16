@@ -62,15 +62,26 @@ def final_trifecta_odds(guild, sid, pet_ids):
 
 
 def final_win_odds(win_odds, winner):
-    """単勝の最終オッズ。Σ(1/od)≈1 でなければ「まだ誰も賭けていない」なので使わない。"""
+    """単勝の最終オッズ。市場として使えないものは None（＝購入時オッズで概算する）。
+
+    弾く条件:
+      ・Σ(1/od) が 1 付近でない → まだ投票が入りきっていない
+      ・全馬同じオッズ → 誰も賭けていない
+      ・1.0倍以下が混ざる → 1.0 も 1.5 も「価格」ではなく下限の表示値。
+        これを採用すると `BetLog.settle` が購入時オッズを 1.0 で上書きし、
+        的中したのに payout=stake（利益ゼロ）で記録されて元の値も消える。
+    """
     vals = [float(v) for v in win_odds.values() if v and float(v) > 0]
-    if len(vals) < 2:
+    if len(vals) < 2 or min(vals) <= 1.0:
+        return None
+    if len(set(round(v, 3) for v in vals)) == 1:
         return None
     inv = sum(1.0 / v for v in vals)
     if not (0.9 <= inv <= 1.15):
         return None
     od = win_odds.get(winner)
-    return float(od) if od and float(od) > 0 else None
+    od = float(od) if od else 0.0
+    return od if od > 1.0 else None
 
 
 def main():
@@ -168,6 +179,11 @@ def _selfcheck():
     floor = {'a': 1.5, 'b': 1.5, 'c': 1.5, 'd': 1.5}       # Σ=2.67 → 使わない
     assert final_win_odds(floor, 'a') is None
     assert final_win_odds({'a': 2.0}, 'a') is None          # 1頭では判定不能
+    # 実データで踏んだ形。Σは1付近を通るが 1.0 は価格ではない（sid 1981 / 1897）
+    assert final_win_odds({'a': 1.0, 'b': 49.5}, 'a') is None
+    assert final_win_odds({'a': 1.0, 'b': 104.4, 'c': 104.4, 'd': 104.4}, 'a') is None
+    assert final_win_odds({'a': 1.0, 'b': 49.5}, 'b') is None
+    assert final_win_odds({'a': 2.0, 'b': 2.0}, 'a') is None          # 全馬同値
     print('selfcheck OK')
 
 

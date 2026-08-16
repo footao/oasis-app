@@ -229,8 +229,9 @@ async function analyseRace(sid, info) {
   const pool = ((await jget(`${API}/api/trifecta/pool?guild=${AUTH.guild}&schedule_id=${sid}`)) || {}).pool || 0;
   if (pool < CFG.MIN_POOL) { log(`R${sid}: プール ${pool.toLocaleString()} rrc は小さすぎ → 見送り`, '#888'); return null; }
 
-  let odds = await fetchOdds(sid, pets, combo);
-  if (!odds.size) { log(`R${sid}: オッズ取得失敗 → 見送り`, '#ffb74d'); return null; }
+  const oddsRaw = await fetchOdds(sid, pets, combo);
+  if (!oddsRaw.size) { log(`R${sid}: オッズ取得失敗 → 見送り`, '#ffb74d'); return null; }
+  let odds = oddsRaw;
   // サイト側のバグ補正: 表示オッズは (プール総額 − 初期プール金) で計算されているが、
   // 払戻はプール総額から出る。ここを直さないとEVを過小評価して買い目を取りこぼす。
   // Python 側は oasis_core.true_trifecta_odds()。定数は model.json 経由。
@@ -242,14 +243,19 @@ async function analyseRace(sid, info) {
     odds = fixed;
     log(`R${sid}: オッズを x${f.toFixed(3)} 補正（初期プール金 ${SEED.toLocaleString()} rrc）`, '#888');
   }
-  let inv = 0; for (const od of odds.values()) inv += 1 / od;
-  const norm = Math.max(inv, 1e-9), U_ = M.stake_unit || 10000;
+  // 市場の暗黙確率は**補正前**オッズで出し、Python と同じく 1.0 でクランプする。
+  // 取得できた ODDS_TOP_N 組だけで正規化すると、その40組の確率が強制的に合計1になり、
+  // 実際には市場の一部しか持っていないのに q が膨らむ（12頭立てで約1.8倍、
+  // エッジ +0.06 過大 = EDGE_MIN と同じ大きさ）。オッズ取得が落ちるほど悪化する。
+  let inv = 0; for (const od of oddsRaw.values()) inv += 1 / od;
+  const norm = Math.max(inv, 1.0), U_ = M.stake_unit || 10000;
 
   const picks = [];
   for (const c of combo.slice(0, CFG.ODDS_TOP_N)) {
     const od = odds.get(`${c.i}-${c.j}-${c.k}`);
     if (!od || od <= 1 || c.p < CFG.MIN_PROB) continue;
-    const pBet = CFG.MODEL_WEIGHT * c.p + (1 - CFG.MODEL_WEIGHT) * ((1 / od) / norm);
+    const odRaw = oddsRaw.get(`${c.i}-${c.j}-${c.k}`) || od;
+    const pBet = CFG.MODEL_WEIGHT * c.p + (1 - CFG.MODEL_WEIGHT) * ((1 / odRaw) / norm);
     const eff = (pool + U_) / (pool / od + U_);
     const edge = pBet * eff - 1;
     if (eff > CFG.MAX_SANE_ODDS) continue;
@@ -316,7 +322,11 @@ async function doBuy() {
         }
       }
     } catch (e) {
-      log(`R${pl.sid} ⚠ ${label} 通信エラー（送信済みか不明）: ${esc(e.message)}`, '#ffb74d');
+      // 届いているかもしれないので**予算は減らす**。減らさないと、実際には
+      // 買えているのに残額が過大なまま1日分ずっとズレ続ける（安全側に倒す）。
+      ST.spent += CFG.UNITS_PER_COMBO * pl.unit;
+      log(`R${pl.sid} ⚠ ${label} 通信エラー（送信済みか不明・予算からは引きました）: `
+          + esc(e.message), '#ffb74d');
     }
     await sleep(400);
   }
@@ -328,15 +338,32 @@ async function doBuy() {
 // ---- メインループ ----
 let busy = false, stopped = false, errors = 0;
 async function tick(force) {
-  if (stopped || busy || PENDING) { render(); return; }
+  if (stopped || busy) { render(); return; }
+  // 🛒 を押さないまま締切を過ぎた買い目は捨てる。放置すると PENDING が残り続け、
+  // 以降このセッションでは一切レースを解析しなくなる（画面は動いて見えるので気づけない）。
+  if (PENDING && (nextRaceTime() - Date.now()) / 1000 <= 0) {
+    log(`R${PENDING.sid}: 締切までに購入されなかったので破棄しました`, '#888');
+    ST.done[PENDING.sid] = { t: Date.now(), n: 0 };
+    saveState(ST);
+    PENDING = null; $('_pick').style.display = 'none'; buying = false;
+  }
+  if (PENDING) { render(); return; }
   if (!AUTH) { render(); return; }
   const left = (nextRaceTime() - Date.now()) / 1000;
-  if (!force && (left > CFG.WINDOW_SEC || left > CFG.LEAD_SEC)) { render(); return; }
+  // 旧: (left > WINDOW_SEC || left > LEAD_SEC) は LEAD_SEC < WINDOW_SEC なので
+  // 常に `left > LEAD_SEC` に潰れ、WINDOW_SEC が死んでいた。
+  // 「締切まで LEAD_SEC 以内」かつ「まだ締切前」の窓でだけ動かす。
+  if (!force && (left > CFG.LEAD_SEC || left <= 0)) { render(); return; }
   busy = true;
   try {
     const r = await findRace();
     if (!r) { if (force) log('受付中のレースが見つかりません（締切済みかもしれません）', '#888'); }
-    else if (ST.done[r.sid] && !force) { /* 済み */ }
+    // force（今すぐ解析）でも「購入済み」は上書きしない。ここを抜けると
+    // 1レース MAX_UNITS_PER_RACE 口の上限を何度でも回避できてしまう。
+    else if (ST.done[r.sid] && ST.done[r.sid].n > 0) {
+      if (force) log(`R${r.sid}: 購入済みです（1レースの上限を超えないため再解析しません）`, '#888');
+    }
+    else if (ST.done[r.sid] && !force) { /* 見送り済み */ }
     else {
       const pl = await analyseRace(r.sid, r.info);
       if (pl) showPending(pl); else ST.done[r.sid] = { t: Date.now(), n: 0 };

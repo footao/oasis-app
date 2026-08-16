@@ -38,7 +38,11 @@ def load(log_path, jsonl):
                 if cs:
                     # 消費は区間ごとに微妙に違う（区間が変わるとレートが変わる）。
                     # cs[0]×区間数 で近似すると 4割の馬で 0.5 以上ずれるので、実測を合計する。
-                    tl[(r['race_date'], oc.bare(h['name']))] = (
+                    # ⚠ キーに時刻が要る。(日付, 馬名) だけだと1日6レースあるので
+                    #   後のレースが前のレースを上書きする（実測 3,389頭中 1,025件が上書き、
+                    #   うち距離まで一致していて素通りするものが 410件）。
+                    #   (日付, 時刻, 生の馬名) なら衝突ゼロ。bare() で #1/#2 を潰さないこと。
+                    tl[(r['race_date'], r.get('race_time'), h['name'])] = (
                         float(np.sum(cs)), len(cs), r['distance'], h.get('stamina_after'),
                         float(seq[0].get('stamina') or 0.0))
     d = oc.parse_race_log(log_path)
@@ -48,9 +52,11 @@ def load(log_path, jsonl):
         for i, f in zip(g.index, oc.same_species_flags(g['name'].tolist())):
             ss[i] = f
     d['_ds'] = d['_d'].dt.strftime('%Y-%m-%d')
+    # race_key は 'YYYY/MM/DD HH:MM 第NR' なので時刻を切り出す
+    d['_tm'] = d['race_key'].astype(str).str.extract(r'(\d{1,2}:\d{2})')[0]
     rows = []
     for _, r in d.iterrows():
-        k = (r['_ds'], oc.bare(r['name']))
+        k = (r['_ds'], r['_tm'], r['name'])
         if k not in tl:
             continue
         need, nseg, dist, after, st_api = tl[k]

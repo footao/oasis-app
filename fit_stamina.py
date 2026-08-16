@@ -126,7 +126,8 @@ def main(path='races.jsonl'):
             s0 = next((t.get('stamina') for t in tl), None)
             if not cs or s0 is None or h.get('stamina_after') is None:
                 continue
-            errs.append((s0 - cs[0] * len(cs)) - h['stamina_after'])
+            # 消費は区間ごとに違う。cs[0]×区間数 だと一致率が 65.8% に落ちる（実測100%）。
+            errs.append((s0 - float(np.sum(cs))) - h['stamina_after'])
     if errs:
         e = np.array(errs)
         print(f'  誤差 中央値 {np.median(e):+.3f} / |誤差|<0.5 の割合 '
@@ -150,7 +151,7 @@ def main(path='races.jsonl'):
                     continue
                 v, _ = eff(h, r['distance'], r['surface'], same[i])
                 rating = K * float(v @ w)
-                need = cs[0] * len(cs)
+                need = float(np.sum(cs))      # 同上。cs[0]×区間数 では合わない
                 short = max(0.0, need - np.floor(v[2]))
                 rows.append((rating, short, h['rank']))
             if len(rows) < 4:

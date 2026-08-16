@@ -326,6 +326,70 @@ def regression_tests():
           f'補正前 {_pp_raw:,.0f}（Σ1/od={_ci_raw["inv_sum"]:.3f}） / '
           f'補正後 {_pp_cor:,.0f}（Σ1/od={_ci_cor["inv_sum"]:.3f}）')
 
+    # --- P2: 市場の暗黙確率 q は「補正前オッズ」で正規化すること ---
+    # 補正後で正規化すると Σ(1/od) が 1/_f に落ち、max(...,1.0) のクランプで
+    # q が一律 1/_f 倍に縮む（＝λ混合の市場側が実質死ぬ）。
+    _S2 = oc.TRIFECTA_POOL_SEED
+    _P2 = 400_000
+    _b2 = [80_000, 60_000, 30_000, 20_000, 10_000]      # 合計 = P − seed（完全な市場）
+    check('P2 完全な市場なら補正前 Σ(1/od) は 1.00',
+          abs(sum(b / (_P2 - _S2) for b in _b2) - 1.0) < 1e-9)
+    _disp2 = [(_P2 - _S2) / b for b in _b2]
+    _corr2 = [oc.true_trifecta_odds(o, _P2) for o in _disp2]
+    check('P2 補正後だと Σ(1/od) が 1 を割る（クランプに当たる）',
+          sum(1 / o for o in _corr2) < 0.99,
+          f'補正後Σ={sum(1 / o for o in _corr2):.3f}')
+    _fix2 = _P2 / (_P2 - _S2)
+    _q2 = [(_fix2 / o) / max(sum(1 / x for x in _disp2), 1.0) for o in _corr2]
+    check('P2 補正後オッズから市場シェアを正しく復元できる',
+          all(abs(q - b / (_P2 - _S2)) < 1e-9 for q, b in zip(_q2, _b2)),
+          f'q={[round(q, 4) for q in _q2]}')
+    _q_bad = [(1 / o) / max(sum(1 / x for x in _corr2), 1.0) for o in _corr2]
+    check('P2 補正後で正規化すると q が 1/_f 倍に縮む（これを踏まないこと）',
+          all(abs(qb - q / _fix2) < 1e-9 for qb, q in zip(_q_bad, _q2)),
+          f'縮み {_q_bad[0] / _q2[0]:.3f} 倍（= 1/{_fix2:.1f}）')
+
+    # --- B1: 実効オッズの分子に「自分がそのレースで置いた全口数」が入ること ---
+    _P3, _U3 = 400_000.0, oc.STAKE_UNIT
+    _cd = [(('a', 'b', 'c'), 0.30, 20.0), (('a', 'c', 'b'), 0.20, 25.0),
+           (('b', 'a', 'c'), 0.15, 30.0)]
+    _al = oc.allocate_units_stable(_cd, _P3, bankroll=1_200_000, kelly_frac=0.25,
+                                   max_risk_frac=0.10, edge_min=0.10)
+    _tot = sum(v[0] for v in _al.values())
+    _od_of = {c: od for c, _p, od in _cd}
+    _ok_all = all(
+        abs(eff - (_P3 + _tot * _U3) / (_P3 / _od_of[c] + k * _U3)) < 1e-9
+        for c, (k, _ev, eff) in _al.items())
+    check('B1 実効オッズの分子は全組の合計口数（その組だけではない）',
+          _tot > 1 and _ok_all, f'{_tot}口 / eff={[round(v[2], 2) for v in _al.values()]}')
+    _c0, (_k0, _e0, _eff0) = next(iter(_al.items()))
+    check('B1 修正前の式より必ず高く出る（払戻の過小評価を解消）',
+          _eff0 > (_P3 + _k0 * _U3) / (_P3 / _od_of[_c0] + _k0 * _U3) + 1e-9,
+          f'{_eff0:.2f} > {(_P3 + _k0 * _U3) / (_P3 / _od_of[_c0] + _k0 * _U3):.2f}')
+
+    # --- B4: ベットログの書き込みが原子的（途中で落ちても欠損しない）---
+    import tempfile as _tf
+    _d4 = _tf.mkdtemp()
+    _bl4 = oc.BetLog(os.path.join(_d4, 'log.csv'))
+    _bl4.record('r1', [(('a', 'b', 'c'), 0.3, 10.0, 2)], bet_type='3連単')
+    _n4 = len(_bl4.load())
+    _tmps = [f for f in os.listdir(_d4) if f.endswith('.tmp')]
+    check('B4 保存後に一時ファイルが残らない', not _tmps, f'残骸={_tmps}')
+    _orig = oc.pd.DataFrame.to_csv
+
+    def _boom(self, path_or_buf=None, *a, **kw):          # 書き込み途中で落ちる想定
+        _orig(self, path_or_buf, *a, **kw)
+        raise OSError('disk full')
+    oc.pd.DataFrame.to_csv = _boom
+    try:
+        _bl4.record('r2', [(('d', 'e', 'f'), 0.3, 10.0, 1)], bet_type='3連単')
+    except Exception:
+        pass
+    finally:
+        oc.pd.DataFrame.to_csv = _orig
+    check('B4 書き込みが失敗しても既存のログが壊れない',
+          len(_bl4.load()) == _n4, f'{_n4}行 → {len(_bl4.load())}行')
+
     if fails:
         print('\n  ❌ 失敗:', ', '.join(fails))
         return 1

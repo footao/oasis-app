@@ -277,11 +277,15 @@ INTERNAL_DIST_BALANCE = {            # 距離バランス[距離] = [SP, PW, ST]
 # c が距離ごとに違うのは INTERNAL_DIST_BALANCE の絶対倍率のズレを吸収しているため。
 # 同一レースの全馬が同じ距離なのでレース内順位には影響しない。
 # lo/hi は観測された最小・最大。外挿すると偽のスタミナ切れを量産するので外挿しない。
+# 2026/08/16 再測定: stamina_report.py の突き合わせキーが (日付, 馬名) で、1日6レース
+# あるため後のレースが前を上書きしていた（3,389頭中1,025件）。キーに時刻を足して
+# 衝突ゼロにしたうえで測り直した値。突き合わせ 999→1225頭、残スタミナの検算 79.9→86.7%。
+# 変化は小さく（c は1〜2%、境界は短距離のみ）、予測への影響はほぼ無い。
 STAMINA_COST_LAW = {
-    '短距離': {'c': 0.01335, 'lo': 1.955, 'hi': 2.967, 'n_seg': 10},
-    'マイル': {'c': 0.01976, 'lo': 2.234, 'hi': 3.067, 'n_seg': 15},
-    '中距離': {'c': 0.02999, 'lo': 2.541, 'hi': 3.737, 'n_seg': 20},
-    '長距離': {'c': 0.04077, 'lo': 2.57, 'hi': 3.68, 'n_seg': 25},
+    '短距離': {'c': 0.0132, 'lo': 2.125, 'hi': 2.879, 'n_seg': 10},
+    'マイル': {'c': 0.0197, 'lo': 2.234, 'hi': 3.067, 'n_seg': 15},
+    '中距離': {'c': 0.03065, 'lo': 2.541, 'hi': 3.737, 'n_seg': 20},
+    '長距離': {'c': 0.04109, 'lo': 2.57, 'hi': 3.68, 'n_seg': 25},
 }
 
 
@@ -1965,7 +1969,7 @@ def _fetch_pool_api(guild, schedule_id, timeout=POOL_API_TIMEOUT):
 #  9. 資金配分
 # =====================================================================
 def optimal_units_ev(p, od, P_tot, stake_unit=STAKE_UNIT, max_units=MAX_UNITS):
-    if p <= 0 or p >= 1 or od <= 1:
+    if p <= 0 or p >= 1 or not od or not math.isfinite(od) or od <= 1:
         return 0, 0.0, od
     if p <= 1.0 / od:
         return 0, 0.0, od
@@ -2007,16 +2011,28 @@ def allocate_units_stable(cands, P_total, bankroll, kelly_frac, max_risk_frac,
     risk_units = max(1, int((max_risk_frac * bankroll) // stake_unit))
     total_cap = min(budget, risk_units)
 
-    def ev_c(p, od, k):
-        if k <= 0:
-            return 0.0
-        Pc = P_total / od
-        eff = (P_total + k * stake_unit) / (Pc + k * stake_unit)
-        return (p * eff - 1) * stake_unit * k
+    # 実効オッズ = (プール総額 + **自分がこのレースで置いた全口数**) / (その組の額 + その組の口数)。
+    # 分子に「その組の口数」しか足していなかったので、払戻を過小評価していた
+    # （実測: 3組7口で本命 eff 6.14 → 正しくは 6.71、合計EVで −23%）。
+    # 単勝側（win_bet_picks_pool の P_new）は最初から全頭の合計を足しており、そちらが正しい。
+    # 他の組に置いた口数もプールに入る＝全組の払戻を押し上げるので、
+    # 1口足すかどうかは**ポートフォリオ全体のEV**で判断する。
+    def total_ev(alloc):
+        tot_u = sum(alloc.values())
+        s = 0.0
+        for (c_, p_, od_, _cap) in items:
+            k_ = alloc.get(c_, 0)
+            if k_ <= 0:
+                continue
+            Pc_ = P_total / od_
+            eff_ = (P_total + tot_u * stake_unit) / (Pc_ + k_ * stake_unit)
+            s += (p_ * eff_ - 1) * stake_unit * k_
+        return s
 
     items = []
     for (c, p, od) in cands:
-        if not od or od <= 1 or not (0 < p < 1):
+        # inf/nan のオッズが通ると int(nan // stake) で ValueError になり画面が落ちる
+        if not od or not math.isfinite(od) or od <= 1 or not (0 < p < 1):
             continue
         Pc = P_total / od
         eff1 = (P_total + stake_unit) / (Pc + stake_unit)
@@ -2035,25 +2051,29 @@ def allocate_units_stable(cands, P_total, bankroll, kelly_frac, max_risk_frac,
 
     alloc = {c: 0 for (c, p, od, cap) in items}
     used = 0
+    base_ev = 0.0
     while used < total_cap:
         best, best_m = None, 1e-9
         for (c, p, od, cap) in items:
             if alloc[c] >= cap:
                 continue
-            m = ev_c(p, od, alloc[c] + 1) - ev_c(p, od, alloc[c])
+            alloc[c] += 1
+            m = total_ev(alloc) - base_ev
+            alloc[c] -= 1
             if m > best_m:
-                best_m, best = m, (c, p, od)
+                best_m, best = m, c
         if best is None:
             break
-        alloc[best[0]] += 1
+        alloc[best] += 1
         used += 1
+        base_ev += best_m
 
     res = {}
     for (c, p, od, cap) in items:
         k = alloc[c]
         if k > 0:
             Pc = P_total / od
-            eff = (P_total + k * stake_unit) / (Pc + k * stake_unit)
+            eff = (P_total + used * stake_unit) / (Pc + k * stake_unit)
             res[c] = (k, (p * eff - 1) * stake_unit * k, eff)
     return res
 
@@ -2744,12 +2764,21 @@ def analyze(raw_text, bundle, settings=None):
         lam = float(s.get('model_weight', 0.7))
         min_p = float(s.get('min_prob', 0.003))
         # 市場の暗黙確率（成立組のみ・正規化）。q_i = (1/od_i)/Σ(1/od)。
-        inv_sum = sum(1.0 / od for od in csv_odds.values()
+        # **補正前のオッズを使うこと。** 補正後は全オッズが _f 倍されるので
+        # Σ(1/od) が 1/_f まで落ち、max(...,1.0) のクランプに当たって
+        # 市場確率が一律 1/_f 倍に縮む（＝λ混合の市場側が実質無効化される）。
+        # 完全な市場なら補正前の Σ(1/od) は 1.00 になる（初期プール金の分は
+        # 分子・分母で相殺されるため）。回帰テスト P2 が固定している。
+        _q_odds = csv_odds_raw or csv_odds
+        inv_sum = sum(1.0 / od for od in _q_odds.values()
                       if od and math.isfinite(od) and od > 0)
         inv_norm = max(inv_sum, 1.0)
+        _fix = float(res.get('odds_fix_ratio', 1.0) or 1.0)   # 補正後→補正前に戻す倍率
 
         def blend(p_model, od):
-            q = (1.0 / od) / inv_norm if (od and od > 0) else 0.0
+            # od は補正後。市場シェアは補正前の値で出すので _fix を掛けて戻す
+            # （1/od_raw = _fix/od_corrected）。
+            q = (_fix / od) / inv_norm if (od and od > 0) else 0.0
             return lam * p_model + (1.0 - lam) * q
 
         rows = []
@@ -2888,7 +2917,9 @@ def analyze(raw_text, bundle, settings=None):
             eff = (P_total + STAKE_UNIT) / (P_c + STAKE_UNIT)
             lam_r = float(s.get('model_weight', 0.7))
             if csv_odds and od:
-                q = (1.0 / od) / max(sum(1.0 / o for o in csv_odds.values()
+                # ここも補正前のオッズで正規化する（上の inv_norm と同じ理由）
+                _fx = float(res.get('odds_fix_ratio', 1.0) or 1.0)
+                q = (_fx / od) / max(sum(1.0 / o for o in (csv_odds_raw or csv_odds).values()
                                          if o and o > 0), 1.0)
                 pb = lam_r * p + (1 - lam_r) * q
             else:
@@ -3055,7 +3086,13 @@ class BetLog:
         d = os.path.dirname(os.path.abspath(self.path))
         if d and not os.path.exists(d):
             os.makedirs(d, exist_ok=True)
-        df.to_csv(self.path, index=False, encoding='utf-8-sig')
+        # 直接上書きすると、途中で落ちたとき「途中までの正常なCSV」が残る。
+        # それは load(strict=True) の例外ガードを素通りする（壊れていないので）ため、
+        # 次の書き込みで欠損が確定する（実測: 5行→切断→2行として読めて→3行で保存）。
+        # 一時ファイルに書いてから os.replace で差し替える（同一ディレクトリなら原子的）。
+        tmp = self.path + '.tmp'
+        df.to_csv(tmp, index=False, encoding='utf-8-sig')
+        os.replace(tmp, self.path)
 
     def race_horses(self, race_id):
         df = self.load()

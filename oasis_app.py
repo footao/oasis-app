@@ -59,6 +59,20 @@ def _content_key(texts, path):
     return h.hexdigest()
 
 
+def _spec_key():
+    """passive_spec.json の中身のハッシュ。
+
+    train_model はスペックを**ファイルから**読み、analyze はパッシブ説明文を貼るたびに
+    そのファイルを書き換える。キャッシュキーに入れないと、ゲーム側が倍率を変更 →
+    貼り付けで取り込み → 再読み込みしても**古い倍率で学習したモデルが黙って返る**。
+    """
+    try:
+        with open(_spec_path(), "rb") as fp:
+            return hashlib.sha1(fp.read()).hexdigest()
+    except OSError:
+        return ""
+
+
 def _auto_log_path():
     """リポジトリ（アプリと同じ場所）にあるログを自動で探す。
     logg/ フォルダ → logs/ → data/ → 直下の *.txt の順。"""
@@ -81,6 +95,12 @@ def _auto_log_path():
 
 def _spec_path():
     return os.path.join(_app_dir(), oc.SPEC_FILE)
+
+
+def _result_sig(settings, raw_text):
+    """「いま画面に出ている結果」の指紋。設定＋レース本文。"""
+    base = repr(sorted((k, str(v)) for k, v in settings.items() if k != "spec_path"))
+    return base + "|" + hashlib.sha1((raw_text or "").encode("utf-8", "replace")).hexdigest()
 
 
 def _resolve_save(p):
@@ -165,7 +185,7 @@ def _drive_fingerprint():
 
 @st.cache_resource(show_spinner="モデル学習中…（初回は数十秒）")
 def _train_cached(source_key, sigma_override, train_from, sigma_safety, _texts, log_path,
-                  content_key):
+                  content_key, spec_key):
     """同じ入力なら再学習しない。
 
     source_key に取得元の指紋を、content_key にログ本文のハッシュを入れてキャッシュキーにする。
@@ -377,7 +397,8 @@ with st.sidebar:
         try:
             bundle = _train_cached(source_key, sigma_override, train_from.strip()
                                    or oc.DEFAULT_TRAIN_FROM, sigma_safety,
-                                   tuple(log_texts), log_path, _content_key(log_texts, log_path))
+                                   tuple(log_texts), log_path,
+                                   _content_key(log_texts, log_path), _spec_key())
         except Exception as e:
             st.error(f"学習に失敗しました: {e}")
     ss.bundle = bundle or ss.bundle
@@ -492,14 +513,16 @@ with tab_pred:
         else:
             with st.spinner("シミュレーション中…"):
                 ss.result = oc.analyze(raw_text, bundle, settings)
-            ss.result_settings = repr(sorted((k, str(v)) for k, v in settings.items()
-                                             if k != "spec_path"))
+            # レース本文も指紋に含める。設定だけだと、レースを貼り替えたときに
+            # 前のレースの推奨・購入リスト・schedule_id が無表示で残り、
+            # そのまま記録すると**別レースの買い目**がログに入る。
+            ss.result_settings = _result_sig(settings, raw_text)
 
     result = ss.result
-    _sig = repr(sorted((k, str(v)) for k, v in settings.items() if k != "spec_path"))
+    _sig = _result_sig(settings, raw_text)
     if result is not None and ss.get("result_settings") not in (None, _sig):
-        st.warning("⚠ サイドバーの設定を変更しました。下の推奨は**変更前の設定**での結果です。"
-                   "『🎯 解析』を押し直してください。")
+        st.warning("⚠ 設定かレースデータを変更しました。下の推奨は**変更前**の結果です"
+                   "（別のレースの買い目かもしれません）。『🎯 解析』を押し直してください。")
     if result is not None:
         if not result.get("ok"):
             st.error(result.get("error", "解析に失敗しました。"))
