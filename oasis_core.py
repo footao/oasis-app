@@ -288,8 +288,9 @@ STAMINA_COST_LAW = {
 def stamina_budget(eff, dist):
     """(必要スタミナ, 不足, 余り) を返す。eff は effective_stats() の戻り値。
 
-    「余り」は完全に無駄（必要量を超えたスタミナは速さに変わらない）。
-    「不足」は最後に減速する量。**両方を特徴量にするのが肝**で、片方だけだと
+    「余り」は疲労補正を最大 +3% まで上げる（1.030 で頭打ち）。
+    「不足」は最後に減速する量で、こちらは −35% まで落ちる（下限 0.650）。
+    **効き方が左右で非対称**なので、1列にまとめると表現できない。**両方を特徴量にするのが肝**で、片方だけだと
     「必要量のところでスタミナの価値が折れる」形を表現できず、かえって精度が落ちる。
     """
     L = STAMINA_COST_LAW.get(dist)
@@ -2060,8 +2061,12 @@ def allocate_units_stable(cands, P_total, bankroll, kelly_frac, max_risk_frac,
 def unformed_sleeve_picks(combo_prob, disp, od_of, P_total, p_min=0.05, edge_min=0.30,
                           max_units=5, remaining_budget=MAX_TOTAL_UNITS,
                           stake_unit=STAKE_UNIT, p_scale=1.0):
-    """※「未成立組を自分だけが買っていれば的中時に全プール総取り」というゲーム仕様の
-    想定に基づく。実際の払戻がこの通りかは未検証（検証できたら README を更新すること）。"""
+    """未成立の組に各1口だけ置く。**的中時は全プール総取り**（2026/08/16 オーナーが確認）。
+
+    実効オッズ = (プール総額 + 1口) / 1口。プールに初期金20万が含まれるので、
+    誰も買っていない薄いプールほど跳ねる（プール22万なら23倍）。
+    ⚠ 高EVだが**全部外れる確率も高い**。既定は OFF（画面の「未成立組も少額で買う」）。
+    """
     if P_total <= 0 or max_units <= 0 or remaining_budget <= 0:
         return []
     eff = (P_total + stake_unit) / stake_unit
@@ -2704,6 +2709,7 @@ def analyze(raw_text, bundle, settings=None):
     if csv_odds and P_total > TRIFECTA_POOL_SEED:
         _f = P_total / (P_total - TRIFECTA_POOL_SEED)
         csv_odds = {k: true_trifecta_odds(v, P_total) for k, v in csv_odds.items()}
+        res['odds_fix_ratio'] = _f          # 画面表示との食い違いを UI で説明するため
         res['pool_msgs'].append(
             f'3連単オッズを ×{_f:.3f} 補正しました（初期プール金 '
             f'{TRIFECTA_POOL_SEED:,} rrc が表示オッズに含まれていないサイト側の仕様。'

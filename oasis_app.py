@@ -408,7 +408,9 @@ with st.sidebar:
 
     st.markdown("**未成立スリーブ（任意）**")
     sleeve_on = st.checkbox("未成立組も少額で買う", value=False,
-                            help="市場が張っていない組に各1口。当たれば全プール総取り。高EVだが高分散。")
+                            help="市場が張っていない組に各1口。当たれば全プール総取り"
+                                 "（2026/08/16 確認済み）。実効オッズ=(プール+1口)/1口 なので、"
+                                 "誰も買っていない薄いプールほど跳ねる。高EVだが高分散。")
     sleeve_units = st.radio("未成立の最大口数", [3, 4, 5], index=2, horizontal=True,
                             disabled=not sleeve_on)
     sleeve_pmin = st.slider("未成立の的中率下限", 0.01, 0.20, 0.05, 0.01, disabled=not sleeve_on)
@@ -530,13 +532,22 @@ with tab_pred:
                     st.dataframe(pd.DataFrame([{
                         "": r["mark"], "状態": r.get("flag", "成"), "買い目": r["combo"],
                         "的中率": f"{r['model_p']*100:.2f}%",
-                        "表示od": (f"{r['disp_od']:.1f}" if r["disp_od"] else "—"),
+                        # ゲーム画面のオッズは初期プール金20万を含まない値なので、
+                        # ここは補正後（＝実際に払い戻される倍率）。名前で取り違えないこと。
+                        "実od(補正後)": (f"{r['disp_od']:.1f}" if r["disp_od"] else "—"),
                         "理論EV": (f"{r['theo_ev']:+,.0f}" if r["theo_ev"] is not None else "—"),
                         "口数": (f"{r['k']}口" if r["k"] else ""),
                         "実効od": (f"{r['eff_od']:.1f}" if r["eff_od"] else ""),
                         "実効EV": (f"{r['eff_ev']:+,.0f}" if r["eff_ev"] is not None else ""),
                     } for r in view]), **_wide(hide_index=True))
                     st.caption("✅=購入推奨（成=成立 / 未=未成立スリーブ） / △=+理論EVだが安定ルールで見送り")
+                    if result.get("odds_fix_ratio", 1.0) > 1.001:
+                        st.caption(
+                            f"⚠ **「実od(補正後)」はゲーム画面の表示と一致しません**"
+                            f"（画面の値 ×{result['odds_fix_ratio']:.2f}）。"
+                            f"画面のオッズは初期プール金 {oc.TRIFECTA_POOL_SEED:,} rrc を"
+                            "含めずに計算されていますが、払戻はプール総額から出ます。"
+                            "こちらが実際にもらえる倍率です。")
                     if result.get("bare_used"):
                         st.caption("※ 一部は素名フォールバックで照合（同名別個体を合算）。")
                     if result.get("unmatched_names"):
