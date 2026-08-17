@@ -458,6 +458,24 @@ def regression_tests():
     check('P3 プール不明のときは全件取得（従来どおり）',
           _cut0 == len(_allp), f'{_cut0}/{len(_allp)}')
 
+    # --- P4: 実測 duty が、貼り付けによる passive_spec.json の上書きで戻らないこと ---
+    #   `spec_from_description` は説明文から duty を推定して source='game' で書き戻すので、
+    #   実測値をJSONに入れただけだと、パッシブ効果を貼るたびに推定値に戻ってしまう。
+    _t = ('1. 🌑 追い込み\n終盤開始時に順位が下位半分の場合、終盤のパワーが12%上昇する。\n'
+          '2. 🚀 ロケットスタート\n序盤区間のみ、スピードが12%上昇する。')
+    _d = oc.parse_passive_descriptions(_t)
+    check('P4 貼り付けても実測dutyが推定値に戻らない',
+          abs(_d['追い込み']['duty'] - oc.DUTY_MEASURED['追い込み']) < 1e-9
+          and abs(_d['ロケットスタート']['duty'] - oc.DUTY_MEASURED['ロケットスタート']) < 1e-9,
+          f"追い込み {_d['追い込み']['duty']:.3f} / ロケット {_d['ロケットスタート']['duty']:.3f}")
+    _sp = oc.load_passive_spec(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                            'passive_spec.json'))
+    check('P4 独走態勢は実測どおり発動しない（duty=0）',
+          _sp['独走態勢']['duty'] == 0.0, f"duty={_sp['独走態勢']['duty']}")
+    check('P4 勝負師と常時発動系は触っていない',
+          _sp['勝負師']['duty'] == 0.05 and _sp['省エネ走法']['duty'] == 1.0,
+          f"勝負師 {_sp['勝負師']['duty']} / 省エネ走法 {_sp['省エネ走法']['duty']}")
+
     if fails:
         print('\n  ❌ 失敗:', ', '.join(fails))
         return 1

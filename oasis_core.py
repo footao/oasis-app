@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.7.1'
+CORE_VERSION = '3.7.2'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -491,8 +491,40 @@ def parse_passive_descriptions(text):
         name = canonical_passive(m.group(1))
         spec = spec_from_description(m.group(2))
         if name and spec and name not in out:
-            out[name] = spec
+            out[name] = apply_measured_duty(name, spec)
     return out
+
+
+# timeline の activated_passives から実測した発動割合（2026/08/17・v2の24,110区間）。
+# 説明文からの推定（下位半分なら 1/3×0.5、など）は当て推量で、実測と最大13倍ずれていた。
+# **説明文パースより優先する**。貼り付けで passive_spec.json が上書きされても戻らないよう、
+# spec を組み立てる3経路すべてでここを最後に適用する。
+#   ⚠ 勝負師は「レース開始時に発動」で timeline に出ない（initial 側で 3/38 = 7.9%、
+#     spec の 0.05 と矛盾しないのでそのまま）。常時発動系も timeline に出ないので載せない。
+DUTY_MEASURED = {
+    '緊急回復': 0.037,        # 推定 0.500（「一度だけ」を 0.5 と見ていた。実際は1区間だけ）
+    '独走態勢': 0.000,        # 推定 0.200（36頭・全区間で一度も発動せず＝実質無価値）
+    '差しの構え': 0.271,      # 推定 0.167
+    '追い込み': 0.254,        # 推定 0.167
+    '中盤加速': 0.400,        # 推定 0.333
+    'ロケットスタート': 0.287,  # 推定 0.333（序盤は区間数の1/3よりやや短い）
+    '逃げの心得': 0.287,      # 推定 0.333
+    'ペース配分': 0.290,      # 推定 0.333
+    '末脚': 0.315,           # 推定 0.333
+    '不屈': 0.065,           # 推定 0.100
+    '二の脚': 0.128,         # 推定 0.150
+    '競り合い': 0.514,        # 推定 0.500
+    'ロングスパート': 0.488,   # 推定 0.500
+}
+
+
+def apply_measured_duty(name, sp):
+    """実測した発動割合があれば duty を差し替える。無ければそのまま。"""
+    d = DUTY_MEASURED.get(name)
+    if d is not None and isinstance(sp, dict):
+        sp = dict(sp)
+        sp['duty'] = float(d)
+    return sp
 
 
 def _norm_spec(sp):
@@ -507,7 +539,7 @@ def _norm_spec(sp):
 
 
 def default_spec():
-    return {k: _norm_spec(v) for k, v in PASSIVE_SPEC_SEED.items()}
+    return {k: apply_measured_duty(k, _norm_spec(v)) for k, v in PASSIVE_SPEC_SEED.items()}
 
 
 def load_passive_spec(path=None):
@@ -520,7 +552,7 @@ def load_passive_spec(path=None):
             with open(path, encoding='utf-8') as f:
                 saved = json.load(f)
             for k, v in (saved or {}).items():
-                v = _norm_spec(v)
+                v = apply_measured_duty(k, _norm_spec(v))
                 # ゲーム表記は推定値を上書きする。推定同士なら既定を優先。
                 if v['source'] == 'game' or k not in spec:
                     spec[k] = v

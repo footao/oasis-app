@@ -68,9 +68,13 @@ def load(path):
                 if ph and t.get('rating') and ph not in seen:
                     seen[ph] = float(t['rating'])
             costs = [t.get('stamina_cost') for t in tl if t.get('stamina_cost')]
+            # 必要スタミナ。これが無いと score_race の罰則側が KeyError で落ちる。
+            # 罰則を試すのは pen>0 のときだけなので、以前はレースが少なく
+            # `len(rs) < 5` で全距離スキップされ、この経路に入っていなかった。
+            need = oc.stamina_budget(e, r['distance'])[0]
             keep.append(dict(eff=v, rank=h.get('rank'), ratings=seen,
                              cost=costs[0] if costs else None, n_seg=len(costs),
-                             stamina0=np.floor(v[2])))
+                             need=need, stamina0=np.floor(v[2])))
         if len(keep) >= 5 and all(k['rank'] for k in keep):
             races.append(dict(sid=r['schedule_id'], dist=r['distance'], horses=keep))
     if n_old:
