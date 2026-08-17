@@ -36,20 +36,40 @@ try{
    if(p&&!effSeen.has(p.label)){effSeen.add(p.label);
      effRows.push(`${csv(p.label)},${csv(p.code)},${csv(p.desc)}`);}
  }));
- // 2026/08/17 に API へ増えた項目。SPEED/POWER/STAMINA は base_* + item_bonus の
- // **補正後**の値なので、モデルはそのままで正しい。装備・お守りが数値以外の効果も持つ場合は
- // モデルが見落とすことになるので、付いている馬がいたら警告を出す。
+ // 2026/08/17 に API へ増えた項目。購入ページ自身が
+ //   「表示値＝個体値＋特訓＋装備品。倍率・条件スキルはレース中に適用」
+ // と書いているとおり、SPEED/POWER/STAMINA は装備の加算まで入った値なので
+ // **数値ぶんはモデルがそのまま追従する**。
+ // 問題は effect_label / effect_description のほうで、これはパッシブと同じ
+ // 「レース中に効く別効果」。モデルは見ていないので、付いている馬がいたら警告する。
+ // equipment / charm は文字列ではなく
+ //   {name, rarity, rarity_label, icon_url, stat_speed, stat_power, stat_stamina,
+ //    effect_label, effect_description}
+ // というオブジェクト。そのまま出すと [object Object] になるので名前を取り出す。
+ const iname=x=>(x&&x.name)?x.name:'';
+ const ieff=x=>(x&&(x.effect_label||x.effect_description))
+   ?`${x.effect_label||''}：${x.effect_description||''}`:'';
  const ibs=h=>{const b=h.item_bonus||{};
    return [['SP',b.speed],['PW',b.power],['ST',b.stamina]]
      .filter(([,v])=>v).map(([k,v])=>k+(v>0?'+':'')+v).join('/');};
  const geared=pets.filter(h=>h.equipment||h.charm||ibs(h));
+ // 装備品の効果説明（パッシブ効果と同じ形。貼れば倍率を学習できる）
+ const itemRows=[],itemSeen=new Set();
+ pets.forEach(h=>[[h.equipment,'装備'],[h.charm,'お守り']].forEach(([x,slot])=>{
+   if(!x||!x.name||itemSeen.has(slot+x.name))return;
+   itemSeen.add(slot+x.name);
+   itemRows.push([slot,x.name,x.rarity_label||x.rarity||'',
+     [['SP',x.stat_speed],['PW',x.stat_power],['ST',x.stat_stamina]]
+       .filter(([,v])=>Number(v)).map(([k,v])=>`${k}+${v}`).join('/'),
+     x.effect_label||'',x.effect_description||''].map(csv).join(','));
+ }));
  // 表示ステータス ≠ ベース+補正 なら、補正の入り方が想定と違う（要調査）
  const mismatch=pets.filter(h=>h.base_speed!=null&&
    (h.speed!==h.base_speed+((h.item_bonus||{}).speed||0)
     ||h.power!==h.base_power+((h.item_bonus||{}).power||0)
     ||h.stamina!==h.base_stamina+((h.item_bonus||{}).stamina||0)));
- const horseHeader='レース距離,馬場,地面,馬名,成体種,SPEED,POWER,STAMINA,コンディション,パッシブスキル1,パッシブスキル2,単勝オッズ,自分の購入額,装備,お守り,アイテム補正,素SPEED,素POWER,素STAMINA';
- const horseRows=pets.map(h=>[dist,surf,ground,h.displayName,h.adult_key||'',h.speed,h.power,h.stamina,h.condition_label,(h.p1?h.p1.label:''),(h.p2?h.p2.label:''),h.odds,(h.my_amount||0),(h.equipment||''),(h.charm||''),ibs(h),(h.base_speed==null?'':h.base_speed),(h.base_power==null?'':h.base_power),(h.base_stamina==null?'':h.base_stamina)].map(csv).join(','));
+ const horseHeader='レース距離,馬場,地面,馬名,成体種,SPEED,POWER,STAMINA,コンディション,パッシブスキル1,パッシブスキル2,単勝オッズ,自分の購入額,装備,装備効果,お守り,お守り効果,アイテム補正,素SPEED,素POWER,素STAMINA';
+ const horseRows=pets.map(h=>[dist,surf,ground,h.displayName,h.adult_key||'',h.speed,h.power,h.stamina,h.condition_label,(h.p1?h.p1.label:''),(h.p2?h.p2.label:''),h.odds,(h.my_amount||0),iname(h.equipment),ieff(h.equipment),iname(h.charm),ieff(h.charm),ibs(h),(h.base_speed==null?'':h.base_speed),(h.base_power==null?'':h.base_power),(h.base_stamina==null?'':h.base_stamina)].map(csv).join(','));
  const n=pets.length, total=n*(n-1)*(n-2);
  // ---- 打ち切り条件のためにプールを先に見る ----
  // 表示オッズは (プール総額 − 初期プール金20万) 基準なので 賭け金[組]=BASE/オッズ。
@@ -125,6 +145,8 @@ try{
    ...(failed.length?[`取得失敗=${failed.length}`]:[]),'',
    '=== 出走馬一覧 ===',horseHeader,...horseRows,'',
    '=== パッシブ効果 ===','パッシブ,コード,説明',...effRows,'',
+   ...(itemRows.length?['=== 装備効果 ===','枠,名前,レアリティ,ステータス補正,効果名,説明',
+     ...itemRows,'']:[]),
    '=== 3連単オッズ ===','順位,1着,2着,3着,オッズ',
    ...withOdds.map((r,i)=>`${i+1},${csv(r.first)},${csv(r.second)},${csv(r.third)},${r.odds}`),
    ...noOdds.map(r=>`未成立,${csv(r.first)},${csv(r.second)},${csv(r.third)},未成立`)].join('\n');

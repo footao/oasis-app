@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.7.2'
+CORE_VERSION = '3.7.3'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -392,7 +392,11 @@ def normalize_passive(s):
 #  2-b. パッシブ説明文 → 数値スペックの自動抽出
 # =====================================================================
 _STAT_JA = {'スピード': 'speed', 'パワー': 'power', 'スタミナ': 'stamina', '全ステータス': 'all'}
-_PCT_RE = re.compile(r'(スピード|パワー|スタミナ|全ステータス)が(\d+(?:\.\d+)?)[%％](上昇|低下|アップ|ダウン)')
+# 装備の効果文は「スピードが**常時**4.4%上昇」のように、が と数字の間に語が入る。
+# 埋め草は 。、％ と数字を含まない6文字までに限る（別の文や別ステータスをまたがない）。
+# 方向語（上昇/低下/…）を必須にしているので「残りスタミナが20%以下に」は拾わない。
+_PCT_RE = re.compile(r'(スピード|パワー|スタミナ|全ステータス)が[^。、%％\d]{0,6}'
+                     r'(\d+(?:\.\d+)?)[%％](上昇|低下|アップ|ダウン)')
 
 
 _ABILITY_RE = re.compile(r'走行能力が(\d+(?:\.\d+)?)[%％](上昇|低下)')
@@ -1719,6 +1723,36 @@ _PASSIVE_COLS2 = [('パッシブスキル1', 'パッシブスキル2'), ('パッ
                   ('スキル1', 'スキル2'), ('passive_skill', 'passive_skill_2')]
 
 
+_ITEM_EFFECT_COLS = [('装備効果', '装備'), ('お守り効果', 'お守り')]
+
+
+def item_mults_from_row(r, cols):
+    """装備・お守りの効果説明 → (常時倍率, 反映できなかった説明)。
+
+    購入ページが「表示値＝個体値＋特訓＋装備品。**倍率・条件スキルはレース中に適用**」と
+    書いているとおり、貼り付けの SPEED/POWER/STAMINA には**加算ぶんしか入っていない**。
+    倍率はここで別に掛ける（実測: お守り「太陽のメダリオン」は PW+5 が表示値に入る一方、
+    効果「スピードが常時4.4%上昇」は入っていない）。
+
+    常時以外（区間限定・条件付き）は発動率が読めないので**掛けずに警告へ回す**。
+    掛け忘れより、勝手な発動率で盛るほうが危険なため。
+    """
+    mult, skipped = {}, []
+    for col, slot in _ITEM_EFFECT_COLS:
+        if col not in cols:
+            continue
+        v = str(r.get(col, '') or '').strip()
+        if not v or v in ('nan', 'None'):
+            continue
+        sp = spec_from_description(v.split('：', 1)[-1])
+        if sp and sp.get('mult') and sp.get('scope') == 'always':
+            for k, m in sp['mult'].items():
+                mult[k] = mult.get(k, 1.0) * float(m)
+        else:
+            skipped.append(f'{slot}「{v}」')
+    return mult, skipped
+
+
 def _passives_from_row(r, cols):
     got = []
     for a, b in _PASSIVE_COLS2:
@@ -1799,7 +1833,7 @@ def parse_unified(text):
     mh = re.search(r'===\s*出走馬一覧\s*===\s*\n(.*?)(?=\n\s*===|\Z)', text, re.S)
     mo = re.search(r'===\s*3連単オッズ\s*===\s*\n(.*?)(?=\n\s*===|\Z)', text, re.S)
 
-    skipped = []
+    skipped, item_skipped = [], []
     if mh:
         df = pd.read_csv(io.StringIO(mh.group(1).strip()))
         df.columns = [str(c).strip() for c in df.columns]
@@ -1828,11 +1862,17 @@ def parse_unified(text):
             spc = str(r.get('成体種', r.get('adult_key', '')) or '').strip()
             mine = pd.to_numeric(r.get('自分の購入額', r.get('my_amount', np.nan)),
                                  errors='coerce')
+            _im, _isk = item_mults_from_row(r, cols)
+            item_skipped += _isk
             horses.append({
                 'my_amount': (float(mine) if pd.notna(mine) else None),
                 'name': str(r.get('馬名', r.get('名前', ''))).strip(),
                 'species': spc or None,
-                'speed': int(sp), 'power': int(pw), 'stamina': int(st),
+                # 装備の**倍率**はここで掛ける（加算ぶんは貼り付けの値に既に入っている）
+                'speed': int(sp) * _im.get('speed', 1.0),
+                'power': int(pw) * _im.get('power', 1.0),
+                'stamina': int(st) * _im.get('stamina', 1.0),
+                'item_mult': (_im or None),
                 'condition': str(r.get('コンディション', '普通')).strip(),
                 'passives': _passives_from_row(r, cols),
                 'odds': float(win_odds) if pd.notna(win_odds) else float('nan'),
@@ -1849,6 +1889,8 @@ def parse_unified(text):
 
     if skipped:
         meta['skipped_rows'] = skipped
+    if item_skipped:
+        meta['item_effects_skipped'] = item_skipped
     if meta:
         for h in horses:
             h.setdefault('_meta', meta)
@@ -2503,6 +2545,17 @@ def analyze(raw_text, bundle, settings=None):
 
     n = len(horses)
     res['n_field'] = n
+    _ik = ((horses[0].get('_meta') or {}).get('item_effects_skipped') if horses else None)
+    if _ik:
+        res['messages'].append(
+            f'⚠ 常時発動ではない装備効果 {len(_ik)}件 はモデルに反映していません: '
+            f'{", ".join(map(str, _ik[:4]))}。発動率が読めないため、'
+            '勝手に盛らず素の値で計算しています。')
+    _im = [h for h in horses if h.get('item_mult')]
+    if _im:
+        _d = '／'.join(f"{h['name']}: " + ' '.join(
+            f'{k}×{v:.3f}' for k, v in sorted(h['item_mult'].items())) for h in _im[:4])
+        res['messages'].append(f'🛡 装備・お守りの常時倍率を反映しました（{len(_im)}頭）: {_d}')
     _sk = ((horses[0].get('_meta') or {}).get('skipped_rows') if horses else None)
     if _sk:
         res['messages'].append(
