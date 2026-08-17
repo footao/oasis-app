@@ -36,8 +36,20 @@ try{
    if(p&&!effSeen.has(p.label)){effSeen.add(p.label);
      effRows.push(`${csv(p.label)},${csv(p.code)},${csv(p.desc)}`);}
  }));
- const horseHeader='レース距離,馬場,地面,馬名,成体種,SPEED,POWER,STAMINA,コンディション,パッシブスキル1,パッシブスキル2,単勝オッズ,自分の購入額';
- const horseRows=pets.map(h=>[dist,surf,ground,h.displayName,h.adult_key||'',h.speed,h.power,h.stamina,h.condition_label,(h.p1?h.p1.label:''),(h.p2?h.p2.label:''),h.odds,(h.my_amount||0)].map(csv).join(','));
+ // 2026/08/17 に API へ増えた項目。SPEED/POWER/STAMINA は base_* + item_bonus の
+ // **補正後**の値なので、モデルはそのままで正しい。装備・お守りが数値以外の効果も持つ場合は
+ // モデルが見落とすことになるので、付いている馬がいたら警告を出す。
+ const ibs=h=>{const b=h.item_bonus||{};
+   return [['SP',b.speed],['PW',b.power],['ST',b.stamina]]
+     .filter(([,v])=>v).map(([k,v])=>k+(v>0?'+':'')+v).join('/');};
+ const geared=pets.filter(h=>h.equipment||h.charm||ibs(h));
+ // 表示ステータス ≠ ベース+補正 なら、補正の入り方が想定と違う（要調査）
+ const mismatch=pets.filter(h=>h.base_speed!=null&&
+   (h.speed!==h.base_speed+((h.item_bonus||{}).speed||0)
+    ||h.power!==h.base_power+((h.item_bonus||{}).power||0)
+    ||h.stamina!==h.base_stamina+((h.item_bonus||{}).stamina||0)));
+ const horseHeader='レース距離,馬場,地面,馬名,成体種,SPEED,POWER,STAMINA,コンディション,パッシブスキル1,パッシブスキル2,単勝オッズ,自分の購入額,装備,お守り,アイテム補正,素SPEED,素POWER,素STAMINA';
+ const horseRows=pets.map(h=>[dist,surf,ground,h.displayName,h.adult_key||'',h.speed,h.power,h.stamina,h.condition_label,(h.p1?h.p1.label:''),(h.p2?h.p2.label:''),h.odds,(h.my_amount||0),(h.equipment||''),(h.charm||''),ibs(h),(h.base_speed==null?'':h.base_speed),(h.base_power==null?'':h.base_power),(h.base_stamina==null?'':h.base_stamina)].map(csv).join(','));
  const n=pets.length, total=n*(n-1)*(n-2);
  // ---- 打ち切り条件のためにプールを先に見る ----
  // 表示オッズは (プール総額 − 初期プール金20万) 基準なので 賭け金[組]=BASE/オッズ。
@@ -123,10 +135,16 @@ try{
  let warn=unknown.size?` ⚠未知コード:${[...unknown].join('/')}`:'';
  if(failed.length){warn+=` ⚠取得失敗${failed.length}件 → 貼らずに再実行してください`;
    console.warn('Oasis: オッズ取得に失敗した組',failed);}
+ if(geared.length){warn+=` ⚠装備/お守り${geared.length}頭`;
+   console.warn('Oasis: 装備・お守りが付いている馬',geared.map(h=>
+     ({name:h.displayName,equipment:h.equipment,charm:h.charm,item_bonus:h.item_bonus})));}
+ if(mismatch.length){warn+=` ⚠ステータスがベース+補正と不一致${mismatch.length}頭`;
+   console.warn('Oasis: SPEED≠base+item_bonus の馬',mismatch.map(h=>
+     ({name:h.displayName,speed:h.speed,base:h.base_speed,bonus:h.item_bonus})));}
  if(unknown.size)console.warn('Oasis: 辞書に無いパッシブコード:',[...unknown]);
  const n2=pets.filter(h=>h.p1&&h.p2).length;
  const stat=`${n}頭(2枠${n2}) | スキル${effRows.length}種 | 3連単${withOdds.length}件(${cut}/${total}点取得) | プール${poolAmt.toLocaleString()}rrc`;
- const bad=unknown.size||failed.length;
+ const bad=unknown.size||failed.length||geared.length||mismatch.length;
  btn.style.background=failed.length?'#b71c1c':(unknown.size?'#e65100':'#1b5e20');btn.style.color='#fff';
  btn.style.borderColor=failed.length?'#ef5350':(unknown.size?'#ff9800':'#4caf50');
  const done=()=>{btn.textContent=`✅ ${stat} | コピー完了${warn}`;

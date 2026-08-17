@@ -11,16 +11,22 @@
 **timeline を保存するのが harvest.js との最大の違い。**
 スタミナ切れの挙動はここにしか無く、モデル改修にはこのデータが要る。
 
-【重要】**ステータス（speed/power/stamina）は当てにならない**
-`race/by-id` は**そのペットの「今」のステータス**を返す。過去のレースを採ると、
-レース当時ではなく現在の（育って上がった）値が付いてくる。
-実測: 出力の予測精度がレースの古さに比例して落ちる（08-14 のレース 0.957 →
-07-28 のレース 0.660）。
+【重要】**ステータスは result API から取ること**（2026/08/17 判明）
+`race/by-id` は「今」の値を返すので、過去のレースを採るとレース当時ではなく現在の値が
+付いてくる（予測精度が古さに比例して落ちる: 08-14 のレース 0.957 → 07-28 は 0.660）。
 
-したがって、ここで採ったデータは
-  ・使ってよい: timeline / 着順 / score / 距離 / 馬場 / simulation_version
-  ・使ってはいけない: speed / power / stamina / passive / condition
-ステータスが要る解析は `logg/`（Discordログ＝レース当時の値）を使うこと。
+だが `race/result` は **レース当時の値**を base_* + train_* に分けて返していた。
+実測（sid 1825 / 2026-08-01 の はなこ）:
+    result : power 48+70=118, stamina 50+29=79   ← レース当時
+    by-id  : power 110,        stamina 84         ← 今（特訓やり直しで再配分された）
+passive_skills / equipment / charm / initial_activated_passives も当時の値。
+
+したがって
+  ・使ってよい: base_*+train_* / passive_skills / equipment / charm /
+                timeline / 着順 / score / 距離 / 馬場 / simulation_version
+  ・当時の値が無い: **コンディション（好調/不調）だけ**。result に無く by-id は「今」。
+                    コンディションが要る解析は `logg/`（Discordログ）を使うこと。
+古い行（`stats_at_race` が無いもの）は `--refresh` で当時の値に直せる。
 
 再実行すると既に取った schedule_id は飛ばすので、毎日追記していける。
 
@@ -86,11 +92,15 @@ def load_done(path):
 
 
 def is_fresh(race):
-    """この行のステータス（SP/PW/ST・パッシブ・コンディション）が当時の値か。
+    """この行のステータス（SP/PW/ST・パッシブ）が当時の値か。
 
-    `by-id` は「今」の値を返すので、開催日と採取日が同じときだけ信用できる。
-    `harvested_at` が無い行は 2026/08/15 以前にまとめて採ったもの＝**信用しない**。
+    `stats_at_race` が立っていれば result API 由来＝**採取日に関係なく当時の値**。
+    無ければ旧方式（by-id＝「今」の値）なので、開催日と採取日が同じときだけ信用する。
+    `--refresh` を一度回せば全行が前者になる。
     """
+    hs = race.get('horses') or []
+    if hs and all(h.get('stats_at_race') for h in hs):
+        return True
     h = race.get('harvested_at')
     return bool(h) and str(h) == str(race.get('race_date'))
 
@@ -119,6 +129,110 @@ def load_races(path, need_stats, quiet=False):
     return rows
 
 
+def _at_race(r, key):
+    """result API のレース当時ステータス = base_* + train_*。両方無ければ None。"""
+    b, t = r.get('base_' + key), r.get('train_' + key)
+    if b is None and t is None:
+        return None
+    return (b or 0) + (t or 0)
+
+
+def merge_horse(h, r):
+    """by-id の1頭 `h` と result の1頭 `r` を1行にまとめる。
+
+    ステータスとパッシブは **result 優先**（レース当時の値）。無ければ by-id に落ちる。
+    コンディションだけは result に無いので by-id の「今」の値しか入らない。
+    """
+    at = {k: _at_race(r, k) for k in ('speed', 'power', 'stamina')}
+    fresh = all(v is not None for v in at.values())
+    ps = r.get('passive_skills')
+    prev = [x for x in (h.get('passive_skill'), h.get('passive_skill_2')) if x]
+    if not isinstance(ps, list) or not ps:
+        ps = prev
+    return {
+        'pet_id': h.get('pet_id'), 'name': h.get('display_name') or h.get('name'),
+        'adult_key': h.get('adult_key'),
+        'speed': at['speed'] if fresh else h.get('speed'),
+        'power': at['power'] if fresh else h.get('power'),
+        'stamina': at['stamina'] if fresh else h.get('stamina'),
+        'stats_at_race': fresh,          # True ならレース当時の値（採取日に依存しない）
+        # 内訳も残す（素の個体値と特訓ぶんを分けて見たいとき用）
+        'base_speed': r.get('base_speed'), 'train_speed': r.get('train_speed'),
+        'base_power': r.get('base_power'), 'train_power': r.get('train_power'),
+        'base_stamina': r.get('base_stamina'), 'train_stamina': r.get('train_stamina'),
+        # by-id（＝「今」）の値。当時との差分を見る用。
+        'speed_now': h.get('speed'), 'power_now': h.get('power'),
+        'stamina_now': h.get('stamina'), 'item_bonus': h.get('item_bonus'),
+        # ⚠ 当時の値ではない。`h` は by-id の1頭（condition_label）だが、
+        # --refresh では保存済みの行（condition）が渡る。両方見ないと値を消してしまう。
+        'condition': h.get('condition_label') or h.get('condition') or '普通',
+        'passive_skill': ps[0] if len(ps) > 0 else None,
+        'passive_skill_2': ps[1] if len(ps) > 1 else None,
+        'passive_skills': ps,                     # 3つ以上に増えても取りこぼさない
+        # result の passive_skills は「当時」、by-id の2枠は「今」。食い違ったら両方残す
+        # （2枠目は後から生えるので、古いレースでは当時1枠が正しい）。
+        'passive_skills_now': prev if prev != ps else None,
+        'initial_activated_passives': r.get('initial_activated_passives'),
+        'equipment': r.get('equipment'), 'charm': r.get('charm'),
+        'initial_activated_charms': r.get('initial_activated_charms'),
+        'odds': h.get('odds'),
+        'rank': r.get('rank'), 'score': r.get('score'),
+        'finish_time': r.get('finish_time'), 'stamina_after': r.get('stamina_after'),
+        'simulation_version': r.get('simulation_version'),
+        'timeline': r.get('timeline'),          # ← 肝。区間ごとの残スタミナ・疲労補正
+    }
+
+
+def refresh(guild, user, path):
+    """既存の races.jsonl を result API で採り直して、当時のステータスに入れ替える。
+
+    by-id は叩かない（距離・馬場・馬名は既存行のものを使う）ので1レース1リクエスト。
+    書き込みは一時ファイル経由なので、途中で落ちても原本は無事。
+    """
+    rows = []
+    with open(path, encoding='utf-8') as f:
+        for line in f:
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                pass
+    if not rows:
+        print(f'[NG] {path} に読める行がありません。')
+        return 1
+    print(f'{len(rows)} レースを result API で採り直します。')
+    ok = skip = miss = 0
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        for i, race in enumerate(rows):
+            hs = race.get('horses') or []
+            if hs and all(h.get('stats_at_race') for h in hs):
+                skip += 1
+            else:
+                res = get(f"{API}/api/race/result/{guild}/{race.get('race_date')}"
+                          f"/{race.get('schedule_id')}?user={user}")
+                rr = (res or {}).get('results')
+                new = []
+                if isinstance(rr, list) and rr:
+                    by_pid = {x.get('pet_id'): x for x in rr}
+                    # result に居ない馬は**落とさず元の行のまま残す**（黙って消える事故を防ぐ）
+                    new = [merge_horse(h, by_pid[h['pet_id']])
+                           if h.get('pet_id') in by_pid else h for h in hs]
+                if any(x.get('stats_at_race') for x in new):
+                    race['horses'] = new
+                    ok += 1
+                else:
+                    miss += 1
+                time.sleep(0.4)
+            f.write(json.dumps(race, ensure_ascii=False) + '\n')
+            sys.stdout.write(f'\r  {i+1}/{len(rows)}  更新{ok} / 既に当時の値{skip}'
+                             f' / 取得失敗{miss}   ')
+            sys.stdout.flush()
+    os.replace(tmp, path)
+    print(f'\n完了: {ok}レースを当時のステータスに入れ替えました'
+          f'（{skip}件は既に当時の値 / {miss}件は取得できず旧値のまま）。')
+    return 0
+
+
 def fetch_race(guild, user, sid):
     info = get(f'{API}/api/race/by-id/{guild}/{sid}?user={user}')
     if not info or not isinstance(info.get('pets'), list) or not info['pets']:
@@ -137,18 +251,7 @@ def fetch_race(guild, user, sid):
         r = by_id.get(h.get('pet_id'))
         if not r or r.get('rank') is None or r.get('score') is None:
             continue
-        horses.append({
-            'pet_id': h.get('pet_id'), 'name': h.get('display_name') or h.get('name'),
-            'adult_key': h.get('adult_key'),
-            'speed': h.get('speed'), 'power': h.get('power'), 'stamina': h.get('stamina'),
-            'condition': h.get('condition_label') or '普通',
-            'passive_skill': h.get('passive_skill'), 'passive_skill_2': h.get('passive_skill_2'),
-            'odds': h.get('odds'),
-            'rank': r.get('rank'), 'score': r.get('score'),
-            'finish_time': r.get('finish_time'), 'stamina_after': r.get('stamina_after'),
-            'simulation_version': r.get('simulation_version'),
-            'timeline': r.get('timeline'),          # ← 肝。区間ごとの残スタミナ・疲労補正
-        })
+        horses.append(merge_horse(h, r))
     if not horses:
         return None, 'partial'
     return {
@@ -177,7 +280,13 @@ def main():
     ap.add_argument('--sleep', type=float, default=0.4, help='1レースごとの待ち（秒）')
     ap.add_argument('--stop-after-misses', type=int, default=20,
                     help='欠番（--forward では未確定も）がこれだけ続いたら打ち切り')
+    ap.add_argument('--refresh', action='store_true',
+                    help='新規取得はせず、既存の races.jsonl を result API で採り直して'
+                         'レース当時のステータス（base_*+train_*）に入れ替える')
     a = ap.parse_args()
+
+    if a.refresh:
+        return refresh(a.guild, a.user, a.out)
 
     done = load_done(a.out)
     if done:

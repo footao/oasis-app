@@ -115,7 +115,7 @@ st.set_page_config(page_title="Oasis 予測 v2", page_icon="🐎", layout="wide"
 #  片方だけ更新すると「AttributeError（内容は伏せられます）」になって
 #  原因が分からなくなるので、起動時に分かる形で止める。
 # ---------------------------------------------------------------
-REQUIRED_CORE = "3.7.0"
+REQUIRED_CORE = "3.7.1"
 _NEEDED = [
     "CORE_VERSION", "WIN_MAX_TOTAL_UNITS", "WIN_STAKE_UNIT", "UNBET_ODDS",
     "MAX_TOTAL_UNITS", "SIGMA_SAFETY", "DIST_LIST", "TRACK_LIST",
@@ -825,9 +825,10 @@ with tab_model:
                 unsafe_allow_html=True)
             st.info(
                 f"レース中の乱数幅は **±{oc.STAT_RNG_WIDTH*100:g}%**"
-                f"（2026/08のプチ修正で ±{oc.STAT_RNG_WIDTH_PREV*100:g}% から拡大）。"
-                "実効ステータスにレースごとにこの幅の乱数が乗ります。荒れやすくなった分、"
-                "「安定感」などブレ低減スキルの価値が上がり、着順ブレ幅 σ は変更後のログから自動で校正し直します。")
+                f"（2026/08/17 の開発者告知で ±{oc.STAT_RNG_WIDTH_PREV*100:g}% から縮小、元の値に戻りました）。"
+                "実効ステータスにレースごとにこの幅の乱数が乗ります。荒れにくくなった分、"
+                "「安定感」などブレ低減スキルの価値は下がります。着順ブレ幅 σ は変更後のログから"
+                "自動で校正し直すので、**変更後のレースが貯まるまでは σ が広めのまま＝弱気寄り**になります。")
             st.markdown("**区間重み**（レースの序盤・中盤・終盤で、どのステータスが効くか）")
             st.dataframe(pd.DataFrame([
                 {"区間": k, "スピード": v[0], "パワー": v[1], "スタミナ": v[2]}
