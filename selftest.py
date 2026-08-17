@@ -174,6 +174,44 @@ def _harvest_race(sid, horses, date='2026/08/02', time='0:00'):
     return '\n'.join(L)
 
 
+def _bm_scrape(n_field, bet_units, order, par=20):
+    """bookmarklets/src/bm.js の3連単オッズ取得ループを、そのまま Python に写したもの。
+
+    node が入っていない環境でも回せるよう selftest 側に置いている
+    （JS を直したらここも直すこと。見るのは打ち切り条件の算数だけなので短い）。
+    返り値: (取得した組の集合, 何組取ったか)
+    """
+    SEED_, UNIT = oc.TRIFECTA_POOL_SEED, oc.STAKE_UNIT
+    base = sum(bet_units.values()) * UNIT          # プール総額 − 初期プール金
+    w = {i: 1.0 for i in range(n_field)}
+    queue, seen_set = list(order), set()
+    got_amt = 0.0
+    while queue:
+        batch, queue = queue[:par], queue[par:]
+        hit = False
+        for c in batch:
+            seen_set.add(c)
+            if c in bet_units:
+                hit = True
+                for h in c:
+                    w[h] *= 3
+        # 表示オッズは小数2桁なので 賭け金=base/od に最大 0.005/od の相対誤差が乗る。
+        # 誤差ぶん残額を多めに見て、取り逃しが起きない側に倒す（bm.js と同じ式）。
+        got_amt, err = 0.0, 0.0
+        for c in seen_set:
+            if c not in bet_units:
+                continue
+            od = base / (bet_units[c] * UNIT)      # サイトが表示するオッズ
+            b = base / od
+            err += b * 0.005 / od
+            got_amt += b
+        if base > 0 and base - got_amt + err < UNIT:
+            break
+        if hit:
+            queue.sort(key=lambda c: -(w[c[0]] * w[c[1]] * w[c[2]]))
+    return seen_set, len(seen_set)
+
+
 def regression_tests():
     hr('6) 回帰テスト（過去に直したバグの再発防止）')
     A = [(f'馬A{i}', 100 + i, 90 + i, 80 + i) for i in range(4)]
@@ -389,6 +427,36 @@ def regression_tests():
         oc.pd.DataFrame.to_csv = _orig
     check('B4 書き込みが失敗しても既存のログが壊れない',
           len(_bl4.load()) == _n4, f'{_n4}行 → {len(_bl4.load())}行')
+
+    # --- P3: bm.js の「残額が1口未満なら打ち切る」が金の乗った組を取り逃さないこと ---
+    #   打ち切った組は「未成立」として出力され、unformed_sleeve_picks が
+    #   全プール総取り(23倍)の買い目候補に入れる。取り逃すと架空の高EV買い目になる。
+    import random as _rnd
+    _worst = _saved = _total = 0
+    for _n in (10, 12, 15, 16):
+        _all = [c for c in itertools.permutations(range(_n), 3)]
+        for _s in range(30):
+            _r = _rnd.Random(_s * 7919 + _n)
+            _order = _all[:]
+            _r.shuffle(_order)                     # 初期順(SPEED)が当てにならない最悪ケース
+            _pop = list(range(max(3, _n // 3)))    # 人気の数頭に金が集中する置き方
+            _bet = {}
+            while len(_bet) < 2 + _r.randrange(8):
+                _c = tuple(_r.sample(_pop, 3)) if len(_pop) >= 3 else None
+                if _c:
+                    _bet[_c] = 1 + _r.randrange(3)
+            _seen, _cut = _bm_scrape(_n, _bet, _order)
+            _worst += len(set(_bet) - _seen)
+            _saved += len(_all) - _cut
+            _total += len(_all)
+    check('P3 打ち切っても金の乗った組を取り逃さない',
+          _worst == 0, f'取り逃し{_worst}組 / リクエスト削減 {100 * _saved // _total}%')
+
+    # プールが取れない(=0)ときは打ち切らず全件取ること
+    _allp = [c for c in itertools.permutations(range(10), 3)]
+    _seen0, _cut0 = _bm_scrape(10, {}, _allp)
+    check('P3 プール不明のときは全件取得（従来どおり）',
+          _cut0 == len(_allp), f'{_cut0}/{len(_allp)}')
 
     if fails:
         print('\n  ❌ 失敗:', ', '.join(fails))
