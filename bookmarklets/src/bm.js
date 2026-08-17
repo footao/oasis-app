@@ -61,13 +61,27 @@ try{
  for(const a of pets)for(const b of pets){if(b.pet_id===a.pet_id)continue;
    for(const x of pets){if(x.pet_id===a.pet_id||x.pet_id===b.pet_id)continue;combos.push([a,b,x]);}}
  combos.sort((p,q)=>sp(q[0])*sp(q[1])*sp(q[2])-sp(p[0])*sp(p[1])*sp(p[2]));
- const queue=combos.slice(), results=[]; let seenAmt=0, cut=0;
+ // 並列数。上げると往復は半分ずつ減るが、打ち切りの粒度が粗くなって総数は増える。
+ // bm_stop_test.js の実測（SPEED順が当たる場合の平均リクエスト数 / 往復回数）:
+ //   PAR=5:275/55  10:278/28  20:286/14  40:307/8  80:350/4  160:477/3
+ // ただし HTTP/1.1 だとブラウザの同時接続は1オリジン6本が上限なので、
+ // 20 でも実際は6本ずつしか飛ばない＝上げても速くならず無駄だけ増える。
+ // DevTools → ネットワーク → Protocol 列が h2 なら上げる意味がある。
+ const PAR=20;
+ const queue=combos.slice(), results=[], failed=[]; let seenAmt=0, cut=0;
  while(queue.length){
-   const batch=queue.splice(0,20);
-   const got=await Promise.all(batch.map(async([a,b,x])=>{try{
-     const d=await(await fetch(`${B}/api/trifecta/odds?guild=${G}&schedule_id=${S}&first=${a.pet_id}&second=${b.pet_id}&third=${x.pet_id}`)).json();
-     return{first:a.displayName,second:b.displayName,third:x.displayName,odds:typeof d.odds==='number'?d.odds:null};
-   }catch{return null;}}));
+   const batch=queue.splice(0,PAR);
+   const got=await Promise.all(batch.map(async([a,b,x])=>{
+     const u=`${B}/api/trifecta/odds?guild=${G}&schedule_id=${S}&first=${a.pet_id}&second=${b.pet_id}&third=${x.pet_id}`;
+     for(let t=0;t<2;t++){try{
+       const d=await(await fetch(u)).json();
+       return{first:a.displayName,second:b.displayName,third:x.displayName,odds:typeof d.odds==='number'?d.odds:null};
+     }catch(e){await new Promise(r=>setTimeout(r,300));}}
+     // 2回とも失敗。黙って落とすとCSVから消えて「未成立」と区別がつかなくなり、
+     // ツールが全プール総取り(23倍)の買い目を出しかねないので数えて警告する。
+     failed.push(`${a.displayName}→${b.displayName}→${x.displayName}`);
+     return null;
+   }));
    results.push(...got.filter(Boolean));
    cut+=batch.length;
    // 取りこぼした組は seenAmt に入らない＝残額を多めに見積もる方向なので、
@@ -95,7 +109,8 @@ try{
  btn.textContent='🏇 プール取得中...';
  let poolAmt=0;
  try{poolAmt=(await(await fetch(`${B}/api/trifecta/pool?guild=${G}&schedule_id=${S}`)).json()).pool||0;}catch{}
- const clip=[`guild=${G}`,`schedule_id=${S}`,`pool=${poolAmt}`,'',
+ const clip=[`guild=${G}`,`schedule_id=${S}`,`pool=${poolAmt}`,
+   ...(failed.length?[`取得失敗=${failed.length}`]:[]),'',
    '=== 出走馬一覧 ===',horseHeader,...horseRows,'',
    '=== パッシブ効果 ===','パッシブ,コード,説明',...effRows,'',
    '=== 3連単オッズ ===','順位,1着,2着,3着,オッズ',
@@ -105,14 +120,17 @@ try{
  // その場合は消えないボタンにして、**新しいタップの中で**コピーし直す。
  let copied=true;
  try{await navigator.clipboard.writeText(clip);}catch(e){copied=false;}
- const warn=unknown.size?` ⚠未知コード:${[...unknown].join('/')}`:'';
+ let warn=unknown.size?` ⚠未知コード:${[...unknown].join('/')}`:'';
+ if(failed.length){warn+=` ⚠取得失敗${failed.length}件 → 貼らずに再実行してください`;
+   console.warn('Oasis: オッズ取得に失敗した組',failed);}
  if(unknown.size)console.warn('Oasis: 辞書に無いパッシブコード:',[...unknown]);
  const n2=pets.filter(h=>h.p1&&h.p2).length;
  const stat=`${n}頭(2枠${n2}) | スキル${effRows.length}種 | 3連単${withOdds.length}件(${cut}/${total}点取得) | プール${poolAmt.toLocaleString()}rrc`;
- btn.style.background=unknown.size?'#e65100':'#1b5e20';btn.style.color='#fff';
- btn.style.borderColor=unknown.size?'#ff9800':'#4caf50';
+ const bad=unknown.size||failed.length;
+ btn.style.background=failed.length?'#b71c1c':(unknown.size?'#e65100':'#1b5e20');btn.style.color='#fff';
+ btn.style.borderColor=failed.length?'#ef5350':(unknown.size?'#ff9800':'#4caf50');
  const done=()=>{btn.textContent=`✅ ${stat} | コピー完了${warn}`;
-   setTimeout(()=>btn.remove(),unknown.size?12000:7000);};
+   setTimeout(()=>btn.remove(),bad?12000:7000);};
  if(copied){done();}
  else{
    Object.assign(btn.style,{cursor:'pointer',maxWidth:'92vw',whiteSpace:'normal',lineHeight:'1.5'});

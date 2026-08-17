@@ -6,13 +6,14 @@ const SEED = 200000, UNIT = 10000;
 const rng = s => () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296;
 
 // bm.js のループと同じ手順。fetch の代わりに bet(Map) を引く。
-function scrape(n, bet, initOrder) {
+function scrape(n, bet, initOrder, BATCH) {
+  BATCH = BATCH || 20;
   const BASE = [...bet.values()].reduce((s, v) => s + v, 0);
   const w = new Map([...Array(n)].map((_, i) => [i, 1]));
   const sc = c => w.get(c[0]) * w.get(c[1]) * w.get(c[2]);
   const queue = initOrder.slice(), results = []; let seen = 0, cut = 0;
   while (queue.length) {
-    const batch = queue.splice(0, 20);
+    const batch = queue.splice(0, BATCH);
     const got = batch.map(c => bet.has(c.join('-')) ? BASE / bet.get(c.join('-')) : null);
     got.forEach((od, k) => results.push([batch[k], od]));
     cut += batch.length;
@@ -25,7 +26,7 @@ function scrape(n, bet, initOrder) {
   }
   for (const [c] of results) bet.delete(c.join('-'));   // 取れた分を消す
   if (bet.size) throw new Error(`取り逃し ${bet.size}組 (n=${n}, cut=${cut})`);
-  return { total: initOrder.length, cut };
+  return { total: initOrder.length, cut, rounds: Math.ceil(cut / BATCH) };
 }
 
 function combosOf(n) {
