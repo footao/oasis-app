@@ -52,6 +52,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -135,6 +136,15 @@ def _at_race(r, key):
     if b is None and t is None:
         return None
     return (b or 0) + (t or 0)
+
+
+_DESC_PCT_RE = re.compile(r'(\d+(?:\.\d+)?)\s*[%％]')
+
+
+def _desc_pct(desc):
+    """効果説明の中の最初の「N%」。effect_value との食い違いを見るためだけに使う。"""
+    m = _DESC_PCT_RE.search(str(desc or ''))
+    return float(m.group(1)) if m else None
 
 
 def _pick_item(full, slim):
@@ -376,7 +386,15 @@ def main():
                 v.get('effect_key') or '', ('%g' % ev) if ev is not None else '',
                 len(v.get('ids') or []), v['n'], v.get('first_seen') or ''))
             if v.get('effect_description'):
-                print('    └ ' + v['effect_description'])
+                # ⚠ effect_value と説明文の%が食い違うものがある（実測: charm_balance は
+                #   effect_value=2.0 に対し説明は「全ステータスが常時1.1%上昇」）。
+                #   モデルは**説明文のほう**を使うので、食い違いは目印として出しておく。
+                pct = _desc_pct(v['effect_description'])
+                ev = v.get('effect_value')
+                warn = ''
+                if pct is not None and ev is not None and abs(pct - float(ev)) > 0.01:
+                    warn = f'   ⚠ 効果値{ev}≠説明{pct}%（説明文を採用）'
+                print('    └ ' + v['effect_description'] + warn)
         n_named = sum(1 for v in cat.values() if v.get('name'))
         if n_named < len(cat):
             print(f'\n※ 日本語名が付いているのは {n_named}/{len(cat)} 種類です。'

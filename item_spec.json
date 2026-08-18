@@ -16,6 +16,27 @@
   "stat_stamina": 1,
   "template_key": "comet_sash_1"
  },
+ "earth_idol_1/normal": {
+  "effect_description": "スタミナが常時2%上昇",
+  "effect_key": "charm_stamina",
+  "effect_label": "持久の加護",
+  "effect_value": 2.0,
+  "first_seen": "2026-08-18",
+  "id": 17,
+  "ids": [
+   17
+  ],
+  "item_type": "charm",
+  "n": 1,
+  "name": "土の人形",
+  "rarity": "normal",
+  "rarity_label": "ノーマル",
+  "slot": "charm",
+  "stat_power": 2,
+  "stat_speed": 0,
+  "stat_stamina": 0,
+  "template_key": "earth_idol_1"
+ },
  "endurance_armor_1/normal": {
   "effect_description": "終盤のパワーが2%上昇",
   "effect_key": "gear_final_kick",
@@ -27,7 +48,7 @@
    45
   ],
   "item_type": "equipment",
-  "n": 2,
+  "n": 3,
   "name": "皮のアーマー",
   "rarity": "normal",
   "rarity_label": "ノーマル",
@@ -36,6 +57,48 @@
   "stat_speed": 0,
   "stat_stamina": 2,
   "template_key": "endurance_armor_1"
+ },
+ "endurance_armor_3/rare": {
+  "effect_description": "中盤のパワーが3.3%上昇",
+  "effect_key": "gear_mid_acceleration",
+  "effect_label": "中盤加速",
+  "effect_value": 3.3,
+  "first_seen": "2026-08-18",
+  "id": 62,
+  "ids": [
+   62
+  ],
+  "item_type": "equipment",
+  "n": 1,
+  "name": "岩盤のアーマー",
+  "rarity": "rare",
+  "rarity_label": "レア",
+  "slot": "equipment",
+  "stat_power": 0,
+  "stat_speed": 0,
+  "stat_stamina": 5,
+  "template_key": "endurance_armor_3"
+ },
+ "flame_charm_3/rare": {
+  "effect_description": "パワーが常時4.4%上昇",
+  "effect_key": "charm_power",
+  "effect_label": "剛力の加護",
+  "effect_value": 4.4,
+  "first_seen": "2026-08-18",
+  "id": 50,
+  "ids": [
+   50
+  ],
+  "item_type": "charm",
+  "n": 1,
+  "name": "猛火の紋章",
+  "rarity": "rare",
+  "rarity_label": "レア",
+  "slot": "charm",
+  "stat_power": 5,
+  "stat_speed": 0,
+  "stat_stamina": 0,
+  "template_key": "flame_charm_3"
  },
  "sun_medallion_3/rare": {
   "effect_description": "スピードが常時4.4%上昇",
@@ -90,7 +153,7 @@
    1
   ],
   "item_type": "charm",
-  "n": 2,
+  "n": 3,
   "name": "小風のお守り",
   "rarity": "normal",
   "rarity_label": "ノーマル",
@@ -101,7 +164,9 @@
   "template_key": "wind_talisman_1"
  },
  "wind_talisman_2/normal": {
+  "effect_description": "全ステータスが常時1.1%上昇",
   "effect_key": "charm_balance",
+  "effect_label": "調和の加護",
   "effect_value": 2.0,
   "first_seen": "2026-08-17",
   "id": 8,
@@ -109,8 +174,10 @@
    8
   ],
   "item_type": "charm",
-  "n": 1,
+  "n": 2,
+  "name": "風のお守り",
   "rarity": "normal",
+  "rarity_label": "ノーマル",
   "slot": "charm",
   "stat_power": 0,
   "stat_speed": 2,
