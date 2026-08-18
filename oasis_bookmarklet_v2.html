@@ -131,7 +131,7 @@ pool=1500000
   <div class="alt">
     <h4>📱 iPhone / iPad（Safari・Chrome 共通）</h4>
     <p>iOS のブックマーク URL は上のコードだと<b>長すぎて入りません</b>。
-    こちらの<b class="k">短縮版（162文字）</b>を使ってください。中身は GitHub から読み込むので、
+    こちらの<b class="k">短縮版（300文字）</b>を使ってください。中身は GitHub から読み込むので、
     <b>PC側で更新すれば iPhone 側は貼り直し不要</b>です。</p>
     <div style="position:relative;margin-bottom:.8rem">
       <div class="codebox" id="bm-lite" style="max-height:none"></div>
@@ -139,6 +139,7 @@ pool=1500000
     </div>
     <p>iOS にはブックマークバーが無いので、<b>ブックマークを作ってから URL を書き換えます</b>。</p>
     <ol style="font-size:.8rem;color:#555;line-height:1.9;padding-left:1.2rem">
+      <li><b class="k">このページを iPhone の Safari で開く</b>。PC から送らなくても、リポジトリが公開なのでこの URL で開けます:<br><code style="word-break:break-all">https://cdn.jsdelivr.net/gh/footao/oasis-app@main/oasis_bookmarklet_v2.html</code></li>
       <li>上の短縮版の <b class="k">コピー</b> を押す</li>
       <li>どのページでもいいので <b class="k">共有 → ブックマークを追加 → 保存</b>
           （名前は <code>oasis</code> など<b>短く</b>。あとで打つので）</li>
@@ -148,9 +149,7 @@ pool=1500000
           （iOS はブックマーク一覧から開けないことがあるので、この打ち方が確実）</li>
     </ol>
     <div class="note" style="margin-top:.6rem">
-      <b>更新が反映されないとき</b>: CDN が最大12時間キャッシュします。すぐ反映したいときは
-      <code>https://purge.jsdelivr.net/gh/footao/oasis-app@main/bookmarklets/src/bm.js</code>
-      を一度ブラウザで開いてください。<br>
+      この短縮版は <b>GitHub の生ファイルを直接読む</b>ので、push すれば<b>次に開いた瞬間から新しい版</b>になります（CDNのキャッシュ待ちは不要。GitHub 側が読めないときだけ jsDelivr に落ちます）。<br>
       <b>何も起きないとき</b>: 券購入ページが外部スクリプトを禁止している可能性があります。
       その場合は上の<b>長い版</b>を使ってください（iOS でも入る端末はあります）。
     </div>
@@ -173,7 +172,7 @@ document.getElementById('bm-code').textContent =
   document.querySelector('.bm-btn').getAttribute('href');
 // iOS 用の短縮版。本体は GitHub から読み込むのでブックマークには収まる。
 document.getElementById('bm-lite').textContent =
-  "javascript:(d=>{var s=d.createElement('script');s.src='https://cdn.jsdelivr.net/gh/footao/oasis-app@main/bookmarklets/src/bm.js';d.body.appendChild(s)})(document)";
+  "javascript:fetch('https://raw.githubusercontent.com/footao/oasis-app/main/bookmarklets/src/bm.js?'+Date.now()).then(r=>r.text()).then(eval).catch(_=>{var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/gh/footao/oasis-app@main/bookmarklets/src/bm.js';document.body.appendChild(s)})";
 function copyTo(id, b) {
   navigator.clipboard.writeText(document.getElementById(id).textContent).then(() => {
     b.textContent = '✓ 完了';
