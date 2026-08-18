@@ -15,6 +15,7 @@ selftest.py — Oasis 予測ツール v2 の動作確認
 """
 import itertools
 import os
+import re
 import sys
 import tempfile
 import warnings
@@ -500,6 +501,39 @@ def regression_tests():
     check('P5 「常時」を挟んだ説明文をパースできる',
           (oc.spec_from_description('スピードが常時4.4%上昇') or {}).get('mult') == {'speed': 1.044},
           str((oc.spec_from_description('スピードが常時4.4%上昇') or {}).get('mult')))
+    # --- P5c: 交易所で実際に出品されていた効果文が全部読めること ---
+    #   同じテンプレでも個体ごとに数値も効果も違うので、文字列の型が想定どおりかを固定する。
+    #   （2026/08/18 の交易所16件から、重複を除いた9パターン）
+    _spec5c = oc.load_passive_spec(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'passive_spec.json'))
+    _REAL = [
+        ('序盤のスピードが2.3%上昇', 'gear_rocket_start', 'speed', True),
+        ('中盤のパワーが2.1%上昇', 'gear_mid_acceleration', 'power', True),
+        ('終盤のパワーが1.9%上昇', 'gear_final_kick', 'power', True),
+        ('中盤開始後200mのスピードが1.8%上昇', 'gear_second_gear', 'speed', True),
+        ('20m以内にライバルがいる間、パワーが1.9%上昇', 'gear_duel_spirit', 'power', True),
+        ('スピードが常時1.7%上昇', 'charm_speed', 'speed', False),
+        ('パワーが常時4.9%上昇', 'charm_power', 'power', False),
+        ('スタミナ消費量が常時2.2%減少', None, 'stamina', False),
+        ('全ステータスが常時1.3%上昇', None, 'speed', False),
+    ]
+    _bad = []
+    for _d, _k, _stat, _discount in _REAL:
+        _m = oc.item_effect_spec(_d, _k, _spec5c)
+        _pct = oc._desc_pct(_d) if hasattr(oc, '_desc_pct') else None
+        if not _m or _stat not in _m or _m[_stat] <= 1.0:
+            _bad.append(_d)
+            continue
+        # 区間・条件限定は発動率で必ず割り引かれ、常時はそのまま乗ること
+        _raw = 1 + float(re.search(r'(\d+(?:\.\d+)?)%', _d).group(1)) / 100
+        if _discount and not (1.0 < _m[_stat] < _raw - 1e-9):
+            _bad.append(_d + '（割り引かれていない）')
+        if not _discount and abs(_m[_stat] - _raw) > 1e-9:
+            _bad.append(_d + '（常時なのに割り引かれた）')
+    check('P5c 交易所の効果文9パターンを正しく読める', not _bad, '; '.join(_bad) or '全件OK')
+    check('P5c パッシブの実は装備効果として扱わない（通常のパッシブ経路へ）',
+          oc.item_effect_spec('スタミナ不足による速度低下を20%軽減する。', None, _spec5c) is None)
+
     # --- P6: 貼り付けの balance= を読み、トークンは載っていないこと ---
     _txt = ('guild=1\nschedule_id=2\npool=400000\nbalance=3120000\n\n'
             '=== 出走馬一覧 ===\n'

@@ -191,11 +191,24 @@ def item_catalog(path):
                 if it.get('id') is not None and it['id'] not in e['ids']:
                     e['ids'].append(it['id'])      # 同じテンプレの個体は複数ある
                 for k in ('name', 'template_key', 'rarity', 'rarity_label', 'id',
-                          'stat_speed', 'stat_power', 'stat_stamina', 'item_type',
-                          'effect_key', 'effect_value', 'effect_description',
-                          'effect_label', 'passive_skill_key'):
+                          'item_type', 'effect_description', 'effect_label',
+                          'passive_skill_key'):
                     if it.get(k) is not None and e.get(k) is None:
                         e[k] = it[k]
+                # ⚠ 同じテンプレ・同じレアリティでも、ステータスも効果値も**個体ごとに違う**。
+                #   交易所の実例: 鉄の手甲[ノーマル] が「中盤加速2.1%」と「末脚1.9%」の2種類、
+                #   布のサッシュ[ノーマル] が PW+1/2.3% と ST+1/2.1%。
+                #   1件目で固定すると嘘のカタログになるので、観測された幅を持つ。
+                for k in ('stat_speed', 'stat_power', 'stat_stamina', 'effect_value'):
+                    v = it.get(k)
+                    if v is None:
+                        continue
+                    lo, hi = e.setdefault('range_' + k, [v, v])
+                    e['range_' + k] = [min(lo, v), max(hi, v)]
+                if it.get('effect_key'):
+                    e.setdefault('effect_keys', [])
+                    if it['effect_key'] not in e['effect_keys']:
+                        e['effect_keys'].append(it['effect_key'])
                 d = str(race.get('race_date') or '')
                 if d and d < str(e['first_seen'] or 'z'):
                     e['first_seen'] = d
@@ -376,21 +389,27 @@ def main():
         for k, v in sorted(cat.items(),
                            key=lambda kv: (kv[1].get('item_type') or kv[1]['slot'],
                                            kv[1].get('effect_key') or '', kv[0])):
-            st = '/'.join(f'{lab}+{v[key]}' for lab, key in
-                          (('SP', 'stat_speed'), ('PW', 'stat_power'), ('ST', 'stat_stamina'))
-                          if v.get(key)) or '-'
-            ev = v.get('effect_value')
+            def _rng(key, lab):
+                r = v.get('range_' + key)
+                if not r or not any(r):
+                    return None
+                return f'{lab}+{r[0]:g}' if r[0] == r[1] else f'{lab}+{r[0]:g}〜{r[1]:g}'
+            st = '/'.join(x for x in (_rng('stat_speed', 'SP'), _rng('stat_power', 'PW'),
+                                      _rng('stat_stamina', 'ST')) if x) or '-'
+            _er = v.get('range_effect_value') or [None, None]
+            ev = _er[0] if _er[0] == _er[1] else None
             print('%-10s %-22s %-8s %-10s %-22s %5s %5d %4d %s' % (
                 v.get('item_type') or v['slot'], v.get('name') or v.get('template_key') or k,
                 v.get('rarity_label') or v.get('rarity') or '', st,
-                v.get('effect_key') or '', ('%g' % ev) if ev is not None else '',
+                '/'.join(v.get('effect_keys') or []),
+                ('%g' % ev) if ev is not None
+                else ('%g〜%g' % tuple(_er) if _er[0] is not None else ''),
                 len(v.get('ids') or []), v['n'], v.get('first_seen') or ''))
             if v.get('effect_description'):
                 # ⚠ effect_value と説明文の%が食い違うものがある（実測: charm_balance は
                 #   effect_value=2.0 に対し説明は「全ステータスが常時1.1%上昇」）。
                 #   モデルは**説明文のほう**を使うので、食い違いは目印として出しておく。
                 pct = _desc_pct(v['effect_description'])
-                ev = v.get('effect_value')
                 warn = ''
                 if pct is not None and ev is not None and abs(pct - float(ev)) > 0.01:
                     warn = f'   ⚠ 効果値{ev}≠説明{pct}%（説明文を採用）'
