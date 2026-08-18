@@ -144,7 +144,7 @@ b.k{color:#1a1a2e}
   <div class="alt">
     <h4>📱 iPhone / iPad（Safari・Chrome 共通）</h4>
     <p>上のコードは1万文字以上あって iOS のブックマーク URL には入りません。
-    <b class="k">短縮版（302文字）</b>を使ってください。中身は GitHub から読み込むので、
+    <b class="k">短縮版（313文字）</b>を使ってください。中身は GitHub から読み込むので、
     <b>PC側で更新すれば iPhone 側は貼り直し不要</b>です。</p>
     <div style="position:relative;margin-bottom:.8rem">
       <div class="codebox" id="bm-lite" style="max-height:none"></div>
@@ -166,7 +166,7 @@ b.k{color:#1a1a2e}
       1口ずつ POST を送るので、iOS がタブを止めると<b>途中までしか買えていない状態</b>になります。
       その場合は残りを買い直せば済みますが、購入済みの分が二重にならないよう
       画面のログ（何口成功したか）を必ず確認してください。<br>
-      この短縮版は <b>GitHub の生ファイルを直接読む</b>ので、push すれば<b>次に開いた瞬間から新しい版</b>になります（CDNのキャッシュ待ちは不要。GitHub 側が読めないときだけ jsDelivr に落ちます）。
+      この短縮版は <b>GitHub の生ファイルを直接読み</b>、URL に毎回タイムスタンプを付けます。push すれば<b>次に開いた瞬間から新しい版</b>になり、<b>CDNのパージもブラウザのキャッシュ削除も要りません</b>（GitHub 側が読めないときだけ jsDelivr に落ちますが、そちらにも同じ細工をしています）。GitHub 側が読めないときだけ jsDelivr に落ちます）。
     </div>
   </div>
 </div>
@@ -178,7 +178,7 @@ document.getElementById('bm-code').textContent =
   document.querySelector('.bm-btn').getAttribute('href');
 // iOS 用の短縮版。本体は GitHub から読み込むのでブックマークに収まる。
 document.getElementById('bm-lite').textContent =
-  "javascript:fetch('https://raw.githubusercontent.com/footao/oasis-app/main/bookmarklets/src/buy.js?'+Date.now()).then(r=>r.text()).then(eval).catch(_=>{var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/gh/footao/oasis-app@main/bookmarklets/src/buy.js';document.body.appendChild(s)})";
+  "javascript:(t=>fetch('https://raw.githubusercontent.com/footao/oasis-app/main/bookmarklets/src/buy.js?'+t).then(r=>r.text()).then(eval).catch(_=>{var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/gh/footao/oasis-app@main/bookmarklets/src/buy.js?'+t;document.body.appendChild(s)}))(Date.now())";
 function copyTo(id, b){
   navigator.clipboard.writeText(document.getElementById(id).textContent).then(()=>{
     b.textContent='✓ 完了'; setTimeout(()=>b.textContent='コピー',2000);

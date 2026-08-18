@@ -1,0 +1,137 @@
+{
+ "comet_sash_1/normal": {
+  "effect_key": "gear_rocket_start",
+  "effect_value": 2.1,
+  "first_seen": "2026-08-17",
+  "id": 5,
+  "ids": [
+   5
+  ],
+  "item_type": "equipment",
+  "n": 1,
+  "rarity": "normal",
+  "slot": "equipment",
+  "stat_power": 0,
+  "stat_speed": 0,
+  "stat_stamina": 1,
+  "template_key": "comet_sash_1"
+ },
+ "endurance_armor_1/normal": {
+  "effect_description": "終盤のパワーが2%上昇",
+  "effect_key": "gear_final_kick",
+  "effect_label": "末脚",
+  "effect_value": 2.0,
+  "first_seen": "2026-08-18",
+  "id": 45,
+  "ids": [
+   45
+  ],
+  "item_type": "equipment",
+  "n": 2,
+  "name": "皮のアーマー",
+  "rarity": "normal",
+  "rarity_label": "ノーマル",
+  "slot": "equipment",
+  "stat_power": 0,
+  "stat_speed": 0,
+  "stat_stamina": 2,
+  "template_key": "endurance_armor_1"
+ },
+ "sun_medallion_3/rare": {
+  "effect_description": "スピードが常時4.4%上昇",
+  "effect_key": "charm_speed",
+  "effect_label": "俊足の加護",
+  "effect_value": 4.4,
+  "first_seen": "2026-08-17",
+  "id": 2,
+  "ids": [
+   2
+  ],
+  "item_type": "charm",
+  "n": 4,
+  "name": "太陽のメダリオン",
+  "rarity": "rare",
+  "rarity_label": "レア",
+  "slot": "charm",
+  "stat_power": 5,
+  "stat_speed": 0,
+  "stat_stamina": 0,
+  "template_key": "sun_medallion_3"
+ },
+ "wind_boots_3/rare": {
+  "effect_description": "中盤開始後200mのスピードが3.5%上昇",
+  "effect_key": "gear_second_gear",
+  "effect_label": "二の脚",
+  "effect_value": 3.5,
+  "first_seen": "2026-08-18",
+  "id": 46,
+  "ids": [
+   46
+  ],
+  "item_type": "equipment",
+  "n": 2,
+  "name": "疾風のブーツ",
+  "rarity": "rare",
+  "rarity_label": "レア",
+  "slot": "equipment",
+  "stat_power": 0,
+  "stat_speed": 5,
+  "stat_stamina": 0,
+  "template_key": "wind_boots_3"
+ },
+ "wind_talisman_1/normal": {
+  "effect_description": "スピードが常時2%上昇",
+  "effect_key": "charm_speed",
+  "effect_label": "俊足の加護",
+  "effect_value": 2.0,
+  "first_seen": "2026-08-18",
+  "id": 1,
+  "ids": [
+   1
+  ],
+  "item_type": "charm",
+  "n": 2,
+  "name": "小風のお守り",
+  "rarity": "normal",
+  "rarity_label": "ノーマル",
+  "slot": "charm",
+  "stat_power": 0,
+  "stat_speed": 1,
+  "stat_stamina": 0,
+  "template_key": "wind_talisman_1"
+ },
+ "wind_talisman_2/normal": {
+  "effect_key": "charm_balance",
+  "effect_value": 2.0,
+  "first_seen": "2026-08-17",
+  "id": 8,
+  "ids": [
+   8
+  ],
+  "item_type": "charm",
+  "n": 1,
+  "rarity": "normal",
+  "slot": "charm",
+  "stat_power": 0,
+  "stat_speed": 2,
+  "stat_stamina": 0,
+  "template_key": "wind_talisman_2"
+ },
+ "wing_helmet_2/normal": {
+  "effect_key": "gear_second_gear",
+  "effect_value": 2.4,
+  "first_seen": "2026-08-18",
+  "id": 37,
+  "ids": [
+   37
+  ],
+  "item_type": "equipment",
+  "n": 1,
+  "rarity": "normal",
+  "slot": "equipment",
+  "stat_power": 0,
+  "stat_speed": 3,
+  "stat_stamina": 0,
+  "template_key": "wing_helmet_2"
+ }
+}

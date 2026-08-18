@@ -137,6 +137,61 @@ def _at_race(r, key):
     return (b or 0) + (t or 0)
 
 
+def _pick_item(full, slim):
+    """装備オブジェクトを1つにまとめる。`name` を持つほう（by-id の完全形）を優先。
+
+    result API 側は {id, rarity, effect_key} しか返さないが、`id` はそちらにしか無いので
+    両方あるときは重ねる。片方しか無ければそれをそのまま使う。
+    """
+    if not isinstance(full, dict) or not full.get('name'):
+        full, slim = slim, full
+    if not isinstance(full, dict):
+        return full or slim or None
+    out = dict(full)
+    if isinstance(slim, dict):
+        for k, v in slim.items():
+            out.setdefault(k, v)
+    return out
+
+
+def item_catalog(path):
+    """races.jsonl を走査して、見つかった装備・お守りの一覧を作る。
+
+    アイテムは自分の仕様（stat_* / effect_key / effect_value / 説明）を丸ごと持っているので、
+    **カタログは貯めるものではなく、貯まったデータから引き出すもの**。
+    キーは template_key（無ければ名前）。同じテンプレでもレアリティで数値が変わるので、
+    レアリティごとに1件にする。
+    """
+    cat = {}
+    for line in open(path, encoding='utf-8'):
+        try:
+            race = json.loads(line)
+        except Exception:
+            continue
+        for h in race.get('horses') or []:
+            for slot in ('equipment', 'charm'):
+                it = h.get(slot)
+                if not isinstance(it, dict):
+                    continue
+                key = f"{it.get('template_key') or it.get('name') or it.get('id')}"
+                key = f"{key}/{it.get('rarity') or ''}"
+                e = cat.setdefault(key, {'slot': slot, 'n': 0, 'ids': [],
+                                         'first_seen': race.get('race_date')})
+                e['n'] += 1
+                if it.get('id') is not None and it['id'] not in e['ids']:
+                    e['ids'].append(it['id'])      # 同じテンプレの個体は複数ある
+                for k in ('name', 'template_key', 'rarity', 'rarity_label', 'id',
+                          'stat_speed', 'stat_power', 'stat_stamina', 'item_type',
+                          'effect_key', 'effect_value', 'effect_description',
+                          'effect_label', 'passive_skill_key'):
+                    if it.get(k) is not None and e.get(k) is None:
+                        e[k] = it[k]
+                d = str(race.get('race_date') or '')
+                if d and d < str(e['first_seen'] or 'z'):
+                    e['first_seen'] = d
+    return cat
+
+
 def merge_horse(h, r):
     """by-id の1頭 `h` と result の1頭 `r` を1行にまとめる。
 
@@ -173,7 +228,11 @@ def merge_horse(h, r):
         # （2枠目は後から生えるので、古いレースでは当時1枠が正しい）。
         'passive_skills_now': prev if prev != ps else None,
         'initial_activated_passives': r.get('initial_activated_passives'),
-        'equipment': r.get('equipment'), 'charm': r.get('charm'),
+        # ⚠ result API の装備は {id, rarity, effect_key} だけの**簡略形**。
+        #   by-id は name / stat_* / effect_value / effect_description まで入った**完全形**。
+        #   名前や倍率が要るので完全形（name を持つほう）を優先し、両方あれば併合する。
+        'equipment': _pick_item(h.get('equipment'), r.get('equipment')),
+        'charm': _pick_item(h.get('charm'), r.get('charm')),
         'initial_activated_charms': r.get('initial_activated_charms'),
         'odds': h.get('odds'),
         'rank': r.get('rank'), 'score': r.get('score'),
@@ -267,8 +326,8 @@ def fetch_race(guild, user, sid):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--guild', required=True)
-    ap.add_argument('--user', required=True)
+    ap.add_argument('--guild', default=None)
+    ap.add_argument('--user', default=None)
     ap.add_argument('--from', dest='start', type=int, default=None,
                     help='ここから schedule_id を遡る（--forward なら進む）。'
                          '--forward で省略すると「既に取った最大ID+1」から始める')
@@ -280,10 +339,50 @@ def main():
     ap.add_argument('--sleep', type=float, default=0.4, help='1レースごとの待ち（秒）')
     ap.add_argument('--stop-after-misses', type=int, default=20,
                     help='欠番（--forward では未確定も）がこれだけ続いたら打ち切り')
+    ap.add_argument('--items', action='store_true',
+                    help='採取済みの races.jsonl から装備・お守りの一覧を作って '
+                         '--item-out に書き出す（APIは叩かない）')
+    ap.add_argument('--item-out', default='item_spec.json',
+                    help='--items の出力先')
     ap.add_argument('--refresh', action='store_true',
                     help='新規取得はせず、既存の races.jsonl を result API で採り直して'
                          'レース当時のステータス（base_*+train_*）に入れ替える')
     a = ap.parse_args()
+
+    if not a.items and not (a.guild and a.user):
+        print('[NG] --guild と --user が要ります（--items のときだけ省略できます）')
+        return 1
+
+    if a.items:
+        cat = item_catalog(a.out)
+        if not cat:
+            print(f'{a.out} に装備・お守りは1件もありませんでした。')
+            return 0
+        with open(a.item_out, 'w', encoding='utf-8') as f:
+            json.dump(cat, f, ensure_ascii=False, indent=1, sort_keys=True)
+        print(f'{len(cat)} 種類を {a.item_out} に書きました。\n')
+        hdr = ('枠', 'テンプレ', 'レア', 'ステ補正', '効果キー', '値', '個体', '頭', '初出')
+        print('%-10s %-22s %-8s %-10s %-22s %5s %5s %4s %s' % hdr)
+        for k, v in sorted(cat.items(),
+                           key=lambda kv: (kv[1].get('item_type') or kv[1]['slot'],
+                                           kv[1].get('effect_key') or '', kv[0])):
+            st = '/'.join(f'{lab}+{v[key]}' for lab, key in
+                          (('SP', 'stat_speed'), ('PW', 'stat_power'), ('ST', 'stat_stamina'))
+                          if v.get(key)) or '-'
+            ev = v.get('effect_value')
+            print('%-10s %-22s %-8s %-10s %-22s %5s %5d %4d %s' % (
+                v.get('item_type') or v['slot'], v.get('name') or v.get('template_key') or k,
+                v.get('rarity_label') or v.get('rarity') or '', st,
+                v.get('effect_key') or '', ('%g' % ev) if ev is not None else '',
+                len(v.get('ids') or []), v['n'], v.get('first_seen') or ''))
+            if v.get('effect_description'):
+                print('    └ ' + v['effect_description'])
+        n_named = sum(1 for v in cat.values() if v.get('name'))
+        if n_named < len(cat):
+            print(f'\n※ 日本語名が付いているのは {n_named}/{len(cat)} 種類です。'
+                  '名前・効果説明は by-id 側にしか無いので、')
+            print('  この先の日次採取（--forward）で装備した馬を拾うたびに埋まります。')
+        return 0
 
     if a.refresh:
         return refresh(a.guild, a.user, a.out)
