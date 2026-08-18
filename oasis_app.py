@@ -7,6 +7,7 @@ oasis_app.py — Oasis 安定運用予測ツール v2（2026/07/27 大型アプ�
 """
 import hashlib
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -115,7 +116,7 @@ st.set_page_config(page_title="Oasis 予測 v2", page_icon="🐎", layout="wide"
 #  片方だけ更新すると「AttributeError（内容は伏せられます）」になって
 #  原因が分からなくなるので、起動時に分かる形で止める。
 # ---------------------------------------------------------------
-REQUIRED_CORE = "3.7.4"
+REQUIRED_CORE = "3.8.0"
 _NEEDED = [
     "CORE_VERSION", "WIN_MAX_TOTAL_UNITS", "WIN_STAKE_UNIT", "UNBET_ODDS",
     "MAX_TOTAL_UNITS", "SIGMA_SAFETY", "DIST_LIST", "TRACK_LIST",
@@ -418,8 +419,22 @@ with st.sidebar:
 
     st.divider()
     st.subheader("2) 安定運用パラメータ")
+    # ブックマークレットが出す `balance=` を資金にそのまま使う。
+    # 上書きするのは**値が変わったときだけ**なので、貼り付け後に手で直した額は保持される。
+    # （毎回上書きすると、手で入れた額が再実行のたびに戻ってしまう）
+    _bm = re.search(r'^balance=(\d+)', st.session_state.get("race_input", "") or "", re.M)
+    _bal = int(_bm.group(1)) if _bm else None
+    if _bal is not None and st.session_state.get("bankroll_seen") != _bal:
+        st.session_state["bankroll_v"] = _bal
+        st.session_state["bankroll_seen"] = _bal
+    st.session_state.setdefault("bankroll_v", 1_200_000)
     bankroll = st.number_input("手元資金 BANKROLL (rrc)", min_value=10000,
-                               value=1_200_000, step=50_000)
+                               step=50_000, key="bankroll_v",
+                               help="貼り付けデータに balance= があれば自動で入ります。"
+                                    "手で変えた値は、次に残高が動くまで保持されます。")
+    if _bal is not None:
+        st.caption(f"💰 貼り付けの残高 {_bal:,} rrc を反映済み"
+                   + ("" if _bal == bankroll else f"（現在は手動で {bankroll:,} rrc）"))
     kelly = st.slider("分数ケリー", 0.05, 1.0, 0.25, 0.05,
                       help="0.25=クォーターケリー。小さいほど低分散・低成長。")
     risk = st.slider("1レース上限（資金比）", 0.02, 0.30, 0.10, 0.01)
@@ -427,8 +442,8 @@ with st.sidebar:
     st.caption(f"→ 1レース上限 ≒ {int(risk*bankroll//oc.STAKE_UNIT)}口"
                f"（{int(risk*bankroll):,} rrc / 3連単は最大 {oc.MAX_TOTAL_UNITS}口）")
 
-    st.markdown("**未成立スリーブ（任意）**")
-    sleeve_on = st.checkbox("未成立組も少額で買う", value=False,
+    st.markdown("**未成立スリーブ（既定でON）**")
+    sleeve_on = st.checkbox("未成立組も少額で買う", value=True,
                             help="市場が張っていない組に各1口。当たれば全プール総取り"
                                  "（2026/08/16 確認済み）。実効オッズ=(プール+1口)/1口 なので、"
                                  "誰も買っていない薄いプールほど跳ねる。高EVだが高分散。")

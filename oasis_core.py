@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.7.4'
+CORE_VERSION = '3.8.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -1847,7 +1847,7 @@ def parse_unified(text, spec=None):
     pm = re.search(r'^pool=(\d+)', text, re.M)
     if pm:
         pool = int(pm.group(1))
-    for key in ('win_pool', 'win_pool_before', 'win_pool_delta', 'win_pool_n',
+    for key in ('balance', 'win_pool', 'win_pool_before', 'win_pool_delta', 'win_pool_n',
                 'win_pool_spread', 'win_pool_err', 'win_own', 'win_pool_min',
                 'win_pool_exact'):
         m = re.search(rf'^{key}=([0-9.]+)', text, re.M)
@@ -2574,6 +2574,13 @@ def analyze(raw_text, bundle, settings=None):
 
     n = len(horses)
     res['n_field'] = n
+    _bal = ((horses[0].get('_meta') or {}).get('balance') if horses else None)
+    if _bal:
+        res['balance'] = float(_bal)
+        if abs(float(_bal) - float(s['bankroll'])) > 1:
+            res['messages'].append(
+                f'⚠ 貼り付けの所持金 {int(_bal):,} rrc と資金設定 {int(s["bankroll"]):,} rrc が'
+                '違います。口数は資金設定のほうで計算しています。')
     _ik = ((horses[0].get('_meta') or {}).get('item_effects_skipped') if horses else None)
     if _ik:
         res['messages'].append(

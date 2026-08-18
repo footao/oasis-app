@@ -500,6 +500,22 @@ def regression_tests():
     check('P5 「常時」を挟んだ説明文をパースできる',
           (oc.spec_from_description('スピードが常時4.4%上昇') or {}).get('mult') == {'speed': 1.044},
           str((oc.spec_from_description('スピードが常時4.4%上昇') or {}).get('mult')))
+    # --- P6: 貼り付けの balance= を読み、トークンは載っていないこと ---
+    _txt = ('guild=1\nschedule_id=2\npool=400000\nbalance=3120000\n\n'
+            '=== 出走馬一覧 ===\n'
+            'レース距離,馬場,地面,馬名,成体種,SPEED,POWER,STAMINA,コンディション,'
+            'パッシブスキル1,パッシブスキル2,単勝オッズ,自分の購入額\n'
+            'マイル,芝,,あ,a,100,50,50,普通,,,1.5,0\n')
+    _h6, *_ = oc.parse_unified(_txt)
+    check('P6 貼り付けの所持金 balance= を読める',
+          (_h6[0].get('_meta') or {}).get('balance') == 3120000.0,
+          str((_h6[0].get('_meta') or {}).get('balance')))
+    check('P6 token は出力に載せない設計（bm.js に token 出力が無い）',
+          'token' not in open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                           'bookmarklets', 'src', 'bm.js'),
+                              encoding='utf-8').read().split('const clip=[')[1],
+          '出力組み立て部に token 参照なし')
+
     # --- P5b: 区間限定の装備効果は effect_key から実測 duty を引くこと ---
     #   実測装備 gear_second_gear「中盤開始後200mのスピードが2.4%上昇」。
     #   説明文だけだと「中盤 → 1/3」と読めて 1.008 になるが、二の脚の実測 duty は 0.128。

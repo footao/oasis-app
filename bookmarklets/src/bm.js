@@ -2,6 +2,8 @@
 const B='https://api.oasis.red';
 const q=new URLSearchParams(location.search);
 const G=q.get('guild'), S=q.get('race')||q.get('schedule_id'), U=q.get('user');
+// 残高の取得にだけ使う。**トークンは出力に一切載せない**（貼り付け先に漏れるため）。
+const T=q.get('token');
 if(!G||!S){alert('おあしすっち券購入ページで実行してください');return;}
 const btn=document.createElement('div');
 Object.assign(btn.style,{position:'fixed',top:'12px',right:'12px',zIndex:'99999',background:'#1a1a2e',color:'#e2b96f',padding:'10px 18px',borderRadius:'8px',fontFamily:'sans-serif',fontSize:'14px',fontWeight:'600',boxShadow:'0 4px 12px rgba(0,0,0,.4)',border:'1px solid #e2b96f'});
@@ -145,7 +147,13 @@ try{
  btn.textContent='🏇 プール取得中...';
  let poolAmt=0;
  try{poolAmt=(await(await fetch(`${B}/api/trifecta/pool?guild=${G}&schedule_id=${S}`)).json()).pool||0;}catch{}
+ // 所持金。ケリー計算の資金として使うので取れるときだけ出す。
+ let bal=null;
+ if(T){try{const d=await(await fetch(
+   `${B}/api/balance?user=${U}&guild=${G}&race=${S}&token=${encodeURIComponent(T)}`)).json();
+   if(typeof d.balance==='number')bal=d.balance;}catch{}}
  const clip=[`guild=${G}`,`schedule_id=${S}`,`pool=${poolAmt}`,
+   ...(bal==null?[]:[`balance=${bal}`]),
    ...(failed.length?[`取得失敗=${failed.length}`]:[]),'',
    '=== 出走馬一覧 ===',horseHeader,...horseRows,'',
    '=== パッシブ効果 ===','パッシブ,コード,説明',...effRows,'',
@@ -169,7 +177,8 @@ try{
      ({name:h.displayName,speed:h.speed,base:h.base_speed,bonus:h.item_bonus})));}
  if(unknown.size)console.warn('Oasis: 辞書に無いパッシブコード:',[...unknown]);
  const n2=pets.filter(h=>h.p1&&h.p2).length;
- const stat=`${n}頭(2枠${n2}) | スキル${effRows.length}種 | 3連単${withOdds.length}件(${cut}/${total}点取得) | プール${poolAmt.toLocaleString()}rrc`;
+ const stat=`${n}頭(2枠${n2}) | スキル${effRows.length}種 | 3連単${withOdds.length}件(${cut}/${total}点取得) | プール${poolAmt.toLocaleString()}rrc`
+   +(bal==null?'':` | 残高${bal.toLocaleString()}rrc`);
  const bad=unknown.size||failed.length||geared.length||mismatch.length;
  btn.style.background=failed.length?'#b71c1c':(unknown.size?'#e65100':'#1b5e20');btn.style.color='#fff';
  btn.style.borderColor=failed.length?'#ef5350':(unknown.size?'#ff9800':'#4caf50');
