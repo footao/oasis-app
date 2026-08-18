@@ -49,6 +49,9 @@ try{
  const iname=x=>(x&&x.name)?x.name:'';
  const ieff=x=>(x&&(x.effect_label||x.effect_description))
    ?`${x.effect_label||''}：${x.effect_description||''}`:'';
+ // effect_key は効果の正体（gear_/charm_ を外すとパッシブのコード）。
+ // 説明文だけだと「中盤 → 1/3」と読める区間限定効果の**実測 duty** を引くのに要る。
+ const ikey=x=>(x&&x.effect_key)?x.effect_key:'';
  const ibs=h=>{const b=h.item_bonus||{};
    return [['SP',b.speed],['PW',b.power],['ST',b.stamina]]
      .filter(([,v])=>v).map(([k,v])=>k+(v>0?'+':'')+v).join('/');};
@@ -58,18 +61,19 @@ try{
  pets.forEach(h=>[[h.equipment,'装備'],[h.charm,'お守り']].forEach(([x,slot])=>{
    if(!x||!x.name||itemSeen.has(slot+x.name))return;
    itemSeen.add(slot+x.name);
-   itemRows.push([slot,x.name,x.rarity_label||x.rarity||'',
+   itemRows.push([slot,x.name,x.template_key||'',x.rarity_label||x.rarity||'',
      [['SP',x.stat_speed],['PW',x.stat_power],['ST',x.stat_stamina]]
        .filter(([,v])=>Number(v)).map(([k,v])=>`${k}+${v}`).join('/'),
-     x.effect_label||'',x.effect_description||''].map(csv).join(','));
+     x.effect_label||'',x.effect_description||'',
+     x.effect_key||'',(x.effect_value==null?'':x.effect_value)].map(csv).join(','));
  }));
  // 表示ステータス ≠ ベース+補正 なら、補正の入り方が想定と違う（要調査）
  const mismatch=pets.filter(h=>h.base_speed!=null&&
    (h.speed!==h.base_speed+((h.item_bonus||{}).speed||0)
     ||h.power!==h.base_power+((h.item_bonus||{}).power||0)
     ||h.stamina!==h.base_stamina+((h.item_bonus||{}).stamina||0)));
- const horseHeader='レース距離,馬場,地面,馬名,成体種,SPEED,POWER,STAMINA,コンディション,パッシブスキル1,パッシブスキル2,単勝オッズ,自分の購入額,装備,装備効果,お守り,お守り効果,アイテム補正,素SPEED,素POWER,素STAMINA';
- const horseRows=pets.map(h=>[dist,surf,ground,h.displayName,h.adult_key||'',h.speed,h.power,h.stamina,h.condition_label,(h.p1?h.p1.label:''),(h.p2?h.p2.label:''),h.odds,(h.my_amount||0),iname(h.equipment),ieff(h.equipment),iname(h.charm),ieff(h.charm),ibs(h),(h.base_speed==null?'':h.base_speed),(h.base_power==null?'':h.base_power),(h.base_stamina==null?'':h.base_stamina)].map(csv).join(','));
+ const horseHeader='レース距離,馬場,地面,馬名,成体種,SPEED,POWER,STAMINA,コンディション,パッシブスキル1,パッシブスキル2,単勝オッズ,自分の購入額,装備,装備効果,装備効果キー,お守り,お守り効果,お守り効果キー,アイテム補正,素SPEED,素POWER,素STAMINA';
+ const horseRows=pets.map(h=>[dist,surf,ground,h.displayName,h.adult_key||'',h.speed,h.power,h.stamina,h.condition_label,(h.p1?h.p1.label:''),(h.p2?h.p2.label:''),h.odds,(h.my_amount||0),iname(h.equipment),ieff(h.equipment),ikey(h.equipment),iname(h.charm),ieff(h.charm),ikey(h.charm),ibs(h),(h.base_speed==null?'':h.base_speed),(h.base_power==null?'':h.base_power),(h.base_stamina==null?'':h.base_stamina)].map(csv).join(','));
  const n=pets.length, total=n*(n-1)*(n-2);
  // ---- 打ち切り条件のためにプールを先に見る ----
  // 表示オッズは (プール総額 − 初期プール金20万) 基準なので 賭け金[組]=BASE/オッズ。
@@ -145,7 +149,7 @@ try{
    ...(failed.length?[`取得失敗=${failed.length}`]:[]),'',
    '=== 出走馬一覧 ===',horseHeader,...horseRows,'',
    '=== パッシブ効果 ===','パッシブ,コード,説明',...effRows,'',
-   ...(itemRows.length?['=== 装備効果 ===','枠,名前,レアリティ,ステータス補正,効果名,説明',
+   ...(itemRows.length?['=== 装備効果 ===','枠,名前,テンプレ,レアリティ,ステータス補正,効果名,説明,効果キー,効果値',
      ...itemRows,'']:[]),
    '=== 3連単オッズ ===','順位,1着,2着,3着,オッズ',
    ...withOdds.map((r,i)=>`${i+1},${csv(r.first)},${csv(r.second)},${csv(r.third)},${r.odds}`),

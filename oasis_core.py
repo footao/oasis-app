@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.7.3'
+CORE_VERSION = '3.7.4'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -1723,31 +1723,55 @@ _PASSIVE_COLS2 = [('パッシブスキル1', 'パッシブスキル2'), ('パッ
                   ('スキル1', 'スキル2'), ('passive_skill', 'passive_skill_2')]
 
 
-_ITEM_EFFECT_COLS = [('装備効果', '装備'), ('お守り効果', 'お守り')]
+_ITEM_EFFECT_COLS = [('装備効果', '装備', '装備効果キー'), ('お守り効果', 'お守り', 'お守り効果キー')]
 
 
-def item_mults_from_row(r, cols):
-    """装備・お守りの効果説明 → (常時倍率, 反映できなかった説明)。
+def item_effect_spec(desc, effect_key=None, spec=None):
+    """装備・お守りの効果 → 発動率まで織り込んだ倍率。読めなければ None。
+
+    倍率の**大きさ**は説明文から、**発動する範囲（scope / duty）は effect_key から**取る。
+    実測した装備:
+      charm_speed       「スピードが常時4.4%上昇」          → 常時
+      gear_second_gear  「中盤開始後200mのスピードが2.4%上昇」→ パッシブ『二の脚』と同じ範囲
+    説明文だけだと後者は「中盤 = 1/3」と読めてしまうが、二の脚の実測 duty は 0.128。
+    `gear_` / `charm_` を外したものがパッシブのコードなら、そちらの scope と duty を使う。
+    """
+    sp = spec_from_description(desc or '')
+    if not sp or not sp.get('mult'):
+        return None
+    duty, scope = float(sp.get('duty', 1.0)), sp.get('scope', 'always')
+    key = str(effect_key or '').strip()
+    if key:
+        code = re.sub(r'^(?:gear|charm|item)_', '', key)
+        base = (spec or {}).get(passive_from_code(code) or '')
+        if base:
+            scope, duty = base.get('scope', scope), float(base.get('duty', duty))
+    # 出走メンバーや距離に依存する範囲は、この場では判定できないので採用しない
+    if scope in ('aptitude', 'same_species', 'variance'):
+        return None
+    return {k: 1.0 + (float(m) - 1.0) * duty for k, m in sp['mult'].items()}
+
+
+def item_mults_from_row(r, cols, spec=None):
+    """貼り付け1行の装備・お守り → (倍率, 反映できなかった説明)。
 
     購入ページが「表示値＝個体値＋特訓＋装備品。**倍率・条件スキルはレース中に適用**」と
     書いているとおり、貼り付けの SPEED/POWER/STAMINA には**加算ぶんしか入っていない**。
     倍率はここで別に掛ける（実測: お守り「太陽のメダリオン」は PW+5 が表示値に入る一方、
     効果「スピードが常時4.4%上昇」は入っていない）。
-
-    常時以外（区間限定・条件付き）は発動率が読めないので**掛けずに警告へ回す**。
-    掛け忘れより、勝手な発動率で盛るほうが危険なため。
     """
     mult, skipped = {}, []
-    for col, slot in _ITEM_EFFECT_COLS:
+    for col, slot, keycol in _ITEM_EFFECT_COLS:
         if col not in cols:
             continue
         v = str(r.get(col, '') or '').strip()
         if not v or v in ('nan', 'None'):
             continue
-        sp = spec_from_description(v.split('：', 1)[-1])
-        if sp and sp.get('mult') and sp.get('scope') == 'always':
-            for k, m in sp['mult'].items():
-                mult[k] = mult.get(k, 1.0) * float(m)
+        kv = str(r.get(keycol, '') or '').strip() if keycol in cols else ''
+        m = item_effect_spec(v.split('：', 1)[-1], kv, spec)
+        if m:
+            for k, x in m.items():
+                mult[k] = mult.get(k, 1.0) * float(x)
         else:
             skipped.append(f'{slot}「{v}」')
     return mult, skipped
@@ -1800,10 +1824,13 @@ def parse_passive_effect_section(text):
     return out
 
 
-def parse_unified(text):
+def parse_unified(text, spec=None):
     """統合フォーマット（ブックマークレット出力）を解析。
     -> (horses, trifecta_odds, dist, track, ground, guild, schedule_id, pool, n_tri_total)
+
+    spec は装備効果の発動率（duty）を引くのに使う。省略時は既定スペック。
     """
+    spec = spec or default_spec()
     horses, odds = [], {}
     dist = track = ground = guild = schedule_id = None
     pool = None
@@ -1862,7 +1889,7 @@ def parse_unified(text):
             spc = str(r.get('成体種', r.get('adult_key', '')) or '').strip()
             mine = pd.to_numeric(r.get('自分の購入額', r.get('my_amount', np.nan)),
                                  errors='coerce')
-            _im, _isk = item_mults_from_row(r, cols)
+            _im, _isk = item_mults_from_row(r, cols, spec)
             item_skipped += _isk
             horses.append({
                 'my_amount': (float(mine) if pd.notna(mine) else None),
@@ -2493,9 +2520,11 @@ def analyze(raw_text, bundle, settings=None):
     csv_odds = None
     n_tri_total = 0
 
+    _spec = (bundle or {}).get('spec') or default_spec()
+
     if '出走馬一覧' in raw_text:
         (horses, csv_odds, a_dist, a_track, a_ground,
-         guild, schedule_id, clip_pool, n_tri_total) = parse_unified(raw_text)
+         guild, schedule_id, clip_pool, n_tri_total) = parse_unified(raw_text, _spec)
         res['auto_race_info'] = bool(a_dist and a_track)
         # ベットログのレースIDに使う。schedule_id にしておくと、精算時に
         # 結果APIから着順と最終オッズを自動で引ける（settle_bets.py）。

@@ -489,15 +489,32 @@ def regression_tests():
     check('P5 常時倍率の装備効果を実効ステータスに掛ける',
           abs(_by['い']['speed'] - 104.4) < 1e-9 and _by['あ']['speed'] == 100,
           f"あ={_by['あ']['speed']} / い={_by['い']['speed']}")
-    check('P5 条件付きの装備効果は勝手に掛けない（発動率が読めない）',
-          _by['う']['speed'] == 100 and _by['う']['power'] == 50 and not _by['う'].get('item_mult'),
-          f"う SP={_by['う']['speed']} PW={_by['う']['power']}")
-    check('P5 反映しなかった装備効果を警告として残す',
-          bool((_by['あ'].get('_meta') or {}).get('item_effects_skipped')),
-          str((_by['あ'].get('_meta') or {}).get('item_effects_skipped')))
+    # 条件付きは**発動率で割り引いて**掛ける（パッシブと同じ扱い）。
+    # 満額で掛けると条件付き装備を過大評価するので、そこが崩れていないかを見る。
+    check('P5 条件付きの装備効果は発動率で割り引く（満額で掛けない）',
+          50.0 < _by['う']['power'] < 50 * 1.06 - 1e-9,
+          f"う PW={_by['う']['power']:.3f}（満額なら53.0）")
+    check('P5 出走メンバー依存など判定できない効果は掛けずに警告に回す',
+          not oc.item_effect_spec('同じ成体種が出場している場合、全ステータスが20%上昇する。',
+                                  None, oc.default_spec()))
     check('P5 「常時」を挟んだ説明文をパースできる',
           (oc.spec_from_description('スピードが常時4.4%上昇') or {}).get('mult') == {'speed': 1.044},
           str((oc.spec_from_description('スピードが常時4.4%上昇') or {}).get('mult')))
+    # --- P5b: 区間限定の装備効果は effect_key から実測 duty を引くこと ---
+    #   実測装備 gear_second_gear「中盤開始後200mのスピードが2.4%上昇」。
+    #   説明文だけだと「中盤 → 1/3」と読めて 1.008 になるが、二の脚の実測 duty は 0.128。
+    _spec5 = oc.load_passive_spec(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'passive_spec.json'))
+    _e1 = oc.item_effect_spec('中盤開始後200mのスピードが2.4%上昇', 'gear_second_gear', _spec5)
+    _e2 = oc.item_effect_spec('中盤開始後200mのスピードが2.4%上昇', None, _spec5)
+    check('P5b 区間限定の装備は effect_key の実測dutyで割り引く',
+          abs(_e1['speed'] - (1 + 0.024 * _spec5['二の脚']['duty'])) < 1e-9
+          and _e1['speed'] < _e2['speed'],
+          f"key有り {_e1['speed']:.5f} / key無し {_e2['speed']:.5f}")
+    check('P5b 常時の装備は割り引かない',
+          oc.item_effect_spec('スピードが常時4.4%上昇', 'charm_speed',
+                              _spec5) == {'speed': 1.044})
+
     check('P5 「残りスタミナが20%以下」を倍率と誤読しない',
           (oc.spec_from_description(
               '残りスタミナが20%以下になったとき、一度だけ最大スタミナの6%を回復する。')
