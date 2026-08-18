@@ -1995,6 +1995,13 @@ INV_SUM_SANE = (0.5, 1.10)
 ASSUME_POOL_IS_PAYOUT = False
 
 
+# 開催者がこのバグを直したら **False にするだけ**で補正が止まる。
+# 直ったあとも補正を掛け続けると払戻を過大評価して、エッジの無いところに張ってしまう
+# （逆に、直っていないのに False にすると買い控えるだけなので、迷ったら False が安全側）。
+# 「総取り」のほうは仕様なので、こちらとは無関係に有効なまま。
+TRIFECTA_SEED_BUG_ACTIVE = True
+
+
 def true_trifecta_odds(od, pool, seed=TRIFECTA_POOL_SEED):
     """表示オッズ → 実際に払い戻されるオッズ。
 
@@ -2847,7 +2854,7 @@ def analyze(raw_text, bundle, settings=None):
     # Σ(1/od) を見るキャリーオーバー判定だけは**補正前**の値でないと二重計上になるので、
     # 元の値を csv_odds_raw に取っておく。
     csv_odds_raw = dict(csv_odds) if csv_odds else {}
-    if csv_odds and P_total > TRIFECTA_POOL_SEED:
+    if csv_odds and P_total > TRIFECTA_POOL_SEED and TRIFECTA_SEED_BUG_ACTIVE:
         _f = P_total / (P_total - TRIFECTA_POOL_SEED)
         csv_odds = {k: true_trifecta_odds(v, P_total) for k, v in csv_odds.items()}
         res['odds_fix_ratio'] = _f          # 画面表示との食い違いを UI で説明するため
