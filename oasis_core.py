@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.8.0'
+CORE_VERSION = '3.8.1'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -2552,6 +2552,18 @@ def analyze(raw_text, bundle, settings=None):
                 res['messages'].append(f'プール総額: {P_total:,} rrc（APIから取得）')
             elif err:
                 res['messages'].append('⚠ ' + err)
+        # 誰も買っていないと表示は 0 だが、実際には初期プール金が入っている。
+        # 1口入った瞬間に 0 → 21万 に飛ぶ（＝0 のときも 20万 は存在している）。
+        # ここを 0 のままにすると未成立スリーブの実効オッズが (0+1口)/1口 = 1.0 になり、
+        # **本当は21倍で最も美味しい場面を「価値なし」と判定**してしまう。
+        if P_total == 0 and TRIFECTA_SEED_BUG_ACTIVE:
+            P_total = TRIFECTA_POOL_SEED
+            res['pool_msgs'].append(
+                f'プール表示が 0 なので初期プール金 {TRIFECTA_POOL_SEED:,} rrc を'
+                'プール総額として扱います（表示は1口入るまで 0 のまま、'
+                f'入った瞬間に {TRIFECTA_POOL_SEED + STAKE_UNIT:,} に飛ぶため）。'
+                f'未成立に1口置いた場合の実効オッズは '
+                f'{(TRIFECTA_POOL_SEED + STAKE_UNIT) / STAKE_UNIT:.0f}倍です。')
     else:
         horses = parse_betting_screen(raw_text)
         res['auto_race_info'] = False
@@ -2888,7 +2900,10 @@ def analyze(raw_text, bundle, settings=None):
             return odds_exact[nm]
         return odds_bare.get(tuple(bare(x) for x in nm))
 
-    if csv_odds:
+    # オッズが1件も無くても、未成立スリーブだけは検討する。
+    # 誰も買っていない＝全組が未成立＝当たれば初期プール金を総取りできる場面で、
+    # ここを素通りすると**いちばん美味しいレースだけ何も出さない**ことになる。
+    if csv_odds or (s.get('unformed_sleeve') and P_total > 0):
         lam = float(s.get('model_weight', 0.7))
         min_p = float(s.get('min_prob', 0.003))
         # 市場の暗黙確率（成立組のみ・正規化）。q_i = (1/od_i)/Σ(1/od)。

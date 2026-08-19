@@ -534,6 +534,26 @@ def regression_tests():
     check('P5c パッシブの実は装備効果として扱わない（通常のパッシブ経路へ）',
           oc.item_effect_spec('スタミナ不足による速度低下を20%軽減する。', None, _spec5c) is None)
 
+    # --- P7: プール表示が 0 のときも初期プール金を実在扱いすること ---
+    #   誰も買っていないと表示は 0 だが実際は 20万 入っており、1口入った瞬間に 21万 に飛ぶ。
+    #   0 のまま扱うと未成立スリーブの実効オッズが 1.0 になり、**いちばん美味しい場面**
+    #   （当たれば初期プール金を総取り）を「価値なし」と判定して何も出さなくなる。
+    _hdr7 = ('レース距離,馬場,地面,馬名,成体種,SPEED,POWER,STAMINA,コンディション,'
+             'パッシブスキル1,パッシブスキル2,単勝オッズ,自分の購入額')
+    _rows7 = '\n'.join(
+        'マイル,芝,,馬%d,a%d,%d,50,48,普通,スピードスター,マイル得意,1.5,0' % (i, i, 150 - i * 3)
+        for i in range(9))
+    _t7 = 'guild=1\nschedule_id=9\npool=0\n\n=== 出走馬一覧 ===\n%s\n%s\n' % (_hdr7, _rows7)
+    _b7 = oc.train_model('logg')
+    _r7 = oc.analyze(_t7, _b7, {'dist': 'マイル', 'track': '芝',
+                                'unformed_sleeve': True, 'bankroll': 3_000_000})
+    _sl = [x for x in (_r7.get('alloc_rows') or []) if x.get('flag') == '未']
+    check('P7 プール0でも初期プール金をプール総額として扱う',
+          _r7.get('pool') == oc.TRIFECTA_POOL_SEED, f"pool={_r7.get('pool')}")
+    check('P7 プール0でも未成立スリーブを出す（実効21倍）',
+          bool(_sl) and abs((_sl[0].get('eff_od') or 0) - 21.0) < 1e-6,
+          f"{len(_sl)}点 / 実効od={_sl[0].get('eff_od') if _sl else None}")
+
     # --- P6: 貼り付けの balance= を読み、トークンは載っていないこと ---
     _txt = ('guild=1\nschedule_id=2\npool=400000\nbalance=3120000\n\n'
             '=== 出走馬一覧 ===\n'
