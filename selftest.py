@@ -574,6 +574,34 @@ def regression_tests():
           bool(_sl) and abs((_sl[0].get('eff_od') or 0) - 21.0) < 1e-6,
           f"{len(_sl)}点 / 実効od={_sl[0].get('eff_od') if _sl else None}")
 
+    # --- P9: 分散低減のお守り（安定の加護）を σ に落とすこと ---
+    #   「レース中の乱数幅を1.9%狭める」はステータス倍率ではないので _pct_mults では拾えず、
+    #   放置すると**常時発動なのに丸ごと無視**される。σ 側（安定感と同じ扱い）に入れる。
+    _sp9 = oc.load_passive_spec(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'passive_spec.json'))
+    check('P9 「乱数幅をN%狭める」を σ 倍率として読む',
+          oc.item_effect_spec('レース中の乱数幅を1.9%狭める', 'charm_consistency', _sp9)
+          == {'_sigma': 0.981})
+    check('P9 σ倍率はステータスには一切効かない',
+          not {k for k in (oc.item_effect_spec('レース中の乱数幅を1.9%狭める', None, _sp9) or {})
+               if k in ('speed', 'power', 'stamina')})
+    _hdr9 = ('レース距離,馬場,地面,馬名,成体種,SPEED,POWER,STAMINA,コンディション,'
+             'パッシブスキル1,パッシブスキル2,単勝オッズ,自分の購入額,装備,装備効果,'
+             '装備効果キー,お守り,お守り効果,お守り効果キー')
+    _row9 = ('長距離,芝,,あ,a,100,100,100,普通,,,1.5,0,,,,'
+             '星見のコンパス,安定の加護：レース中の乱数幅を1.9%狭める,charm_consistency\n'
+             '長距離,芝,,い,b,100,100,100,普通,,,1.5,0,,,,,,\n')
+    _h9, *_ = oc.parse_unified('=== 出走馬一覧 ===\n' + _hdr9 + '\n' + _row9)
+    _by9 = {x['name']: x for x in _h9}
+    check('P9 お守りの σ 倍率が馬に乗る（ステータスは変わらない）',
+          abs(_by9['あ']['item_sigma_mult'] - 0.981) < 1e-9
+          and _by9['あ']['speed'] == 100 and _by9['あ']['power'] == 100
+          and _by9['い'].get('item_sigma_mult', 1.0) == 1.0,
+          f"あ σ×{_by9['あ']['item_sigma_mult']} / い σ×{_by9['い'].get('item_sigma_mult', 1.0)}")
+    _sg = oc.horse_sigmas({'spec': _sp9}, [_by9['あ'], _by9['い']], 0.01)
+    check('P9 σ が実際に下がる（安定感と同じ経路）',
+          _sg[0] < _sg[1], f'{_sg[0]:.6f} < {_sg[1]:.6f}')
+
     # --- P6: 貼り付けの balance= を読み、トークンは載っていないこと ---
     _txt = ('guild=1\nschedule_id=2\npool=400000\nbalance=3120000\n\n'
             '=== 出走馬一覧 ===\n'

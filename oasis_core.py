@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.8.2'
+CORE_VERSION = '3.8.3'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -434,8 +434,10 @@ def spec_from_description(desc):
         return None
     d = str(desc).strip()
 
-    # --- ばらつき低減系（安定感など）---
-    if re.search(r'ばらつき|ブレ', d) and not _PCT_RE.search(d):
+    # --- ばらつき低減系（パッシブ『安定感』、お守り『安定の加護』など）---
+    # 実物: 「レース中の乱数幅を1.9%狭める」（charm_consistency・常時発動）。
+    # ステータス倍率ではないので _pct_mults では拾えず、ここで σ 側に落とす。
+    if re.search(r'ばらつき|ブレ|乱数幅', d) and not _PCT_RE.search(d):
         m = re.search(r'約?(半分|\d+(?:\.\d+)?[%％])', d)
         sg = 0.5
         if m and m.group(1) not in ('半分',):
@@ -621,11 +623,14 @@ def effective_stats(speed, power, stamina, passives, dist, track, spec, ctx=None
     return v
 
 
-def sigma_multiplier(passives, spec, variance_share=VARIANCE_SHARE):
+def sigma_multiplier(passives, spec, variance_share=VARIANCE_SHARE, extra_mult=1.0):
     """安定感のような分散低減スキルによる σ の倍率。
     σ全体のうち variance_share だけが『ゲーム側のランダム性』とみなし、そこにだけ効かせる
-    （残りはモデルの推定誤差なのでスキルでは減らない）。"""
-    m = 1.0
+    （残りはモデルの推定誤差なのでスキルでは減らない）。
+
+    extra_mult: パッシブ以外の分散低減（お守り『安定の加護』など）の倍率。
+    """
+    m = float(extra_mult or 1.0)
     for p in (passives or ()):
         sp = spec.get(p)
         if sp:
@@ -1554,7 +1559,8 @@ def predict_base(bundle, horses, dist, track):
 def horse_sigmas(bundle, horses, sigma):
     """馬ごとの σ（安定感などの分散低減スキルを反映）。"""
     spec = bundle.get('spec') or default_spec()
-    return np.array([sigma * sigma_multiplier(h.get('passives', ()), spec)
+    return np.array([sigma * sigma_multiplier(h.get('passives', ()), spec,
+                                              extra_mult=h.get('item_sigma_mult', 1.0))
                      for h in horses], dtype=float)
 
 
@@ -1783,7 +1789,14 @@ def item_effect_spec(desc, effect_key=None, spec=None):
     `gear_` / `charm_` を外したものがパッシブのコードなら、そちらの scope と duty を使う。
     """
     sp = spec_from_description(desc or '')
-    if not sp or not sp.get('mult'):
+    if not sp:
+        return None
+    # 分散低減（お守り『安定の加護』など）はステータス倍率ではなく σ に効く。
+    # `_sigma` キーで返し、呼び出し側が σ の計算にだけ使う。
+    if sp.get('scope') == 'variance':
+        sg = float(sp.get('sigma_mult', 1.0))
+        return {'_sigma': sg} if sg != 1.0 else None
+    if not sp.get('mult'):
         return None
     duty, scope = float(sp.get('duty', 1.0)), sp.get('scope', 'always')
     key = str(effect_key or '').strip()
@@ -1807,6 +1820,7 @@ def item_mults_from_row(r, cols, spec=None):
     効果「スピードが常時4.4%上昇」は入っていない）。
     """
     mult, skipped = {}, []
+    mult['_sigma'] = 1.0
     for col, slot, keycol in _ITEM_EFFECT_COLS:
         if col not in cols:
             continue
@@ -1820,6 +1834,8 @@ def item_mults_from_row(r, cols, spec=None):
                 mult[k] = mult.get(k, 1.0) * float(x)
         else:
             skipped.append(f'{slot}「{v}」')
+    if mult.get('_sigma', 1.0) == 1.0:
+        mult.pop('_sigma', None)
     return mult, skipped
 
 
@@ -1945,7 +1961,8 @@ def parse_unified(text, spec=None):
                 'speed': int(sp) * _im.get('speed', 1.0),
                 'power': int(pw) * _im.get('power', 1.0),
                 'stamina': int(st) * _im.get('stamina', 1.0),
-                'item_mult': (_im or None),
+                'item_sigma_mult': _im.get('_sigma', 1.0),
+                'item_mult': ({k: v for k, v in _im.items() if k != '_sigma'} or None),
                 'condition': str(r.get('コンディション', '普通')).strip(),
                 'passives': _passives_from_row(r, cols),
                 'odds': float(win_odds) if pd.notna(win_odds) else float('nan'),
