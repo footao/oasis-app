@@ -11,22 +11,20 @@
 **timeline を保存するのが harvest.js との最大の違い。**
 スタミナ切れの挙動はここにしか無く、モデル改修にはこのデータが要る。
 
-【重要】**ステータスは result API から取ること**（2026/08/17 判明）
-`race/by-id` は「今」の値を返すので、過去のレースを採るとレース当時ではなく現在の値が
-付いてくる（予測精度が古さに比例して落ちる: 08-14 のレース 0.957 → 07-28 は 0.660）。
+【重要】**ステータスは当日採取のものしか使えない**（2026/08/19 訂正）
+`race/by-id` も `race/result` の `base_* + train_*` も、返ってくるのは**そのペットの「今」**。
+`logg`（Discordの結果告知＝当時の値）と突き合わせると、不一致率がレースの古さに
+比例して上がる: 直近週 6.2% → 8週前 33.2%。当時の値ならこの傾斜は出ない。
 
-だが `race/result` は **レース当時の値**を base_* + train_* に分けて返していた。
-実測（sid 1825 / 2026-08-01 の はなこ）:
-    result : power 48+70=118, stamina 50+29=79   ← レース当時
-    by-id  : power 110,        stamina 84         ← 今（特訓やり直しで再配分された）
-passive_skills / equipment / charm / initial_activated_passives も当時の値。
+  ・使ってよい（採取日に関係なく正しい）:
+      timeline / 着順 / score / 距離 / 馬場 / simulation_version /
+      **passive_skills**（logg との不一致 1.3%）/ equipment / charm
+  ・当日採取したものだけ使ってよい: speed / power / stamina / コンディション
 
-したがって
-  ・使ってよい: base_*+train_* / passive_skills / equipment / charm /
-                timeline / 着順 / score / 距離 / 馬場 / simulation_version
-  ・当時の値が無い: **コンディション（好調/不調）だけ**。result に無く by-id は「今」。
-                    コンディションが要る解析は `logg/`（Discordログ）を使うこと。
-古い行（`stats_at_race` が無いもの）は `--refresh` で当時の値に直せる。
+ステータスが要る解析は `logg/`（Discordログ）を使うこと。
+`races.jsonl` を学習に混ぜると**精度が落ちる**（8分割CVで実測:
+logg のみ スピアマン 0.941 / 1着 92.1% → races.jsonl のみ 0.921 / 84.3%）。
+
 
 再実行すると既に取った schedule_id は飛ばすので、毎日追記していける。
 
@@ -57,6 +55,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+import oasis_core as oc
 
 API = 'https://api.oasis.red'
 UA = 'oasis-harvest/1.0'
@@ -93,15 +93,17 @@ def load_done(path):
 
 
 def is_fresh(race):
-    """この行のステータス（SP/PW/ST・パッシブ）が当時の値か。
+    """この行のステータス（SP/PW/ST）が当時の値か。**開催日に採ったものだけ信用する。**
 
-    `stats_at_race` が立っていれば result API 由来＝**採取日に関係なく当時の値**。
-    無ければ旧方式（by-id＝「今」の値）なので、開催日と採取日が同じときだけ信用する。
-    `--refresh` を一度回せば全行が前者になる。
+    ⚠ 2026/08/19 訂正: `result` API の `base_* + train_*` は当時の値**ではない**。
+      `logg`（Discordの結果告知＝当時の値で確定）と突き合わせると、不一致率が
+      レースの古さに比例して上がる（直近週 6.2% → 8週前 33.2%）。当時の値なら
+      古さに関係なく一定のはずで、これは「今」の値を返しているサイン。
+      `stats_at_race`（base/train が取れたか）は**鮮度の保証にならない**ので使わない。
+
+    ○ 一方 `passive_skills` は当時の値で正しい（logg との不一致 1.3%）。
+      パッシブが要るだけの解析なら `need_stats=False` で全行使ってよい。
     """
-    hs = race.get('horses') or []
-    if hs and all(h.get('stats_at_race') for h in hs):
-        return True
     h = race.get('harvested_at')
     return bool(h) and str(h) == str(race.get('race_date'))
 
@@ -111,17 +113,24 @@ def load_races(path, need_stats, quiet=False):
 
     need_stats=False は timeline / 着順 / score だけ使う用途（これらは常に正しい）。
     """
-    rows, stale = [], 0
+    rows, stale, excluded = [], 0, 0
     with open(path, encoding='utf-8') as f:
         for line in f:
             try:
                 r = json.loads(line)
             except Exception:
                 continue
+            # 結果が壊れているレースは oasis_core 側の一覧で一元管理する
+            if oc.is_excluded_race(r.get('schedule_id'), r.get('race_date'),
+                                   r.get('race_time')):
+                excluded += 1
+                continue
             if need_stats and not is_fresh(r):
                 stale += 1
                 continue
             rows.append(r)
+    if excluded and not quiet:
+        print(f'【除外】結果が壊れているレース {excluded}件 を外しました（EXCLUDED_RACES）。')
     if stale and not quiet:
         print(f'【注意】ステータスが当てにならない {stale}レースを除外しました'
               f'（レース後日に採取したもの）。残り {len(rows)}レース。')

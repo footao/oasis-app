@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.8.1'
+CORE_VERSION = '3.8.2'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -776,6 +776,37 @@ def _iter_log_files(log_path):
     return [p] if os.path.exists(p) else []
 
 
+# 結果が壊れているレースは学習にも解析にも使わない（運営告知など）。
+# `schedule_id`（int）でも '日付 時刻'（'2026-08-19 12:00'）でも書ける。
+# Discordログ側には schedule_id が無いので、両方書いておくと確実に外れる。
+EXCLUDED_RACES = {
+    2037, '2026-08-19 12:00',   # 中距離13頭。結果がバグと運営告知（2026/08/19）
+}
+
+
+def _race_time_key(date, time):
+    """'2026/08/19' + '12:00' → '2026-08-19 12:00'。片方でも無ければ None。"""
+    if not date or not time:
+        return None
+    d = str(date).strip().replace('/', '-')
+    t = str(time).strip()[:5]
+    if len(t) == 4:                      # '9:00' → '09:00'
+        t = '0' + t
+    return f'{d} {t}'
+
+
+def is_excluded_race(schedule_id=None, date=None, time=None):
+    """このレースを学習・解析から外すか。"""
+    if schedule_id is not None:
+        try:
+            if int(schedule_id) in EXCLUDED_RACES:
+                return True
+        except (TypeError, ValueError):
+            pass
+    k = _race_time_key(date, time)
+    return bool(k and k in EXCLUDED_RACES)
+
+
 def parse_race_log(log_path=None, texts=None):
     """ログ（ファイル/フォルダ/グロブ、または文字列のリスト）→ 1行1頭の DataFrame。"""
     all_rows, all_entries = [], {}
@@ -856,6 +887,17 @@ def parse_race_log(log_path=None, texts=None):
             df = df[~df['race_key'].isin(drop_keys)].reset_index(drop=True)
 
         df.attrs['n_duplicates'] = before - len(df)
+
+        # --- (3) 結果が壊れているレースを外す ---
+        # race_key は 'YYYY/MM/DD HH:MM 第NR' 形式。時刻が取れない行はそのまま残す。
+        _rk = df['race_key'].astype(str).str.extract(r'^(\d{4}/\d{2}/\d{2})\s+(\d{1,2}:\d{2})')
+        _ex = pd.Series(
+            [is_excluded_race(date=d, time=t) for d, t in zip(_rk[0], _rk[1])], index=df.index)
+        if _ex.any():
+            df.attrs['n_excluded_races'] = int(df.loc[_ex, 'race_key'].nunique())
+            df.attrs['excluded_races'] = sorted(df.loc[_ex, 'race_key'].unique().tolist())
+            df = df[~_ex].reset_index(drop=True)
+
         df['n_field'] = df.groupby('race_key')['score'].transform('size')
         df['_d'] = pd.to_datetime(df['date'], format='%Y/%m/%d', errors='coerce')
         # 日付が拾えなかった行（'????'）は学習フィルタで無言で消えるので数えておく
@@ -1094,6 +1136,10 @@ def train_model(log_path=None, sigma_override=None, train_from=DEFAULT_TRAIN_FRO
                 'messages': ['ログを解析できませんでした（中身を確認してください）。'
                              'Discordエクスポートの .txt をそのまま指定してください。']}
 
+    n_ex = int(df_all.attrs.get('n_excluded_races', 0) or 0)
+    if n_ex:
+        msgs.append(f'ℹ 結果が壊れているレース {n_ex}件 を学習から除外しました: '
+                    + ', '.join(map(str, df_all.attrs.get('excluded_races', [])[:4])))
     n_dup_races = int(df_all.attrs.get('n_dup_races', 0) or 0)
     if n_dup_races:
         msgs.append(

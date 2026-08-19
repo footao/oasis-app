@@ -534,6 +534,26 @@ def regression_tests():
     check('P5c パッシブの実は装備効果として扱わない（通常のパッシブ経路へ）',
           oc.item_effect_spec('スタミナ不足による速度低下を20%軽減する。', None, _spec5c) is None)
 
+    # --- P8: 結果が壊れているレースを学習から外すこと ---
+    #   Discordログ側には schedule_id が無いので「日付＋時刻」でも外れる必要がある。
+    _bad = sorted(EX for EX in oc.EXCLUDED_RACES if isinstance(EX, str))
+    check('P8 除外リストが日付+時刻でも schedule_id でも効く',
+          oc.is_excluded_race(2037) and oc.is_excluded_race(date='2026/08/19', time='12:00')
+          and oc.is_excluded_race(date='2026-08-19', time='12:00'),
+          f'登録: {_bad}')
+    check('P8 別の日・別の時刻は外さない',
+          not oc.is_excluded_race(date='2026/08/18', time='12:00')
+          and not oc.is_excluded_race(date='2026/08/19', time='15:00')
+          and not oc.is_excluded_race())
+    # ログ本文からの除外（race_key 'YYYY/MM/DD HH:MM 第NR' 経由）
+    _A = [(f'除外馬{i}', 100 + i, 90 + i, 80 + i) for i in range(4)]
+    _keep = _discord_race(1, _A, date='2026/08/19', time='15:00')
+    _drop = _discord_race(2, _A, date='2026/08/19', time='12:00')
+    _d8 = oc.parse_race_log(texts=[_keep + '\n' + _drop])
+    check('P8 壊れたレースだけログから落ちる',
+          _d8['race_key'].nunique() == 1 and '12:00' not in ''.join(_d8['race_key'].unique()),
+          f"残り {list(_d8['race_key'].unique())}")
+
     # --- P7: プール表示が 0 のときも初期プール金を実在扱いすること ---
     #   誰も買っていないと表示は 0 だが実際は 20万 入っており、1口入った瞬間に 21万 に飛ぶ。
     #   0 のまま扱うと未成立スリーブの実効オッズが 1.0 になり、**いちばん美味しい場面**
