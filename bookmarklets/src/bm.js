@@ -107,7 +107,13 @@ try{
  // DevTools → ネットワーク → Protocol 列が h2 なら上げる意味がある。
  const PAR=20;
  const queue=combos.slice(), results=[], failed=[]; let seenAmt=0, cut=0;
- while(queue.length){
+ // プール表示が 0 ＝ 誰も1口も買っていない ＝ **全組が未成立**。
+ // 取りに行っても全部 null が返るだけなので、1リクエストも投げない
+ // （14頭なら 2,184回、16頭なら 3,360回まるごと不要）。
+ // queue を空にせず残すことで、下の rest がそのまま全組を未成立として出す。
+ const noBets = !(pool0 > 0);
+ if(noBets) btn.textContent=`🏇 プール0 → 全${combos.length}通り未成立。オッズ取得を省略`;
+ while(!noBets && queue.length){
    const batch=queue.splice(0,PAR);
    const got=await Promise.all(batch.map(async([a,b,x])=>{
      const u=`${B}/api/trifecta/odds?guild=${G}&schedule_id=${S}&first=${a.pet_id}&second=${b.pet_id}&third=${x.pet_id}`;
@@ -177,7 +183,9 @@ try{
      ({name:h.displayName,speed:h.speed,base:h.base_speed,bonus:h.item_bonus})));}
  if(unknown.size)console.warn('Oasis: 辞書に無いパッシブコード:',[...unknown]);
  const n2=pets.filter(h=>h.p1&&h.p2).length;
- const stat=`${n}頭(2枠${n2}) | スキル${effRows.length}種 | 3連単${withOdds.length}件(${cut}/${total}点取得) | プール${poolAmt.toLocaleString()}rrc`
+ const stat=`${n}頭(2枠${n2}) | スキル${effRows.length}種 | 3連単${withOdds.length}件`
+   +(noBets?`(プール0のため取得省略)`:`(${cut}/${total}点取得)`)
+   +` | プール${poolAmt.toLocaleString()}rrc`
    +(bal==null?'':` | 残高${bal.toLocaleString()}rrc`);
  const bad=unknown.size||failed.length||geared.length||mismatch.length;
  btn.style.background=failed.length?'#b71c1c':(unknown.size?'#e65100':'#1b5e20');btn.style.color='#fff';
