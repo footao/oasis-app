@@ -116,7 +116,7 @@ st.set_page_config(page_title="Oasis 予測 v2", page_icon="🐎", layout="wide"
 #  片方だけ更新すると「AttributeError（内容は伏せられます）」になって
 #  原因が分からなくなるので、起動時に分かる形で止める。
 # ---------------------------------------------------------------
-REQUIRED_CORE = "3.8.3"
+REQUIRED_CORE = "3.9.0"
 _NEEDED = [
     "CORE_VERSION", "WIN_MAX_TOTAL_UNITS", "WIN_STAKE_UNIT", "UNBET_ODDS",
     "MAX_TOTAL_UNITS", "SIGMA_SAFETY", "DIST_LIST", "TRACK_LIST",
@@ -379,7 +379,7 @@ with st.sidebar:
              "ロングショット（大穴）の確率を過大評価して偽の+EVを量産します。"
              "資金を守る安全弁は分数ケリーと下の『モデル信頼度』です。")
     model_weight = st.slider(
-        "モデル信頼度 λ", 0.3, 1.0, 0.7, 0.05,
+        "モデル信頼度 λ", 0.3, 1.0, 1.0, 0.05,
         help="EV計算で使う確率 = λ×モデル + (1−λ)×市場。"
              "モデルと市場が食い違うとき、食い違いの一部は必ずモデル側の誤差です。"
              "λ=1（モデル全信頼）は、その誤差にそのまま賭けることを意味します。"
@@ -447,7 +447,7 @@ with st.sidebar:
                             help="市場が張っていない組に各1口。当たれば全プール総取り"
                                  "（2026/08/16 確認済み）。実効オッズ=(プール+1口)/1口 なので、"
                                  "誰も買っていない薄いプールほど跳ねる。高EVだが高分散。")
-    sleeve_units = st.radio("未成立の最大口数", [3, 4, 5], index=2, horizontal=True,
+    sleeve_units = st.radio("未成立の最大口数", [3, 4, 5, 6, 8, 10], index=5, horizontal=True,
                             disabled=not sleeve_on)
     sleeve_pmin = st.slider("未成立の的中率下限", 0.01, 0.20, 0.05, 0.01, disabled=not sleeve_on)
 

@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.8.3'
+CORE_VERSION = '3.9.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -2561,14 +2561,14 @@ DEFAULT_SETTINGS = dict(
     dist='中距離', track='芝', ground='良', topn=20,
     bankroll=1_200_000, kelly_fraction=0.25, max_risk_frac=0.10, edge_min=0.10,
     carryover_rrc=None, csv_path='',
-    unformed_sleeve=False, unformed_max_units=5,
+    unformed_sleeve=False, unformed_max_units=10,
     unformed_p_min=0.05, unformed_edge_min=0.30,
     win_bets=False, win_edge_min=0.15,
     n_sim=N_SIM, spec_path=None,
     # モデル確率をどこまで信じるか。EV計算では p_bet = λ×モデル + (1−λ)×市場 を使う。
     # モデルと市場が食い違うとき、食い違いの一部は必ずモデル側の誤差なので、
     # λ=1（モデル全信頼）はそのまま「モデルの誤差に賭ける」ことになる。
-    model_weight=0.7,
+    model_weight=1.0,
     # モデル的中率がこれ未満の組は買わない。モンテカルロの試行数に対して確率が小さすぎる
     # 組は推定ノイズが支配的で、「偽の+EV」のほぼ全てがこの領域から出る。
     min_prob=0.003,
@@ -2851,7 +2851,7 @@ def analyze(raw_text, bundle, settings=None):
                 '取りに行ける他人のお金が少ないので、控えめに。')
     if s.get('win_bets') and mkt_p is not None and res['win_pool'] and not others_ok:
         res['win_pool_mode'] = '実測プール（自分の掛け金が大半のため推奨なし）'
-    lam_w = float(s.get('model_weight', 0.7))
+    lam_w = float(s.get('model_weight', 1.0))
     win_p_bet = (lam_w * win_p + (1 - lam_w) * mkt_p) if mkt_p is not None else lam_w * win_p
     if s.get('win_bets') and mkt_p is not None and res['win_pool'] and others_ok:
         my_units = [int((h.get('my_amount') or 0) // win_unit) for h in horses]
@@ -2967,7 +2967,7 @@ def analyze(raw_text, bundle, settings=None):
     # 誰も買っていない＝全組が未成立＝当たれば初期プール金を総取りできる場面で、
     # ここを素通りすると**いちばん美味しいレースだけ何も出さない**ことになる。
     if csv_odds or (s.get('unformed_sleeve') and P_total > 0):
-        lam = float(s.get('model_weight', 0.7))
+        lam = float(s.get('model_weight', 1.0))
         min_p = float(s.get('min_prob', 0.003))
         # 市場の暗黙確率（成立組のみ・正規化）。q_i = (1/od_i)/Σ(1/od)。
         # **補正前のオッズを使うこと。** 補正後は全オッズが _f 倍されるので
@@ -3065,7 +3065,7 @@ def analyze(raw_text, bundle, settings=None):
                 combo_prob, disp, od_of, P_total,
                 p_min=s.get('unformed_p_min', 0.05),
                 edge_min=s.get('unformed_edge_min', 0.30),
-                max_units=s.get('unformed_max_units', 5),
+                max_units=s.get('unformed_max_units', 10),
                 remaining_budget=min(MAX_TOTAL_UNITS, risk_units_cap) - total_units,
                 p_scale=lam)
             for names, p, eff_od, k in sleeve:
@@ -3121,7 +3121,7 @@ def analyze(raw_text, bundle, settings=None):
         if P_total > 0:
             P_c = (P_total / od) if od else 0.0
             eff = (P_total + STAKE_UNIT) / (P_c + STAKE_UNIT)
-            lam_r = float(s.get('model_weight', 0.7))
+            lam_r = float(s.get('model_weight', 1.0))
             if csv_odds and od:
                 # ここも補正前のオッズで正規化する（上の inv_norm と同じ理由）
                 _fx = float(res.get('odds_fix_ratio', 1.0) or 1.0)
