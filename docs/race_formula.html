@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<title>おあしすっち レース計算式 早見表</title>
+<style>
+@page { size: A4; margin: 14mm 12mm; }
+body { font-family:"Noto Sans CJK JP","IPAGothic",sans-serif; font-size:9.2pt; line-height:1.45; color:#1a1a1a; margin:0; }
+h1 { font-size:17pt; margin:0 0 2mm; border-bottom:2.5px solid #2b5c8a; padding-bottom:2mm; }
+h2 { font-size:11.5pt; margin:6mm 0 2mm; color:#2b5c8a; border-left:4px solid #2b5c8a; padding-left:2.5mm; }
+h3 { font-size:9.8pt; margin:3.5mm 0 1.5mm; color:#444; }
+.sub { color:#666; font-size:8.2pt; margin-bottom:3mm; }
+table { border-collapse:collapse; width:100%; margin:1.5mm 0 3mm; font-size:8.3pt; }
+th,td { border:1px solid #c8cdd4; padding:1.3mm 1.8mm; text-align:left; vertical-align:top; }
+th { background:#eef2f7; font-weight:600; }
+td.n, th.n { text-align:right; font-variant-numeric:tabular-nums; }
+tr:nth-child(even) td { background:#fafbfc; }
+.f { background:#f4f7fa; border:1px solid #c8cdd4; border-left:4px solid #2b5c8a; padding:2mm 3mm; margin:2mm 0 3mm; font-family:"DejaVu Sans Mono",monospace; font-size:8.2pt; white-space:pre-wrap; line-height:1.6; }
+.note { font-size:7.8pt; color:#555; margin:-1mm 0 3mm; }
+.warn { background:#fff6e8; border-left:4px solid #d08a1a; padding:2mm 3mm; font-size:8.2pt; margin:2mm 0 3mm; }
+.tag { display:inline-block; background:#2b5c8a; color:#fff; padding:0.3mm 1.6mm; border-radius:2px; font-size:7.2pt; vertical-align:1px; }
+.g { color:#777; }
+.pb { page-break-before:always; }
+.two { display:flex; gap:4mm; }
+.two > div { flex:1; }
+footer { margin-top:5mm; border-top:1px solid #ccc; padding-top:2mm; font-size:7.4pt; color:#777; }
+</style></head><body>
+
+<h1>おあしすっち レース計算式 早見表</h1>
+<div class="sub">ゲーム内部の着順スコア式（result API の timeline から逆解析・実測）／ 2026-08-21 時点 ・ oasis_core.py v3.9.0 準拠<br>
+検証: simulation_version = 2 ／ 2026-08-20 のビジュアル更新後も式・スキーマとも変更なしを確認（392頭）<br>2026-08-21 改訂: §8 コンディションを訂正（乗算ではない）</div>
+
+<h2>1. 全体の流れ</h2>
+<div class="f">① 実効ステータス = 素ステータス × コンディション × Σパッシブ倍率 × Σ装備・お守り倍率
+② レート     = 定数 × Σ<sub>区間</sub> Σ<sub>stat</sub>( 区間重み[区間][stat] × 距離バランス[距離][stat] × 実効stat ) × 疲労補正
+③ スタミナ   = floor(実効スタミナ) − Σ(100mごとの消費)
+④ 疲労補正   = f(スタミナ収支)   収支 = 持ちスタミナ − 必要スタミナ
+⑤ 最終スコア = レート系の積算（タイム基準・2026/07/28 のパッチ以降）
+⑥ 実効ステータスにはレースごとに ±1.5% の乱数が乗る</div>
+
+<h2>2. 区間重み（stat の配分）</h2>
+<table><tr><th>区間</th><th class="n">SPEED</th><th class="n">POWER</th><th class="n">STAMINA</th><th>備考</th></tr>
+<tr><td>序盤</td><td class="n">0.60</td><td class="n">0.30</td><td class="n">0.10</td><td>スタミナ消費量の計算にもこの重みを使う</td></tr>
+<tr><td>中盤</td><td class="n">0.45</td><td class="n">0.20</td><td class="n">0.35</td><td></td></tr>
+<tr><td>終盤</td><td class="n">0.35</td><td class="n">0.35</td><td class="n">0.30</td><td>SPEEDとPOWERが同率</td></tr>
+<tr><th>合計</th><th class="n">1.40</th><th class="n">0.85</th><th class="n">0.75</th><td></td></tr>
+</table>
+
+<h2>3. 距離バランス（距離ごとの倍率）</h2>
+<table><tr><th>距離</th><th class="n">SPEED</th><th class="n">POWER</th><th class="n">STAMINA</th><th>実効重み SP:PW:ST<span class="g">（区間重み合計と掛けたもの）</span></th></tr>
+<tr><td>短距離</td><td class="n">1.4</td><td class="n">0.8</td><td class="n">0.5</td><td>1.00 : 0.35 : 0.19 &nbsp;<span class="g">← SPEED一極</span></td></tr>
+<tr><td>マイル</td><td class="n">1.0</td><td class="n">1.0</td><td class="n">1.0</td><td>1.00 : 0.61 : 0.54</td></tr>
+<tr><td>中距離</td><td class="n">0.9</td><td class="n">1.3</td><td class="n">1.3</td><td>1.00 : 0.88 : 0.77 &nbsp;<span class="g">← 一番バランス型</span></td></tr>
+<tr><td>長距離</td><td class="n">0.6</td><td class="n">1.0</td><td class="n">1.4</td><td>1.00 : 1.01 : 1.25 &nbsp;<span class="g">← STAMINAが最重要</span></td></tr>
+</table>
+<div class="note">※ 「実効重み」＝ 距離バランス × 区間重み合計 を SPEED=1 に正規化した値。どのステータスに振るべきかはこの比で判断する。</div>
+
+<h2>4. スタミナ消費の法則</h2>
+<div class="f">消費/100m  = clamp( c[距離] × ( 実効SP×0.60×bal[0] + 実効PW×0.30×bal[1] + 実効ST×0.10×bal[2] ), 下限, 上限 )
+必要スタミナ = 消費/100m × 区間数
+不足 = max(0, 必要 − 持ち)     余り = max(0, 持ち − 必要)</div>
+<table><tr><th>距離</th><th class="n">c</th><th class="n">下限</th><th class="n">上限</th><th class="n">区間数</th><th class="n">必要ST の幅</th><th>実務上の目安</th></tr>
+<tr><td>短距離</td><td class="n">0.01320</td><td class="n">2.125</td><td class="n">2.879</td><td class="n">10</td><td class="n">21〜29</td><td>287頭中1頭しか不足しない＝<b>ST投資は無駄</b></td></tr>
+<tr><td>マイル</td><td class="n">0.01970</td><td class="n">2.234</td><td class="n">3.067</td><td class="n">15</td><td class="n">34〜46</td><td>クランプ張り付き多数。46あれば確実</td></tr>
+<tr><td>中距離</td><td class="n">0.03065</td><td class="n">2.541</td><td class="n">3.737</td><td class="n">20</td><td class="n">51〜75</td><td>速い馬ほど上限に張り付く</td></tr>
+<tr><td>長距離</td><td class="n">0.04109</td><td class="n">2.570</td><td class="n">3.680</td><td class="n">25</td><td class="n">64〜92</td><td>87で息切れ消滅／93〜95が最良／96+は余剰</td></tr>
+</table>
+<div class="warn"><b>速いほど消費が増える。</b> 消費は「実効ステータスの一次式」なので、SPEEDを上げるとスタミナ切れが早まる。レートが上限に当たると消費も上限に張り付く。<br>
+実例: レート207.9で最速だった馬が必要46に対し持ち43で −3.0 → <b>自分の速さでスタミナ切れを起こして3着</b>。</div>
+
+<h2>5. 疲労補正（スタミナ収支 → 速度倍率）</h2>
+<table><tr><th class="n">収支（持ち − 必要）</th><th class="n">−10以下</th><th class="n">−5</th><th class="n">−3</th><th class="n">−1</th><th class="n">±0</th><th class="n">+5</th><th class="n">+15</th><th class="n">+25以上</th></tr>
+<tr><td>疲労補正（平均）</td><td class="n">0.840</td><td class="n">0.941</td><td class="n">0.979</td><td class="n">0.999</td><td class="n">1.002</td><td class="n">1.007</td><td class="n">1.023</td><td class="n">1.027</td></tr>
+<tr><td>レース中の最低値</td><td class="n">0.650</td><td class="n">0.650</td><td class="n">0.760</td><td class="n">0.964</td><td class="n">1.001</td><td class="n">1.002</td><td class="n">1.014</td><td class="n">1.018</td></tr>
+</table>
+<div class="note">上限 <b>1.030</b>／下限 <b>0.650</b>（実測 392頭でも同じ範囲を確認）。timeline 21,040点で収支との相関 +0.762。<br>
+<b>非対称</b>: 余りは +3% までしか伸びないが、不足は −35% まで落ちる。−3で−2%、−5で−6%、それ以下は下限に張り付く。</div>
+
+<div class="pb"></div>
+<h2>6. パッシブスキル 全35種</h2>
+<h3>6-a. ステータス系（常時）</h3>
+<table><tr><th>スキル</th><th>効果</th><th>実効倍率</th></tr>
+<tr><td>スピードスター</td><td>SP +35% / ST −10%</td><td>SP×1.35, ST×0.90</td></tr>
+<tr><td>脳筋</td><td>PW +35% / SP −10%</td><td>PW×1.35, SP×0.90</td></tr>
+<tr><td>マイペース</td><td>ST +35% / PW −10%</td><td>ST×1.35, PW×0.90</td></tr>
+<tr><td>器用貧乏</td><td>全ステータス +5%</td><td>×1.05</td></tr>
+<tr><td>スピード／パワー／スタミナ 大アップ</td><td>該当stat +25%</td><td>×1.25</td></tr>
+<tr><td>スピード／パワー／スタミナ 小アップ</td><td>該当stat +15%</td><td>×1.15</td></tr>
+<tr><td>勝負師</td><td>開始時5%の確率で全stat +25%</td><td>×1.0125 <span class="g">(duty 0.05)</span></td></tr>
+<tr><td>同族嫌悪</td><td>同じ成体種が出走時 全stat +20%</td><td>×1.20 <span class="g">（顔ぶれ依存）</span></td></tr>
+<tr><td>セカンドウインド</td><td>中盤開始時に最大STの8%回復</td><td>ST×1.08</td></tr>
+<tr><td>省エネ走法</td><td>ST消費 −8%</td><td>ST×1.08</td></tr>
+</table>
+
+<h3>6-b. 適性系（距離・馬場が一致した時のみ）</h3>
+<table><tr><th>スキル</th><th>条件</th><th>倍率</th><th>スキル</th><th>条件</th><th>倍率</th></tr>
+<tr><td>芝得意</td><td>芝</td><td>全stat ×1.10</td><td>短距離得意</td><td>短距離</td><td>全stat ×1.15</td></tr>
+<tr><td>ダート得意</td><td>ダート</td><td>全stat ×1.10</td><td>マイル得意</td><td>マイル</td><td>全stat ×1.15</td></tr>
+<tr><td colspan="3"><span class="g">不一致なら倍率1.0（＝完全に無効）</span></td><td>中距離得意</td><td>中距離</td><td>全stat ×1.15</td></tr>
+<tr><td colspan="3"></td><td>長距離得意</td><td>長距離</td><td>全stat ×1.15</td></tr>
+</table>
+
+<h3>6-c. 展開系（区間・状況限定）— 発動率は実測値</h3>
+<div class="note">実効倍率 = 1 + (表記倍率 − 1) × 発動率。発動率は timeline の activated_passives 24,110区間から実測。</div>
+<table><tr><th>スキル</th><th>効果</th><th class="n">表記倍率</th><th class="n">推定duty</th><th class="n">実測duty</th><th class="n">実効倍率</th></tr>
+<tr><td>競り合い</td><td>20m以内にライバル → PW +6%</td><td class="n">1.06</td><td class="n">0.500</td><td class="n">0.514</td><td class="n">1.0308</td></tr>
+<tr><td>ロングスパート</td><td>中盤後半から PW +7% / ST消費 +8%</td><td class="n">1.07</td><td class="n">0.500</td><td class="n">0.488</td><td class="n">1.0342</td></tr>
+<tr><td>中盤加速</td><td>中盤のみ PW +10%</td><td class="n">1.10</td><td class="n">0.333</td><td class="n">0.400</td><td class="n">1.0400</td></tr>
+<tr><td>末脚</td><td>終盤のみ PW +12%</td><td class="n">1.12</td><td class="n">0.333</td><td class="n">0.315</td><td class="n">1.0378</td></tr>
+<tr><td>ペース配分</td><td>序盤 SP −5% / ST消費 −15%</td><td class="n">0.95 / 1.15</td><td class="n">0.333</td><td class="n">0.290</td><td class="n">0.9855 / 1.0435</td></tr>
+<tr><td>ロケットスタート</td><td>序盤のみ SP +12%</td><td class="n">1.12</td><td class="n">0.333</td><td class="n">0.287</td><td class="n">1.0344</td></tr>
+<tr><td>逃げの心得</td><td>序盤 走行能力 +8% / ST消費 +12%</td><td class="n">1.08</td><td class="n">0.333</td><td class="n">0.287</td><td class="n">1.0230</td></tr>
+<tr><td>差しの構え</td><td>中盤開始時 下位半分 → PW +8%</td><td class="n">1.08</td><td class="n">0.167</td><td class="n">0.271</td><td class="n">1.0217</td></tr>
+<tr><td>追い込み</td><td>終盤開始時 下位半分 → PW +12%</td><td class="n">1.12</td><td class="n">0.167</td><td class="n">0.254</td><td class="n">1.0305</td></tr>
+<tr><td>二の脚</td><td>中盤開始後200mのみ SP +8%</td><td class="n">1.08</td><td class="n">0.150</td><td class="n">0.128</td><td class="n">1.0102</td></tr>
+<tr><td>不屈</td><td>追い抜かれた直後100m PW +8%</td><td class="n">1.08</td><td class="n">0.100</td><td class="n">0.065</td><td class="n">1.0052</td></tr>
+<tr><td>緊急回復</td><td>残ST 20%以下で一度だけ 6%回復</td><td class="n">1.06</td><td class="n">0.500</td><td class="n">0.037</td><td class="n">1.0022 <span class="g">← ほぼ無価値</span></td></tr>
+<tr><td><b>独走態勢</b></td><td>先頭かつ2位と50m以上 → ST消費 −6%</td><td class="n">1.06</td><td class="n">0.200</td><td class="n">0.000</td><td class="n">1.0000 <span class="g">← <b>実質無価値</b></span></td></tr>
+</table>
+<div class="note">推定duty＝説明文からの理論値、実測duty＝実際の発動区間割合。<b>独走態勢は36頭・全区間で一度も発動せず</b>。緊急回復も「一度だけ」＝1区間だけなので効果はほぼゼロ。</div>
+
+<h3>6-d. 分散系（着順のブレに作用）</h3>
+<table><tr><th>スキル</th><th>効果</th><th>扱い</th></tr>
+<tr><td>安定感</td><td>速度のばらつきが約半分</td><td>σ倍率 0.5 <span class="g">（ステータスには一切効かない）</span></td></tr>
+<tr><td>粘り腰</td><td>スタミナ不足による速度低下を20%軽減</td><td>倍率化できないため実ログから学習</td></tr>
+</table>
+<div class="f">σ倍率 = √( VARIANCE_SHARE × m² + (1 − VARIANCE_SHARE) )      VARIANCE_SHARE = 0.5</div>
+<div class="note">σ全体のうち半分だけが「ゲーム側の乱数」で、残りはモデルの推定誤差。分散低減スキルはゲーム側の分にしか効かない。乱数幅は 1.5%（2026/08 に一時 3% → 2026/08/17 に 1.5% へ差し戻し）。</div>
+
+<div class="pb"></div>
+<h2>7. 装備・お守り</h2>
+<table><tr><th>種類</th><th>フィールド</th><th>効き方</th><th>注意</th></tr>
+<tr><td>ステータス加算</td><td>stat_speed / stat_power / stat_stamina</td><td>素ステータスに<b>加算</b></td><td>すでに画面表示のステータスに含まれている</td></tr>
+<tr><td>効果（装備）</td><td>effect_key = <span class="g">gear_</span>◯◯ / effect_value</td><td>レース中に<b>乗算</b>。gear_ を外した名前のパッシブと同じ区間・条件</td><td>区間限定なら実測dutyで割引</td></tr>
+<tr><td>効果（お守り）</td><td>effect_key = <span class="g">charm_</span>◯◯ / effect_value</td><td>同上。「〜の加護」は<b>常時発動</b></td><td>安定の加護は σ に作用（ステータスではない）</td></tr>
+</table>
+<table><tr><th>確認済み effect_key</th><th>内訳</th></tr>
+<tr><td>装備 (gear_)</td><td>final_kick, second_gear, deep_closer, duel_spirit, mid_acceleration, rocket_start</td></tr>
+<tr><td>お守り (charm_)</td><td>speed, power, stamina, balance, consistency, energy_saver</td></tr>
+</table>
+<div class="note">命名規則: 「〜の加護」＝お守り・常時発動 ／ パッシブ名そのまま＝装備・区間条件つき。倍率は説明文から、発動範囲は effect_key から読む。</div>
+
+<h2>8. コンディション</h2>
+<table><tr><th>コンディション</th><th class="n">実効ステータスへの倍率</th><th class="n">実スコア（センタリング log）</th><th class="n">モデル係数<span class="g">（ステータスを統制）</span></th></tr>
+<tr><td>好調</td><td class="n">×1.0000</td><td class="n">+0.0121 <span class="g">(n=1,783)</span></td><td class="n">+0.0020</td></tr>
+<tr><td>普通</td><td class="n">×1.0000</td><td class="n">+0.0692 <span class="g">(n=193)</span></td><td class="n">0（基準）</td></tr>
+<tr><td>不調</td><td class="n">×1.0000</td><td class="n">−0.0215 <span class="g">(n=1,627)</span></td><td class="n">+0.0041</td></tr>
+</table>
+<div class="warn"><b>コンディションはステータスに乗算されない。</b> timeline の初期スタミナ ÷ (素スタミナ+装備加算) を全1,717頭で取ると、好調・不調とも中央値が <b>ちょうど 1.0000</b>。<br>
+初期スタミナに現れる 0.89〜1.19 の係数は<b>すべてパッシブ由来</b>: スピードスター ST×0.90（実測 0.8936）／同族嫌悪 ×1.20（実測 1.1884）／各種得意 ×1.15（実測 1.1463）／脳筋+パワー大アップ ×1.0000。<br>
+実スコアでは 好調 と 不調 で約 3.4% の差が出るが、ステータスを統制したモデル係数は +0.002 / +0.004 とほぼ 0。<b>コンディション単体の効果は測れていない</b>（強い個体が好調になりやすい等の交絡の可能性が高い）。</div>
+
+<h2>9. レース／馬券の仕様</h2>
+<table><tr><th>項目</th><th class="n">値</th><th>備考</th></tr>
+<tr><td>3連単 1口</td><td class="n">10,000 rrc</td><td>1組あたり最大20口／1レース合計20口</td></tr>
+<tr><td>単勝 1口</td><td class="n">1,000 rrc</td><td>1レース合計100口まで</td></tr>
+<tr><td>3連単 初期プール金</td><td class="n">200,000 rrc</td><td><b>表示オッズのバグあり</b>（下記）</td></tr>
+<tr><td>最低オッズ</td><td class="n">1.5倍</td><td>未投票の初期値と同じ値なので判別が必要</td></tr>
+<tr><td>出走頭数</td><td class="n">最大16頭</td><td>7頭以下は3連単なし</td></tr>
+<tr><td>控除率</td><td class="n">0%</td><td>379レースで Σ(1/最終オッズ) = 1.000（純パリミュチュエル）</td></tr>
+</table>
+<div class="warn"><b>表示オッズのバグ（2026/08/15 開発者確認済み・未修正）</b><br>
+プール総額の表示には初期プール金 200,000 rrc が<b>含まれている</b>が、購入画面のオッズは (プール総額 − 200,000) を分子にして計算されている。払戻はプール総額から出るので、<b>実際の払戻 = 表示オッズ × P / (P − 200,000)</b>。<br>
+プール30万なら3.0倍、100万なら1.25倍、500万なら1.04倍。プールが小さいほど差が大きい。<br>
+また表示プール0は「まだ誰も買っていない」状態で、実際には20万ある（誰かが1口買った瞬間 0 → 21万 に切り替わる）。</div>
+
+<h2>10. 変更履歴（計算に影響するもの）</h2>
+<table><tr><th>日付</th><th>内容</th></tr>
+<tr><td>2026/03/15</td><td>得意系パッシブの倍率を下方修正</td></tr>
+<tr><td>2026/04/20</td><td>出走 8頭 → 16頭</td></tr>
+<tr><td>2026/06/17</td><td>7頭以下は3連単なし</td></tr>
+<tr><td>2026/07/27</td><td>パッシブ2枠化・新スキル17種追加（全35種に）</td></tr>
+<tr><td>2026/07/28</td><td>スコアがタイム基準に変更 <span class="g">← 学習ウィンドウの起点</span></td></tr>
+<tr><td>2026/08/15</td><td>装備・お守りシステム追加</td></tr>
+<tr><td>2026/08/17</td><td>乱数幅 3% → 1.5% に差し戻し</td></tr>
+<tr><td>2026/08/19</td><td>12:05 のレースが結果バグ（学習から除外）</td></tr>
+<tr><td>2026/08/20</td><td>レース画面のビジュアル更新 — <b>計算式・APIスキーマとも変更なし</b>（simulation_version = 2 のまま）</td></tr>
+</table>
+
+<footer>出典: oasis_core.py v3.9.0 の定数群（result API の timeline から逆解析・実測）／ HANDOFF.md ／ 2026-08-15〜08-20 の 392頭による再検証。<br>
+実測値は観測範囲内の値。外挿すると偽のスタミナ切れを量産するので範囲外には使わないこと。</footer>
+</body></html>
