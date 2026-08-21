@@ -618,6 +618,65 @@ def regression_tests():
                               encoding='utf-8').read().split('const clip=[')[1],
           '出力組み立て部に token 参照なし')
 
+    # --- P10: bm.js のオッズ取得順が「簡易スコア順」であること ---
+    #   SPEED だけの積で並べると実測の強さとの順位相関が 0.271 しかなく（302レース）、
+    #   金が乗っていない弱い組を延々と取りにいって遅くなる。距離重み＋パッシブ倍率＋
+    #   スタミナ収支の簡易スコアなら 0.820。ここが素の speed に戻っていないかを見張る。
+    _bm = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'bookmarklets', 'src', 'bm.js'), encoding='utf-8').read()
+    _bmc = _bm.replace(' ', '')
+    check('P10 初期順は簡易スコア（素のSPEED積に戻っていない）',
+          'const STR=new Map' in _bm
+          and 'combos.sort((p,q)=>sc(q)-sc(p));' in _bm
+          and 'Math.max(Number(h.speed)||1,1)' not in _bm)
+    # 重みの初期値が 1 に戻ると、最初のヒットで簡易スコアの順序が全部捨てられる。
+    check('P10 適応重みの初期値は簡易スコア（1 ではない）',
+          'w=newMap(pets.map(h=>[h.pet_id,STR.get(h.pet_id)]))' in _bmc
+          and 'w=newMap(pets.map(h=>[h.pet_id,1]))' not in _bmc)
+    check('P10 スタミナ消費の定数が core と一致（bm.js は 0.0132 を .0132 と書く）',
+          all(f"'{d}':[" in _bmc for d in oc.DIST_LIST)
+          and all(f'[{repr(L["c"])[1:] if repr(L["c"]).startswith("0.") else L["c"]},'
+                  f'{L["lo"]},{L["hi"]},{L["n_seg"]}]' in _bmc
+                  for L in oc.STAMINA_COST_LAW.values()),
+          'STAMINA_COST_LAW が bm.js にもそのまま入っている')
+
+    def _strength(sp_, pw_, st_, ps, dist, surf):
+        """bm.js の strength() の Python 版（順序の性質だけ確かめる）。"""
+        WD = {'短距離': [1.96, .68, .375], 'マイル': [1.40, .85, .75],
+              '中距離': [1.26, 1.105, .975], '長距離': [.84, .85, 1.05]}[dist]
+        BL = {'短距離': [1.4, .8, .5], 'マイル': [1, 1, 1],
+              '中距離': [.9, 1.3, 1.3], '長距離': [.6, 1, 1.4]}[dist]
+        SL = {'短距離': [.0132, 2.125, 2.879, 10], 'マイル': [.0197, 2.234, 3.067, 15],
+              '中距離': [.03065, 2.541, 3.737, 20], '長距離': [.04109, 2.57, 3.68, 25]}[dist]
+        PM = {'speed_star': [1.35, 1, .9], 'muscle_head': [.9, 1.35, 1],
+              'speed_l': [1.25, 1, 1], 'stamina_l': [1, 1, 1.25]}
+        s_, p_, t_ = float(sp_), float(pw_), float(st_)
+        for c in ps:
+            m = PM.get(c)
+            if m:
+                s_ *= m[0]; p_ *= m[1]; t_ *= m[2]
+        r = s_ * WD[0] + p_ * WD[1] + t_ * WD[2]
+        d = int(t_) - min(max(SL[0] * (s_ * .6 * BL[0] + p_ * .3 * BL[1]
+                                       + t_ * .1 * BL[2]), SL[1]), SL[2]) * SL[3]
+        r *= max(.65, 1 + .02 * d) if d < 0 else min(1.03, 1 + .0012 * d)
+        return max(r, 1)
+
+    # 長距離: スタミナ型 > スピード型（SPEED だけ見ると逆になる組み合わせ）
+    _fast = _strength(160, 40, 40, ['speed_star'], '長距離', '芝')
+    _stay = _strength(100, 90, 95, ['stamina_l'], '長距離', '芝')
+    check('P10 長距離はスタミナ型が上（SPEED順だと取り違える）',
+          _stay > _fast and 160 > 100, f'スタミナ型 {_stay:.0f} > スピード型 {_fast:.0f}')
+    # 短距離では逆転すること（距離重みが効いている証拠）
+    check('P10 短距離はスピード型が上',
+          _strength(160, 40, 40, ['speed_star'], '短距離', '芝')
+          > _strength(100, 90, 95, ['stamina_l'], '短距離', '芝'))
+    # スタミナ切れの罰は最大 -35%
+    check('P10 スタミナ切れの罰は 0.65 で頭打ち',
+          abs(_strength(200, 200, 1, [], '長距離', '芝')
+              / _strength(200, 200, 1, [], '長距離', '芝')) == 1.0
+          and _strength(150, 50, 10, [], '長距離', '芝')
+          < _strength(150, 50, 90, [], '長距離', '芝'))
+
     # --- P5b: 区間限定の装備効果は effect_key から実測 duty を引くこと ---
     #   実測装備 gear_second_gear「中盤開始後200mのスピードが2.4%上昇」。
     #   説明文だけだと「中盤 → 1/3」と読めて 1.008 になるが、二の脚の実測 duty は 0.128。

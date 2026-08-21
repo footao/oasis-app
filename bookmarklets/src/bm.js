@@ -88,23 +88,54 @@ try{
  const SEED=200000, UNIT=10000, BASE=Math.max(pool0-SEED,0);
  // 金が乗っていそうな順に取りたい。単勝オッズは下限1.5に張り付いていて
  // （直近20レースの45%が全馬同値）人気の代理にならないので使わない。
- //   初期順  : SPEED の高い組から（人が見て強そうな順の代わり）
+ //   初期順  : 簡易スコア（距離重み×パッシブ×スタミナ収支）の高い組から
  //   以降    : 金が乗っていた組に出ていた馬を重くして、取りながら並べ替える
  // 順番が外れても打ち切り条件（残額<1口）は変わらないので、遅くなるだけで結果は同じ。
- const sp=h=>Math.max(Number(h.speed)||1,1);
- const w=new Map(pets.map(h=>[h.pet_id,1]));
+ // 初期順は「強い組から」。SPEEDだけだと距離バランスを無視するので、実測の強さとの
+ // 順位相関は 0.271 しかない（races.jsonl 302レース）。距離重み＋パッシブ倍率＋
+ // スタミナ切れ補正まで入れた簡易スコアだと 0.820、実上位3頭を上位3に入れられる数も
+ // 1.20/3 → 2.19/3 に上がる。数字の出所は docs/race_formula.pdf。
+ // 順番が外れても打ち切り条件（残額<1口）は変わらないので、外しても遅くなるだけ。
+ const WD={'短距離':[1.96,.68,.375],'マイル':[1.40,.85,.75],'中距離':[1.26,1.105,.975],'長距離':[.84,.85,1.05]}[dist]||[1.4,.85,.75];
+ const BL={'短距離':[1.4,.8,.5],'マイル':[1,1,1],'中距離':[.9,1.3,1.3],'長距離':[.6,1,1.4]}[dist]||[1,1,1];
+ const SL={'短距離':[.0132,2.125,2.879,10],'マイル':[.0197,2.234,3.067,15],'中距離':[.03065,2.541,3.737,20],'長距離':[.04109,2.57,3.68,25]}[dist];
+ const PMUL={speed_star:[1.35,1,.9],muscle_head:[.9,1.35,1],steady_runner:[1,.9,1.35],jack_of_all:[1.05,1.05,1.05],speed_l:[1.25,1,1],power_l:[1,1.25,1],stamina_l:[1,1,1.25],speed_s:[1.15,1,1],power_s:[1,1.15,1],stamina_s:[1,1,1.15]};
+ const APT={turf_specialist:[surf,'芝',1.10],dirt_specialist:[surf,'ダート',1.10],short_special:[dist,'短距離',1.15],mile_special:[dist,'マイル',1.15],middle_special:[dist,'中距離',1.15],long_special:[dist,'長距離',1.15]};
+ const spc={};pets.forEach(h=>{spc[h.adult_key]=(spc[h.adult_key]||0)+1;});
+ const strength=h=>{
+   let s=Number(h.speed)||1,p=Number(h.power)||1,t=Number(h.stamina)||1;
+   for(const c of [h.passive_skill,h.passive_skill_2]){
+     const m=PMUL[c]; if(m){s*=m[0];p*=m[1];t*=m[2];continue;}
+     const a=APT[c]; if(a){if(a[0]===a[1]){s*=a[2];p*=a[2];t*=a[2];}continue;}
+     if(c==='same_kind_boost'&&spc[h.adult_key]>1){s*=1.2;p*=1.2;t*=1.2;}
+   }
+   let r=s*WD[0]+p*WD[1]+t*WD[2];
+   if(SL){ // スタミナ切れは最大 -35%、余りは +3% で頭打ち（非対称）
+     const d=Math.floor(t)-Math.min(Math.max(SL[0]*(s*.6*BL[0]+p*.3*BL[1]+t*.1*BL[2]),SL[1]),SL[2])*SL[3];
+     r*= d<0 ? Math.max(.65,1+.02*d) : Math.min(1.03,1+.0012*d);}
+   return Math.max(r,1);
+ };
+ // 重みの初期値を 1 ではなく簡易スコアにする。1 で始めると、最初のヒットで並べ替えた
+ // 瞬間に「ヒット馬を含まない組」が全部 weight=1 で同点になり、**簡易スコアの順序が
+ // 捨てられる**（今までは Array#sort が安定なおかげで辛うじて残っていただけ）。
+ // スコアを種にしておけば sc = スコア積 × 3^(ヒット回数) となって両方が効き続ける。
+ // 初期ソートも sc でそのまま書けるので、別立ての SPEED 積ソートは要らない。
+ const STR=new Map(pets.map(h=>[h.pet_id,strength(h)]));
+ const w=new Map(pets.map(h=>[h.pet_id,STR.get(h.pet_id)]));
  const sc=c=>w.get(c[0].pet_id)*w.get(c[1].pet_id)*w.get(c[2].pet_id);
  btn.textContent=`🏇 3連単 ${total}通り 取得中...`;
  const combos=[];
  for(const a of pets)for(const b of pets){if(b.pet_id===a.pet_id)continue;
    for(const x of pets){if(x.pet_id===a.pet_id||x.pet_id===b.pet_id)continue;combos.push([a,b,x]);}}
- combos.sort((p,q)=>sp(q[0])*sp(q[1])*sp(q[2])-sp(p[0])*sp(p[1])*sp(p[2]));
+ combos.sort((p,q)=>sc(q)-sc(p));
  // 並列数。上げると往復は半分ずつ減るが、打ち切りの粒度が粗くなって総数は増える。
  // bm_stop_test.js の実測（SPEED順が当たる場合の平均リクエスト数 / 往復回数）:
  //   PAR=5:275/55  10:278/28  20:286/14  40:307/8  80:350/4  160:477/3
- // ただし HTTP/1.1 だとブラウザの同時接続は1オリジン6本が上限なので、
- // 20 でも実際は6本ずつしか飛ばない＝上げても速くならず無駄だけ増える。
- // DevTools → ネットワーク → Protocol 列が h2 なら上げる意味がある。
+ // 2026/08/21 実測（api.oasis.red は HTTP/2。60本同時に投げて全部同時に飛ぶことを確認、
+ // 1オリジン6本の制限は無い）。ただし**サーバ側のスループットが上限**で、
+ //   PAR=6:36req/s  20:66  60:78  120:80  200:92
+ // 上の請求数と合わせた推定所要時間は PAR=5:9.2秒 / 20:4.3秒 / 40:4.3秒 / 80:4.4秒。
+ // **20 がすでに最適**なので上げても下げても速くならない。触らないこと。
  const PAR=20;
  const queue=combos.slice(), results=[], failed=[]; let seenAmt=0, cut=0;
  // プール表示が 0 ＝ 誰も1口も買っていない ＝ **全組が未成立**。
