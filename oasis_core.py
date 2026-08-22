@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.9.0'
+CORE_VERSION = '3.10.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -380,12 +380,6 @@ def parse_passives(s):
         if c and c not in out:
             out.append(c)
     return tuple(out[:2])
-
-
-def normalize_passive(s):
-    """後方互換: 表示用に 'A / B' の正規化文字列を返す。"""
-    ps = parse_passives(s)
-    return ' / '.join(ps) if ps else 'なし'
 
 
 # =====================================================================
@@ -1596,13 +1590,6 @@ def simulate_trifecta(base, sigma, n_sim=N_SIM, seed=SIM_SEED, chunk=SIM_CHUNK,
     return win, combo
 
 
-# 後方互換
-def simulate_rankings(base, sigma, n_sim=N_SIM, seed=SIM_SEED):
-    rng = np.random.default_rng(seed)
-    sim = base + rng.normal(0, sigma, (n_sim, len(base)))
-    return np.argsort(-sim, axis=1)
-
-
 def market_win_prob(odds, floor=ODDS_FLOOR):
     """表示オッズ → 市場の暗黙勝率。
 
@@ -1749,9 +1736,6 @@ def bare(name):
     return _DUP_RE.sub('', str(name)).strip()
 
 
-_SPECIES_RE = _DUP_RE          # 後方互換（同じ正規表現）
-
-
 def species_name(name):
     """おあしすっちの種類名。同名馬に付く '#2' 等のマーカーを外す。"""
     return bare(name)
@@ -1770,9 +1754,8 @@ def same_species_flags(names, species=None):
     return [cnt[x] >= 2 for x in sp]
 
 
-_PASSIVE_COLS = ['パッシブスキル', 'パッシブ', 'スキル', 'passive', 'passives']
-_PASSIVE_COLS2 = [('パッシブスキル1', 'パッシブスキル2'), ('パッシブ1', 'パッシブ2'),
-                  ('スキル1', 'スキル2'), ('passive_skill', 'passive_skill_2')]
+# ブックマークレットが出す列名だけを見る（旧フォーマットの別名は 2026/08/21 に削除）。
+_PASSIVE_COLS2 = [('パッシブスキル1', 'パッシブスキル2')]
 
 
 _ITEM_EFFECT_COLS = [('装備効果', '装備', '装備効果キー'), ('お守り効果', 'お守り', 'お守り効果キー')]
@@ -1851,11 +1834,6 @@ def _passives_from_row(r, cols):
                     r'[a-z_0-9]+', v.strip())) else None
                 got += ([code] if code else list(parse_passives(v)))
             break
-    if not got:
-        for c in _PASSIVE_COLS:
-            if c in cols:
-                got = list(parse_passives(r.get(c)))
-                break
     out = []
     for g in got:
         if g and g not in out:
@@ -1936,26 +1914,25 @@ def parse_unified(text, spec=None):
                         return v
             return None
 
-        dist = _first(['レース距離', '距離'])
-        track = _first(['馬場', 'コース'])
-        ground = _first(['地面', '馬場状態', '馬場コンディション'])
+        dist = _first(['レース距離'])
+        track = _first(['馬場'])
+        ground = _first(['地面'])
 
         for _, r in df.iterrows():
-            sp = pd.to_numeric(r.get('SPEED', r.get('スピード', np.nan)), errors='coerce')
-            pw = pd.to_numeric(r.get('POWER', r.get('パワー', np.nan)), errors='coerce')
-            st = pd.to_numeric(r.get('STAMINA', r.get('スタミナ', np.nan)), errors='coerce')
+            sp = pd.to_numeric(r.get('SPEED', np.nan), errors='coerce')
+            pw = pd.to_numeric(r.get('POWER', np.nan), errors='coerce')
+            st = pd.to_numeric(r.get('STAMINA', np.nan), errors='coerce')
             if pd.isna(sp) or pd.isna(pw) or pd.isna(st):
-                skipped.append(str(r.get('馬名', r.get('名前', '?'))).strip())
+                skipped.append(str(r.get('馬名', '?')).strip())
                 continue
             win_odds = pd.to_numeric(str(r.get('単勝オッズ', '')).strip(), errors='coerce')
-            spc = str(r.get('成体種', r.get('adult_key', '')) or '').strip()
-            mine = pd.to_numeric(r.get('自分の購入額', r.get('my_amount', np.nan)),
-                                 errors='coerce')
+            spc = str(r.get('成体種', '') or '').strip()
+            mine = pd.to_numeric(r.get('自分の購入額', np.nan), errors='coerce')
             _im, _isk = item_mults_from_row(r, cols, spec)
             item_skipped += _isk
             horses.append({
                 'my_amount': (float(mine) if pd.notna(mine) else None),
-                'name': str(r.get('馬名', r.get('名前', ''))).strip(),
+                'name': str(r.get('馬名', '')).strip(),
                 'species': spc or None,
                 # 装備の**倍率**はここで掛ける（加算ぶんは貼り付けの値に既に入っている）
                 'speed': int(sp) * _im.get('speed', 1.0),
@@ -1987,48 +1964,6 @@ def parse_unified(text, spec=None):
     return horses, odds, dist, track, ground, guild, schedule_id, pool, n_tri_total
 
 
-def parse_betting_screen(text):
-    """購入画面をそのままコピーした場合のフォールバック解析（パッシブ2枠対応）。"""
-    horses = []
-    for block in re.split(r'購入', text):
-        if not block.strip():
-            continue
-        lines = [l.strip() for l in block.split('\n') if l.strip()]
-        if len(lines) < 3:
-            continue
-        sp_m = re.search(r'(\d+)\s*SPEED', block, re.I)
-        # 馬名は「コンディション：」の直前の行。先頭ブロックにはページのヘッダが
-        # 混ざるため、単純に lines[0] を使うと馬名を取り違える。
-        name = lines[0]
-        for li, l in enumerate(lines):
-            if re.match(r'コンディション\s*[:：]', l) and li >= 1:
-                name = lines[li - 1]
-                break
-        pw_m = re.search(r'(\d+)\s*POWER', block, re.I)
-        st_m = re.search(r'(\d+)\s*STAM', block, re.I)
-        if not (sp_m and pw_m and st_m):
-            continue
-        found = []
-        for pname in sorted(PASSIVE_NAMES, key=len, reverse=True):
-            if pname in block and pname not in found:
-                if any(pname in f and pname != f for f in found):
-                    continue
-                found.append(pname)
-        # 長い名前優先で拾ったので、他スキル名の部分文字列は除去
-        found = [p for p in found if not any(p != q and p in q for q in found)]
-        c_m = re.search(r'(好調|普通|不調)', block)
-        od_m = re.search(r'オッズ\s*[:：]?\s*([0-9.]+)', block)
-        horses.append({
-            'name': name,
-            'speed': int(sp_m.group(1)), 'power': int(pw_m.group(1)),
-            'stamina': int(st_m.group(1)),
-            'condition': c_m.group(1) if c_m else '普通',
-            'passives': tuple(found[:2]),
-            'odds': float(od_m.group(1)) if od_m else float('nan'),
-        })
-    return horses
-
-
 def detect_stake_unit(text, default=WIN_STAKE_UNIT):
     """購入画面の『1口（1,000 rrc）』から1口いくらかを読み取る。"""
     m = re.search(r'1\s*口\s*[（(]\s*([0-9,]+)\s*rrc', str(text))
@@ -2040,14 +1975,6 @@ def detect_stake_unit(text, default=WIN_STAKE_UNIT):
         except ValueError:
             pass
     return default
-
-
-def parse_trifecta_csv(path):
-    df = pd.read_csv(path, encoding='utf-8-sig')
-    df['_o'] = pd.to_numeric(df['オッズ'], errors='coerce')
-    df = df[df['_o'].notna()]
-    return {(str(r['1着']).strip(), str(r['2着']).strip(), str(r['3着']).strip()): float(r['_o'])
-            for _, r in df.iterrows()}
 
 
 # =====================================================================
@@ -2560,7 +2487,7 @@ def win_bet_picks(names, win_p, odds, bankroll, kelly_frac, edge_min,
 DEFAULT_SETTINGS = dict(
     dist='中距離', track='芝', ground='良', topn=20,
     bankroll=1_200_000, kelly_fraction=0.25, max_risk_frac=0.10, edge_min=0.10,
-    carryover_rrc=None, csv_path='',
+    carryover_rrc=None,
     unformed_sleeve=False, unformed_max_units=10,
     unformed_p_min=0.05, unformed_edge_min=0.30,
     win_bets=False, win_edge_min=0.15,
@@ -2628,12 +2555,10 @@ def analyze(raw_text, bundle, settings=None):
                 f'未成立に1口置いた場合の実効オッズは '
                 f'{(TRIFECTA_POOL_SEED + STAKE_UNIT) / STAKE_UNIT:.0f}倍です。')
     else:
-        horses = parse_betting_screen(raw_text)
-        res['auto_race_info'] = False
-        res['messages'].append(
-            f'⚠ 購入画面の貼り付けにはレース条件が含まれていません。'
-            f'サイドバーの設定（**{s["dist"]}・{s["track"]}・{s["ground"]}**）で計算します。'
-            '距離が違うと結果は大きく変わるので、必ず合わせてください。')
+        return {'ok': False, 'error':
+                'ブックマークレットの出力ではありません（「=== 出走馬一覧 ===」が'
+                '見当たりません）。購入ページで「🏇 レースデータ取得」を実行して、'
+                'コピーされた内容をそのまま貼ってください。'}
 
     if not horses:
         return {'ok': False, 'error': 'データ読み込み失敗（フォーマットを確認してください）。'}
@@ -2766,7 +2691,8 @@ def analyze(raw_text, bundle, settings=None):
     # 寄与の内訳（なぜこの馬が強い/弱いか）
     contrib = _contributions(bundle, horses, s['dist'], s['track'])
 
-    order = np.argsort(-win_p)
+    # 勝率が同率0%で並ぶ下位は、予測スコア順に並べる（表の並びが乱れないように）
+    order = np.lexsort((-base, -win_p))
     single = []
     for i in order:
         h = horses[i]
@@ -2909,14 +2835,6 @@ def analyze(raw_text, bundle, settings=None):
         if all(x in _bare_unique for x in bk) and bk in name_cp:
             return name_cp[bk], 'bare'
         return 0.0, 'none'
-
-    if csv_odds is None:
-        path = (s.get('csv_path') or '').strip()
-        if path and os.path.exists(path):
-            try:
-                csv_odds = parse_trifecta_csv(path)
-            except Exception as e:
-                res['messages'].append(f'⚠ CSV読み込み失敗: {e}')
 
     res['picks'] = []
     res['purchase_lines'] = []

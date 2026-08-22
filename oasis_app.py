@@ -6,6 +6,7 @@ oasis_app.py — Oasis 安定運用予測ツール v2（2026/07/27 大型アプ�
 ロジックは oasis_core.py（UI非依存）。このファイルは画面と状態管理のみ。
 """
 import hashlib
+import math
 import os
 import re
 import sys
@@ -116,7 +117,7 @@ st.set_page_config(page_title="Oasis 予測 v2", page_icon="🐎", layout="wide"
 #  片方だけ更新すると「AttributeError（内容は伏せられます）」になって
 #  原因が分からなくなるので、起動時に分かる形で止める。
 # ---------------------------------------------------------------
-REQUIRED_CORE = "3.9.0"
+REQUIRED_CORE = "3.10.0"
 _NEEDED = [
     "CORE_VERSION", "WIN_MAX_TOTAL_UNITS", "WIN_STAKE_UNIT", "UNBET_ODDS",
     "MAX_TOTAL_UNITS", "SIGMA_SAFETY", "DIST_LIST", "TRACK_LIST",
@@ -464,8 +465,7 @@ with st.sidebar:
     ground = st.selectbox("地面", ["良", "稍重", "重", "不良"], index=0)
     topn = st.slider("ランキング表示数", 5, 60, 20)
 
-    with st.expander("詳細（CSV・CO・ログ保存先・試行数）"):
-        csv_path = st.text_input("別CSVのパス（任意）", value="")
+    with st.expander("詳細（CO・ログ保存先・試行数）"):
         co_rrc = st.number_input("キャリーオーバー手動指定 (0=自動)", min_value=0, value=0, step=10000)
         bet_log_path = st.text_input(
             "ベットログ保存先(CSV)", value="oasis_bet_log.csv",
@@ -478,10 +478,9 @@ with st.sidebar:
             help="確率が小さすぎる組はモンテカルロの推定ノイズが支配的で、"
                  "「偽の+EV」のほぼ全てがこの領域から出ます。既定0.3%。")
 
-csv_resolved, _ = _resolve_read(csv_path) if csv_path else ("", False)
 settings = dict(dist=dist, track=track, ground=ground, topn=topn,
                 bankroll=bankroll, kelly_fraction=kelly, max_risk_frac=risk,
-                edge_min=edge, csv_path=csv_resolved, carryover_rrc=(co_rrc or None),
+                edge_min=edge, carryover_rrc=(co_rrc or None),
                 unformed_sleeve=sleeve_on, unformed_max_units=sleeve_units,
                 unformed_p_min=sleeve_pmin, unformed_edge_min=0.30,
                 win_bets=win_on, win_edge_min=win_edge, n_sim=n_sim,
@@ -779,10 +778,12 @@ with tab_pred:
                 st.caption("※ ゲーム上限は3連単 合計20口。予算と相談しつつ、"
                            "上限内で狙う的中率に届く点数を選んでください。")
 
-            with st.expander("🥇 単勝 勝率：モデル vs 市場 ＋ 予測の内訳", expanded=False):
+            with st.expander("🐴 馬ごとの予測スコア ＋ 勝率：モデル vs 市場", expanded=True):
                 sw = result["single_win"]
                 base_cols = {
                     "馬": [r["name"] for r in sw],
+                    "予測スコア": [f"{math.exp(r['base'])*1000:,.0f}" for r in sw],
+                    "対平均": [f"{(math.exp(r['base'])-1)*100:+.1f}%" for r in sw],
                     "モデル勝率": [f"{r['model_p']*100:.1f}%" for r in sw],
                     "状態": [r["condition"] for r in sw],
                     "パッシブ": [r["passives"] for r in sw],
@@ -796,8 +797,12 @@ with tab_pred:
                     base_cols["オッズ"] = [(f"{r['odds']:.2f}" if r["odds"] else "—") for r in sw]
                     base_cols["判定"] = [r["tag"] for r in sw]
                 st.dataframe(pd.DataFrame(base_cols), **_wide(hide_index=True))
-                st.caption(f"モデルの◎: 【{result['model_pick']}】／ 寄与は相対logスコアへの加算量"
-                           "（大きいほど有利）。合計の差が σ に対して大きいほど勝率差が開きます。")
+                st.caption(
+                    f"モデルの◎: 【{result['model_pick']}】／ **予測スコア** はレースの"
+                    "平均を 1,000 に揃えた相対値です（ゲームの実スコアと同じ縮尺で読めます）。"
+                    "絶対値はレースごとの水準に依存するので、比べるのは**同じレース内だけ**。"
+                    "寄与は相対logスコアへの加算量で、合計の差が σ に対して大きいほど"
+                    "勝率差が開きます。")
 
 # -------------------------- モデルタブ --------------------------
 with tab_model:
