@@ -2207,140 +2207,6 @@ ODDS_DECIMALS = 2          # サイトが単勝オッズを丸めている桁数
 ODDS_STEP = 10 ** -ODDS_DECIMALS
 
 
-def estimate_win_pool(before, after, floor=None):
-    """単勝プール総額を「試し買いの前後のオッズ変化」から推定する。
-
-    単勝は控除0%の純パリミュチュエル（実ログ379レースで Σ(1/最終オッズ)=1.000、std 0.001）。
-    そのため **オッズ自体はシェアしか表さず、プール規模の情報を一切含まない**。
-    自分で少額を入れて、その前後の動きから逆算するしかない。
-
-    原理:
-      od_j = P / P_j（P=プール総額, P_j=その馬への投入額）
-      自分が合計 Δ を入れると P → P+Δ。自分が **買っていない** 馬 j は P_j が変わらないので
-          od_j後 / od_j前 = (P+Δ) / P  ＝ 全馬共通の比 R
-      よって  P = Δ / (R − 1)
-
-    推定の要点: オッズは小数2桁に丸められているため、丸め誤差は od に反比例する
-    （高オッズの馬ほど相対誤差が小さい）。そこで比 R を **重み od² の加重平均**で求める。
-    これが分散最小で、丸め誤差だけを考えたときの理論精度も同時に計算できる。
-    """
-    # 同名馬がいると名前キーの辞書では1頭消えるので、まず「名前+ステータス」で対応付け、
-    # 駄目なら出走順（位置）で対応付ける。
-    def _key(h):
-        return (str(h.get('name', '')).strip(), h.get('speed'), h.get('power'), h.get('stamina'))
-
-    pair = []
-    kb = {}
-    for h in before:
-        kb.setdefault(_key(h), []).append(h)
-    used = {}
-    for h in after:
-        k = _key(h)
-        i = used.get(k, 0)
-        cand = kb.get(k, [])
-        if i < len(cand):
-            pair.append((cand[i], h))
-            used[k] = i + 1
-    if len(pair) < len(after) and len(before) == len(after):
-        pair = list(zip(before, after))          # 位置でのフォールバック
-    msgs = []
-
-    deltas = {}
-    total_delta = 0.0
-    for hb, ha in pair:
-        mb, ma = hb.get('my_amount'), ha.get('my_amount')
-        if mb is None or ma is None:
-            continue
-        d = float(ma) - float(mb)
-        if d > 0:
-            deltas[id(ha)] = d
-            total_delta += d
-    if total_delta <= 0:
-        return {'ok': False, 'pool': None, 'messages': [
-            '試し買いの増分が見つかりません。①の後に実際に単勝を買ってから②を取得してください。'
-            '（「自分の購入額」が両方のデータに入っている必要があります）']}
-
-    sw = sr = 0.0
-    detail, singles = [], []
-    for hb, ha in pair:
-        n = str(ha.get('name', ''))
-        ob, oa = hb.get('odds'), ha.get('odds')
-        d_i = deltas.get(id(ha), 0.0)
-        note = '試し買いした馬' if d_i > 0 else ''
-        if ob is None or oa is None or not (np.isfinite(ob) and np.isfinite(oa)) \
-                or ob <= 0 or oa <= 0:
-            detail.append({'name': n, 'est': None, 'note': note or 'オッズ不明'})
-            continue
-        if d_i > 0:                       # 買った馬は P_j が動くので比の推定には使わない
-            detail.append({'name': n, 'est': None, 'od_before': float(ob),
-                           'od_after': float(oa), 'note': note})
-            continue
-        ratio = oa / ob
-        if abs(ratio - 1.0) < 1e-12:
-            detail.append({'name': n, 'est': None, 'od_before': float(ob),
-                           'od_after': float(oa), 'note': '動かず'})
-            continue
-        w = oa * oa
-        sw += w
-        sr += w * ratio
-        est = total_delta / (ratio - 1.0)
-        singles.append(est)
-        detail.append({'name': n, 'est': float(est), 'od_before': float(ob),
-                       'od_after': float(oa), 'note': note})
-
-    if sw <= 0:
-        return {'ok': False, 'pool': None, 'per_horse': detail, 'delta': total_delta,
-                'messages': ['オッズが動いておらず推定できません。'
-                             '試し買いの口数を増やすか、市場が動いてから試してください。']}
-    R = sr / sw
-    if R <= 1:
-        return {'ok': False, 'pool': None, 'per_horse': detail, 'delta': total_delta,
-                'messages': ['オッズが想定と逆に動いています（他の人の投票が大きく入った可能性）。'
-                             '測り直してください。']}
-    pool = total_delta / (R - 1.0)
-    sd_R = (ODDS_STEP / math.sqrt(12)) * math.sqrt(2.0 / sw)
-    rel_err = float(sd_R * pool / total_delta)          # 1σ の相対誤差
-    sd_abs = rel_err * pool                             # 1σ の絶対誤差（rrc）
-    pos = sorted(x for x in singles if x > 0)
-    spread = float((pos[-1] - pos[0]) / pool) if len(pos) > 1 else 0.0
-
-    # 単勝プール総額は 1,000 rrc 単位で決まる。連続推定が十分精密なら、その最も近い
-    # グリッド点にスナップすると値が“確定”する（丸め誤差より格子間隔が広いとき有効）。
-    q = WIN_POOL_QUANTUM
-    snapped = exact = False
-    if sd_abs < q:                                     # 1σ が1格子未満 → 丸めが期待誤差を減らす
-        snap_before = round(pool / q) * q
-        if snap_before > 0:
-            pool = float(snap_before)
-            snapped = True
-            if sd_abs < q / 4:                         # 2σ が半格子未満 → 95%で正しい格子
-                exact = True
-                rel_err = float(q / 4) / pool          # 実質“確定”（残差は半格子未満）
-            else:
-                rel_err = float(sd_abs / pool)         # スナップしても誤差は正直に残す
-
-    if exact:
-        msgs.append(f'✅ プール総額を 1,000 rrc 単位に確定：{pool + total_delta:,.0f} rrc。')
-    elif rel_err > 0.05:
-        msgs.append(f'△ 推定精度は ±{rel_err*200:.0f}%（95%目安）。オッズが小数2桁までしか'
-                    '出ないため、プールが大きいと1口の影響が小さく精度が出ません。'
-                    'もう一度試し買いすると累積で精度が上がります。')
-    if spread > 0.5 and spread > rel_err * 6:
-        msgs.append('⚠ 馬ごとの推定のばらつきが、丸め誤差だけでは説明できないほど大きいです。'
-                    '試し買いの前後で他の人も投票した可能性があります。')
-    if len(pos) < 3:
-        msgs.append('△ 推定に使えた馬が少ないため精度は粗いです。')
-    if not exact:
-        msgs.append(f'自分の投入 {total_delta:,.0f} rrc の前後で、{len(pos)}頭のオッズ変化から'
-                    f'推定しました（推定精度 ±{rel_err*200:.0f}%'
-                    + ('・1000rrc単位にスナップ済み' if snapped else '') + '）。')
-    # pool は試し買い"前"の総額。②のオッズは"後"なので、そちらに合わせた値も返す。
-    return {'ok': True, 'pool': float(pool + total_delta), 'pool_before': float(pool),
-            'per_horse': detail, 'n_used': len(pos), 'rel_err': rel_err,
-            'spread': spread, 'delta': total_delta, 'snapped': snapped,
-            'exact': exact, 'messages': msgs}
-
-
 def win_bet_picks_pool(names, win_p, odds, pool, bankroll, kelly_frac, edge_min,
                        stake_unit=WIN_STAKE_UNIT, total_units=WIN_MAX_TOTAL_UNITS,
                        max_units=WIN_MAX_UNITS, risk_cap_frac=0.10, my_units=None,
@@ -2837,7 +2703,6 @@ def analyze(raw_text, bundle, settings=None):
         return 0.0, 'none'
 
     res['picks'] = []
-    res['purchase_lines'] = []
     res['pool'] = P_total
     res['has_csv'] = bool(csv_odds)
 
@@ -2963,7 +2828,7 @@ def analyze(raw_text, bundle, settings=None):
             budget=MAX_TOTAL_UNITS, max_per_combo=MAX_UNITS)
 
         risk_units_cap = max(1, int((s['max_risk_frac'] * s['bankroll']) // STAKE_UNIT))
-        alloc_rows, picks, purchase_lines, total_units = [], [], [], 0
+        alloc_rows, picks, total_units = [], [], 0
         for combo, p, od, ev in rows:
             k, eff_ev, eff_od = alloc.get(combo, (0, 0.0, od))
             mark = '✅' if k > 0 else ('△' if ev > 0 else '')
@@ -2974,7 +2839,6 @@ def analyze(raw_text, bundle, settings=None):
                 'eff_ev': (eff_ev if k > 0 else None)})
             if k > 0:
                 picks.append((combo, p, eff_od, k))
-                purchase_lines += [' ✅' + ' → '.join(combo)] * k
                 total_units += k
 
         n_unformed = 0
@@ -2993,13 +2857,11 @@ def analyze(raw_text, bundle, settings=None):
                     'theo_ev': None, 'mark': '✅', 'k': k, 'flag': '未',
                     'eff_od': eff_od, 'eff_ev': eff_ev})
                 picks.append((names, p, eff_od, k))
-                purchase_lines += [' ✅' + ' → '.join(names)] * k
                 total_units += k
                 n_unformed += k
 
         res['alloc_rows'] = alloc_rows
         res['picks'] = picks
-        res['purchase_lines'] = purchase_lines
 
         risk_units = max(1, int((s['max_risk_frac'] * s['bankroll']) // STAKE_UNIT))
         invest = total_units * STAKE_UNIT
