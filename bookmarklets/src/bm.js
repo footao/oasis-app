@@ -1,4 +1,7 @@
 (async () => {
+// このファイルの版。ローダー経由で本当に最新が読めているかを目視で確かめるため、
+// 完了バッジの末尾に出す。古い版が読まれていたらここの数字が古いまま出る。
+const BM_VER='3.14.0';
 const B='https://api.oasis.red';
 const q=new URLSearchParams(location.search);
 const G=q.get('guild'), S=q.get('race')||q.get('schedule_id'), U=q.get('user');
@@ -54,20 +57,13 @@ try{
      r*= d<0 ? Math.max(.65,1+.02*d) : Math.min(1.03,1+.0012*d);}
    return Math.max(r,1);
  };
- // 重みの初期値を 1 ではなく簡易スコアにする。1 で始めると、最初のヒットで並べ替えた
- // 瞬間に「ヒット馬を含まない組」が全部 weight=1 で同点になり、**簡易スコアの順序が
- // 捨てられる**（今までは Array#sort が安定なおかげで辛うじて残っていただけ）。
- // スコアを種にしておけば sc = スコア積 × 3^(ヒット回数) となって両方が効き続ける。
- // 初期ソートも sc でそのまま書けるので、別立ての SPEED 積ソートは要らない。
  // ---- 単勝プールの実測（試し買い）----
  // 単勝は控除0%の純パリミュチュエルなので Σ(1/od)=1.000。つまり**オッズはシェアしか
  // 表さず、プール総額の情報を含まない**。自分で少額入れて前後の動きから逆算するしかない。
  //   od_j = P / P_j。自分が Δ 入れると P→P+Δ。**自分が買っていない**馬 j は P_j 不変なので
  //   od_j後 / od_j前 = (P+Δ)/P = R（全馬共通）→ P = Δ/(R−1)
  // オッズは小数2桁なので丸め誤差は od に反比例する。比 R は**重み od² の加重平均**で取る
- // （分散最小）。試し買い先は簡易スコアが最も高い馬＝どのみち買いたい馬なので無駄にならない。
- // 0 にすれば試し買いしない。3口=3,000rrc。
- // MAX_PROBE 口まで**1口ずつ**買って、目標精度に届いた時点で止める。
+ // （分散最小）。MAX_PROBE 口まで**1口ずつ**買って、目標精度に届いた時点で止める。
  // 1発で3口買うより要求精度に対して無駄がない。全馬のオッズが同じ（NPCが均等に賭けた等）
  // だと丸め誤差が平均化されず精度が出ないので、その場合だけ口数が伸びる。
  // 0 にすれば試し買いしない。1口=1,000rrc。
@@ -216,6 +212,11 @@ try{
  //   プール90万・od1.5（＝60口）でも ±2,000rrc で、半口(5,000)よりずっと小さい。
  //   プールが数百万まで育つと大本命だけ曖昧になりうるので、その組だけ slack を積む。
  const betOf=od=>Math.round(pool0/od/UNIT)*UNIT;
+ // 重みの初期値を 1 ではなく簡易スコアにする。1 で始めると、最初のヒットで並べ替えた
+ // 瞬間に「ヒット馬を含まない組」が全部 weight=1 で同点になり、**簡易スコアの順序が
+ // 捨てられる**（今までは Array#sort が安定なおかげで辛うじて残っていただけ）。
+ // スコアを種にしておけば sc = スコア積 × 3^(ヒット回数) となって両方が効き続ける。
+ // 初期ソートも sc でそのまま書けるので、別立ての SPEED 積ソートは要らない。
  const STR=new Map(pets.map(h=>[h.pet_id,strength(h)]));
  const w=new Map(pets.map(h=>[h.pet_id,STR.get(h.pet_id)]));
  const sc=c=>w.get(c[0].pet_id)*w.get(c[1].pet_id)*w.get(c[2].pet_id);
@@ -329,7 +330,7 @@ try{
      ({name:h.displayName,speed:h.speed,base:h.base_speed,bonus:h.item_bonus})));}
  if(unknown.size)console.warn('Oasis: 辞書に無いパッシブコード:',[...unknown]);
  const n2=pets.filter(h=>h.p1&&h.p2).length;
- const stat=`${n}頭(2枠${n2}) | スキル${effRows.length}種 | 3連単${withOdds.length}件`
+ const stat=`v${BM_VER} | ${n}頭(2枠${n2}) | スキル${effRows.length}種 | 3連単${withOdds.length}件`
    +(noBets?`(プール0のため取得省略)`:`(${cut}/${total}点取得)`)
    +` | プール${poolAmt.toLocaleString()}rrc`
    +(wp?` | 単勝プール${Math.round(wp.pool).toLocaleString()}rrc(試買${wp.delta.toLocaleString()})`:'')
