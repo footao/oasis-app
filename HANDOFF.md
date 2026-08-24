@@ -43,7 +43,7 @@
 | `drive_backend.py` | 学習ログをGoogleドライブから取得（任意・ページング対応）。 |
 | `oasis_bookmarklet_v2.html` | オッズ・出走馬・パッシブ効果の取得ブックマークレット（bm.js）。 |
 | `oasis_buy_bookmarklet_v2.html` | 買い目の一括購入（buy.js）。 |
-| `oasis_probe_bookmarklet.html` | 単勝プールの試し買い実測＋全データ取得（probe.js）。 |
+| ~~`oasis_probe_bookmarklet.html`~~ | **2026/08/24 削除**。単勝プール実測は bm.js に統合。 |
 | `oasis_harvest_bookmarklet.html` | 過去の確定レースを result API から一括採取し、loggと同書式で出力（harvest.js）。学習データ増やし用。 |
 | `bookmarklets/src/*.js` + `minify.py` | ブックマークレットの元ソースとビルダー。`minify.py` が `//` コメントを安全に落として1行化しHTMLへ注入。 |
 | `make_formula_doc.py` | 現在の学習係数から「スコア計算式」閲覧用HTML(`oasis_score_formula.html`)を生成。 |
@@ -288,7 +288,7 @@ rating = 定数 × Σ_区間 Σ_stat( 区間重み[区間][stat] × 距離バラ
 | ソース | 役割 | rrc消費 |
 |---|---|---|
 | `bm.js` | オッズ・出走馬・パッシブ効果を取得しツールへ貼れる形でコピー | なし |
-| `probe.js` | 単勝を1口ずつ試し買いしてプールを実測（1000rrc単位にスナップ, 確定で打切り）＋全データ取得 | あり |
+| ~~`probe.js`~~ | **2026/08/24 削除 → bm.js に統合**。3連単セクションが 08/11 のまま（初期金20万・旧オッズ式）で、使うと危険だった。 |
 | `buy.js` | 推奨買い目の一括購入（3連単・単勝, 上限口数厳守） | あり |
 | `harvest.js` | 過去の確定レースを result API から一括採取し **loggと同書式**で出力（学習データ増やし） | なし |
 

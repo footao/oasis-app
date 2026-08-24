@@ -22,8 +22,110 @@ try{
  };
  btn.textContent='🏇 レースデータ取得中...';
  const race=await(await fetch(`${B}/api/race/by-id/${G}/${S}?user=${U}`)).json();
- const raw=race.pets||[], dist=race.distance||'', surf=race.surface||'';
+ let raw=race.pets||[];
+ const dist=race.distance||'', surf=race.surface||'';
  const ground=race.ground||race.track_condition||race.ground_condition||'';
+ // 金が乗っていそうな順に取りたい。単勝オッズは下限1.5に張り付いていて
+ // （直近20レースの45%が全馬同値）人気の代理にならないので使わない。
+ //   初期順  : 簡易スコア（距離重み×パッシブ×スタミナ収支）の高い組から
+ //   以降    : 金が乗っていた組に出ていた馬を重くして、取りながら並べ替える
+ // 順番が外れても打ち切り条件（残額<1口）は変わらないので、遅くなるだけで結果は同じ。
+ // 初期順は「強い組から」。SPEEDだけだと距離バランスを無視するので、実測の強さとの
+ // 順位相関は 0.271 しかない（races.jsonl 302レース）。距離重み＋パッシブ倍率＋
+ // スタミナ切れ補正まで入れた簡易スコアだと 0.820、実上位3頭を上位3に入れられる数も
+ // 1.20/3 → 2.19/3 に上がる。数字の出所は docs/race_formula.pdf。
+ // 順番が外れても打ち切り条件（残額<1口）は変わらないので、外しても遅くなるだけ。
+ const WD={'短距離':[1.96,.68,.375],'マイル':[1.40,.85,.75],'中距離':[1.26,1.105,.975],'長距離':[.84,.85,1.05]}[dist]||[1.4,.85,.75];
+ const BL={'短距離':[1.4,.8,.5],'マイル':[1,1,1],'中距離':[.9,1.3,1.3],'長距離':[.6,1,1.4]}[dist]||[1,1,1];
+ const SL={'短距離':[.0132,2.125,2.879,10],'マイル':[.0197,2.234,3.067,15],'中距離':[.03065,2.541,3.737,20],'長距離':[.04109,2.57,3.68,25]}[dist];
+ const PMUL={speed_star:[1.35,1,.9],muscle_head:[.9,1.35,1],steady_runner:[1,.9,1.35],jack_of_all:[1.05,1.05,1.05],speed_l:[1.25,1,1],power_l:[1,1.25,1],stamina_l:[1,1,1.25],speed_s:[1.15,1,1],power_s:[1,1.15,1],stamina_s:[1,1,1.15]};
+ const APT={turf_specialist:[surf,'芝',1.10],dirt_specialist:[surf,'ダート',1.10],short_special:[dist,'短距離',1.15],mile_special:[dist,'マイル',1.15],middle_special:[dist,'中距離',1.15],long_special:[dist,'長距離',1.15]};
+ const spc={};raw.forEach(h=>{spc[h.adult_key]=(spc[h.adult_key]||0)+1;});
+ const strength=h=>{
+   let s=Number(h.speed)||1,p=Number(h.power)||1,t=Number(h.stamina)||1;
+   for(const c of [h.passive_skill,h.passive_skill_2]){
+     const m=PMUL[c]; if(m){s*=m[0];p*=m[1];t*=m[2];continue;}
+     const a=APT[c]; if(a){if(a[0]===a[1]){s*=a[2];p*=a[2];t*=a[2];}continue;}
+     if(c==='same_kind_boost'&&spc[h.adult_key]>1){s*=1.2;p*=1.2;t*=1.2;}
+   }
+   let r=s*WD[0]+p*WD[1]+t*WD[2];
+   if(SL){ // スタミナ切れは最大 -35%、余りは +3% で頭打ち（非対称）
+     const d=Math.floor(t)-Math.min(Math.max(SL[0]*(s*.6*BL[0]+p*.3*BL[1]+t*.1*BL[2]),SL[1]),SL[2])*SL[3];
+     r*= d<0 ? Math.max(.65,1+.02*d) : Math.min(1.03,1+.0012*d);}
+   return Math.max(r,1);
+ };
+ // 重みの初期値を 1 ではなく簡易スコアにする。1 で始めると、最初のヒットで並べ替えた
+ // 瞬間に「ヒット馬を含まない組」が全部 weight=1 で同点になり、**簡易スコアの順序が
+ // 捨てられる**（今までは Array#sort が安定なおかげで辛うじて残っていただけ）。
+ // スコアを種にしておけば sc = スコア積 × 3^(ヒット回数) となって両方が効き続ける。
+ // 初期ソートも sc でそのまま書けるので、別立ての SPEED 積ソートは要らない。
+ // ---- 単勝プールの実測（試し買い）----
+ // 単勝は控除0%の純パリミュチュエルなので Σ(1/od)=1.000。つまり**オッズはシェアしか
+ // 表さず、プール総額の情報を含まない**。自分で少額入れて前後の動きから逆算するしかない。
+ //   od_j = P / P_j。自分が Δ 入れると P→P+Δ。**自分が買っていない**馬 j は P_j 不変なので
+ //   od_j後 / od_j前 = (P+Δ)/P = R（全馬共通）→ P = Δ/(R−1)
+ // オッズは小数2桁なので丸め誤差は od に反比例する。比 R は**重み od² の加重平均**で取る
+ // （分散最小）。試し買い先は簡易スコアが最も高い馬＝どのみち買いたい馬なので無駄にならない。
+ // 0 にすれば試し買いしない。3口=3,000rrc。
+ // MAX_PROBE 口まで**1口ずつ**買って、目標精度に届いた時点で止める。
+ // 1発で3口買うより要求精度に対して無駄がない。全馬のオッズが同じ（NPCが均等に賭けた等）
+ // だと丸め誤差が平均化されず精度が出ないので、その場合だけ口数が伸びる。
+ // 0 にすれば試し買いしない。1口=1,000rrc。
+ const MAX_PROBE=5, WIN_UNIT=1000, ODD_STEP=0.01, TARGET_ERR=0.04;
+ let wp=null;
+ if(MAX_PROBE>0&&T){
+  const num2=v=>Number(v);
+  const usable=h=>{const o=num2(h.odds);return isFinite(o)&&o>0&&o!==1.5;};
+  const basis=raw.filter(usable);
+  if(basis.length<3){
+   btn.textContent='🏇 単勝プールは測れません（オッズの出ている馬が少ない）';
+  }else{
+   // 試し買い先は簡易スコアが最も高い馬。どのみち買いたい馬なので試し買いが無駄にならない。
+   let tgt=null;for(const h of basis){if(!tgt||strength(h)>strength(tgt))tgt=h;}
+   const before=new Map(raw.map(h=>[h.pet_id,num2(h.odds)]));
+   let spent=0, cur=raw;
+   for(let k=0;k<MAX_PROBE;k++){
+    btn.textContent=`🏇 単勝プール実測中… ${tgt.name} に ${k+1}/${MAX_PROBE}口`;
+    try{
+     const r=await fetch(`${B}/api/bet`,{method:'POST',headers:{'Content-Type':'application/json'},
+       body:JSON.stringify({user:U,guild:G,race:parseInt(S),pet_id:tgt.pet_id,amount:WIN_UNIT,token:T})});
+     if(!r.ok){if(spent===0)btn.textContent='🏇 単勝の試し買いに失敗（プール実測なし）';break;}
+     spent+=WIN_UNIT;
+    }catch(e){break;}
+    try{cur=(await(await fetch(`${B}/api/race/by-id/${G}/${S}?user=${U}`)).json()).pets||cur;}catch(e){break;}
+    // 買った馬は P_j が動くので比に使えない。残りの馬で od² 加重平均を取る。
+    let sw=0,sr=0,n=0; const seenOd=new Map();
+    for(const h of cur){
+     if(h.pet_id===tgt.pet_id)continue;
+     const ob=before.get(h.pet_id), oa=num2(h.odds);
+     if(!ob||!isFinite(oa)||oa<=0||ob===1.5||oa===1.5)continue;
+     const w=oa*oa; sw+=w; sr+=w*(oa/ob); n++;
+     // 誤差の見積もりだけは**オッズが同じ馬をまとめて1つ**として数える。
+     // 丸め誤差は「オッズの値」に対して決まるので、同値の馬を独立サンプル扱いすると
+     // 1/√n ぶん精度を過大評価する（NPCが均等に賭けて全馬同オッズのとき実際に外した）。
+     if(!seenOd.has(oa))seenOd.set(oa,w);
+    }
+    if(sw<=0||n<2)continue;
+    const R=sr/sw; if(R<=1)continue;
+    let P=spent/(R-1);
+    let swErr=0; for(const w of seenOd.values())swErr+=w;
+    const sdR=(ODD_STEP/Math.sqrt(12))*Math.sqrt(2/swErr);
+    let rel=sdR*P/spent; const sdAbs=rel*P;
+    let exact=false;
+    if(sdAbs<WIN_UNIT){                      // 1σ が1格子未満 → 1,000rrc単位に確定できる
+     P=Math.round(P/WIN_UNIT)*WIN_UNIT;
+     if(sdAbs<WIN_UNIT/4)exact=true;
+     // 格子に載せた以上、誤差は**半格子より小さくは名乗れない**（量子化の下限）
+     rel=Math.max(rel,(WIN_UNIT/2)/P);
+    }
+    wp={pool:P+spent,before:P,delta:spent,n:n,err:rel,exact:exact,
+        own:cur.reduce((s2,h)=>s2+(num2(h.my_amount)||0),0)};
+    if(exact||rel<=TARGET_ERR)break;          // 目標精度に到達したら打ち切り
+   }
+   // 出力するオッズは試し買い**後**に揃える（win_pool と同じ時点にする）
+   if(spent>0&&cur.length)raw=cur;
+  }
+ }
  const cnt={};raw.forEach(h=>{cnt[h.name]=(cnt[h.name]||0)+1;});
  const seen={};
  const pets=raw.map(h=>{
@@ -114,40 +216,6 @@ try{
  //   プール90万・od1.5（＝60口）でも ±2,000rrc で、半口(5,000)よりずっと小さい。
  //   プールが数百万まで育つと大本命だけ曖昧になりうるので、その組だけ slack を積む。
  const betOf=od=>Math.round(pool0/od/UNIT)*UNIT;
- // 金が乗っていそうな順に取りたい。単勝オッズは下限1.5に張り付いていて
- // （直近20レースの45%が全馬同値）人気の代理にならないので使わない。
- //   初期順  : 簡易スコア（距離重み×パッシブ×スタミナ収支）の高い組から
- //   以降    : 金が乗っていた組に出ていた馬を重くして、取りながら並べ替える
- // 順番が外れても打ち切り条件（残額<1口）は変わらないので、遅くなるだけで結果は同じ。
- // 初期順は「強い組から」。SPEEDだけだと距離バランスを無視するので、実測の強さとの
- // 順位相関は 0.271 しかない（races.jsonl 302レース）。距離重み＋パッシブ倍率＋
- // スタミナ切れ補正まで入れた簡易スコアだと 0.820、実上位3頭を上位3に入れられる数も
- // 1.20/3 → 2.19/3 に上がる。数字の出所は docs/race_formula.pdf。
- // 順番が外れても打ち切り条件（残額<1口）は変わらないので、外しても遅くなるだけ。
- const WD={'短距離':[1.96,.68,.375],'マイル':[1.40,.85,.75],'中距離':[1.26,1.105,.975],'長距離':[.84,.85,1.05]}[dist]||[1.4,.85,.75];
- const BL={'短距離':[1.4,.8,.5],'マイル':[1,1,1],'中距離':[.9,1.3,1.3],'長距離':[.6,1,1.4]}[dist]||[1,1,1];
- const SL={'短距離':[.0132,2.125,2.879,10],'マイル':[.0197,2.234,3.067,15],'中距離':[.03065,2.541,3.737,20],'長距離':[.04109,2.57,3.68,25]}[dist];
- const PMUL={speed_star:[1.35,1,.9],muscle_head:[.9,1.35,1],steady_runner:[1,.9,1.35],jack_of_all:[1.05,1.05,1.05],speed_l:[1.25,1,1],power_l:[1,1.25,1],stamina_l:[1,1,1.25],speed_s:[1.15,1,1],power_s:[1,1.15,1],stamina_s:[1,1,1.15]};
- const APT={turf_specialist:[surf,'芝',1.10],dirt_specialist:[surf,'ダート',1.10],short_special:[dist,'短距離',1.15],mile_special:[dist,'マイル',1.15],middle_special:[dist,'中距離',1.15],long_special:[dist,'長距離',1.15]};
- const spc={};pets.forEach(h=>{spc[h.adult_key]=(spc[h.adult_key]||0)+1;});
- const strength=h=>{
-   let s=Number(h.speed)||1,p=Number(h.power)||1,t=Number(h.stamina)||1;
-   for(const c of [h.passive_skill,h.passive_skill_2]){
-     const m=PMUL[c]; if(m){s*=m[0];p*=m[1];t*=m[2];continue;}
-     const a=APT[c]; if(a){if(a[0]===a[1]){s*=a[2];p*=a[2];t*=a[2];}continue;}
-     if(c==='same_kind_boost'&&spc[h.adult_key]>1){s*=1.2;p*=1.2;t*=1.2;}
-   }
-   let r=s*WD[0]+p*WD[1]+t*WD[2];
-   if(SL){ // スタミナ切れは最大 -35%、余りは +3% で頭打ち（非対称）
-     const d=Math.floor(t)-Math.min(Math.max(SL[0]*(s*.6*BL[0]+p*.3*BL[1]+t*.1*BL[2]),SL[1]),SL[2])*SL[3];
-     r*= d<0 ? Math.max(.65,1+.02*d) : Math.min(1.03,1+.0012*d);}
-   return Math.max(r,1);
- };
- // 重みの初期値を 1 ではなく簡易スコアにする。1 で始めると、最初のヒットで並べ替えた
- // 瞬間に「ヒット馬を含まない組」が全部 weight=1 で同点になり、**簡易スコアの順序が
- // 捨てられる**（今までは Array#sort が安定なおかげで辛うじて残っていただけ）。
- // スコアを種にしておけば sc = スコア積 × 3^(ヒット回数) となって両方が効き続ける。
- // 初期ソートも sc でそのまま書けるので、別立ての SPEED 積ソートは要らない。
  const STR=new Map(pets.map(h=>[h.pet_id,strength(h)]));
  const w=new Map(pets.map(h=>[h.pet_id,STR.get(h.pet_id)]));
  const sc=c=>w.get(c[0].pet_id)*w.get(c[1].pet_id)*w.get(c[2].pet_id);
@@ -227,6 +295,10 @@ try{
    if(typeof d.balance==='number')bal=d.balance;}catch{}}
  const clip=[`guild=${G}`,`schedule_id=${S}`,`pool=${poolAmt}`,
    ...(bal==null?[]:[`balance=${bal}`]),
+   ...(wp?[`win_pool=${Math.round(wp.pool)}`,`win_pool_before=${Math.round(wp.before)}`,
+           `win_pool_delta=${wp.delta}`,`win_pool_n=${wp.n}`,
+           `win_pool_err=${wp.err.toFixed(4)}`,`win_pool_exact=${wp.exact?1:0}`,
+           `win_own=${Math.round(wp.own)}`]:[]),
    ...(failed.length?[`取得失敗=${failed.length}`]:[]),'',
    '=== 出走馬一覧 ===',horseHeader,...horseRows,'',
    '=== パッシブ効果 ===','パッシブ,コード,説明',...effRows,'',
@@ -260,6 +332,7 @@ try{
  const stat=`${n}頭(2枠${n2}) | スキル${effRows.length}種 | 3連単${withOdds.length}件`
    +(noBets?`(プール0のため取得省略)`:`(${cut}/${total}点取得)`)
    +` | プール${poolAmt.toLocaleString()}rrc`
+   +(wp?` | 単勝プール${Math.round(wp.pool).toLocaleString()}rrc(試買${wp.delta.toLocaleString()})`:'')
    +(bal==null?'':` | 残高${bal.toLocaleString()}rrc`);
  const bad=unknown.size||failed.length||geared.length||mismatch.length||newFields.size||regimeBad;
  btn.style.background=(failed.length||regimeBad)?'#b71c1c':(unknown.size?'#e65100':'#1b5e20');btn.style.color='#fff';

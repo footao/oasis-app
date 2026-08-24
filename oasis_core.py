@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.12.1'
+CORE_VERSION = '3.13.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -3003,6 +3003,7 @@ def analyze(raw_text, bundle, settings=None):
         res['win_pool_mode'] = ('初期金 %s rrc と仮定（希薄化込み・控えめ）' % f'{WIN_POOL_SEED:,}'
                                 if res.get('win_pool_assumed') else '実測プール（希薄化込み）')
     elif s.get('win_bets') and mkt_p is not None:
+        res['win_pool_mode'] = 'プール未測定（希薄化を織り込めていません）'
         res['win_picks'] = win_bet_picks(
             disp, win_p_bet, odds_eff, s['bankroll'], s['kelly_fraction'],
             s.get('win_edge_min', 0.15), stake_unit=win_unit,
@@ -3271,6 +3272,8 @@ def analyze(raw_text, bundle, settings=None):
     res['buy_all'] = buy_all
     res['buy_lines'] = buy_lines
     res['buy_total'] = sum(b['stake'] for b in buy_all)
+    res['buy_win_pool'] = res.get('win_pool')
+    res['buy_win_pool_assumed'] = bool(res.get('win_pool_assumed'))
     res['buy_ev'] = sum((b['ev'] or 0) for b in buy_all)
 
     ranked_p = sorted(combo_prob.items(), key=lambda x: x[1], reverse=True)

@@ -117,7 +117,7 @@ st.set_page_config(page_title="Oasis 予測 v2", page_icon="🐎", layout="wide"
 #  片方だけ更新すると「AttributeError（内容は伏せられます）」になって
 #  原因が分からなくなるので、起動時に分かる形で止める。
 # ---------------------------------------------------------------
-REQUIRED_CORE = "3.12.1"
+REQUIRED_CORE = "3.13.0"
 _NEEDED = [
     "CORE_VERSION", "WIN_MAX_TOTAL_UNITS", "WIN_STAKE_UNIT", "UNBET_ODDS",
     "MAX_TOTAL_UNITS", "SIGMA_SAFETY", "DIST_LIST", "TRACK_LIST",
@@ -453,9 +453,9 @@ with st.sidebar:
     sleeve_pmin = st.slider("未成立の的中率下限", 0.01, 0.20, 0.05, 0.01, disabled=not sleeve_on)
 
     st.markdown("**単勝（任意・参考）**")
-    win_on = st.checkbox("単勝の推奨も出す", value=False,
-                         help=f"単勝は {oc.WIN_MAX_UNITS}口まで購入可。プール額が分からないため"
-                              "自分の購入によるオッズ低下を織り込めません。控えめに。")
+    win_on = st.checkbox("単勝の推奨も出す", value=True,
+                         help=f"単勝は {oc.WIN_MAX_UNITS}口まで購入可。2026/08/23 以降は NPC の初期プール "
+                              f"{oc.WIN_POOL_SEED:,} rrc があるので、実測しなくても希薄化を織り込めます。")
     win_edge = st.slider("単勝のエッジ下限", 0.0, 1.0, 0.15, 0.05, disabled=not win_on)
 
     st.divider()
@@ -544,6 +544,28 @@ with tab_pred:
             for m in result["messages"]:
                 (st.warning if m.startswith("⚠") else st.info)(m)
 
+            # ---------- 推奨購入（3連単＋単勝まとめ） ----------
+            if result.get("buy_all"):
+                st.subheader("🧾 推奨購入（3連単＋単勝まとめ）")
+                ba = result["buy_all"]
+                b1, b2, b3 = st.columns(3)
+                b1.metric("合計投資", f"{result['buy_total']:,} rrc",
+                          f"{len(ba)}点 / {sum(x['units'] for x in ba)}口")
+                b2.metric("実効EV合計", f"{result['buy_ev']:+,.0f} rrc")
+                b3.metric("内訳", f"3連単 {sum(1 for x in ba if x['kind']=='3連単')}点"
+                                  f" / 単勝 {sum(1 for x in ba if x['kind']=='単勝')}点")
+                st.dataframe(pd.DataFrame([{
+                    "種別": x["kind"], "状態": x["flag"], "買い目": x["target"],
+                    "口数": f"{x['units']}口",
+                    "1口": f"{x['unit']:,}", "投資": f"{x['stake']:,}",
+                    "的中率": (f"{x['p']*100:.2f}%" if x.get("p") is not None else "—"),
+                    "実効od": (f"{x['od']:.1f}" if x.get("od") else "—"),
+                    "実効EV": (f"{x['ev']:+,.0f}" if x.get("ev") is not None else "—"),
+                } for x in ba]), **_wide(hide_index=True))
+                st.caption("一括購入ブックマークレットにそのまま貼れます"
+                           "（3連単と単勝を1回でまとめて購入します）。")
+                st.code("\n".join(result["buy_lines"]), language=None)
+
             sm = result.get("summary")
             if sm:
                 st.subheader("🎯 推奨配分（安定運用）")
@@ -605,20 +627,41 @@ with tab_pred:
                     **_wide(hide_index=True))
 
             if result.get("win_picks"):
-                st.subheader("🥇 単勝の推奨"
-                             + ("（実測プール・希薄化込み）" if result.get("win_pool")
-                                else "（参考・プール未測定）"))
-                if not result.get("win_pool"):
-                    st.warning("プールを測っていないため、**自分の購入によるオッズ低下を"
-                               "織り込めていません**。下の「単勝：プールを実測して推奨を出す」で"
-                               "測ってから買うことを強くおすすめします。")
+                _wp = result.get("win_pool")
+                _assumed = bool(result.get("win_pool_assumed"))
+                _wi = result.get("win_pool_info") or {}
+                if _wp and not _assumed:
+                    _src = "実測プール" + ("・確定" if _wi.get("exact") else "・推定")
+                elif _wp:
+                    _src = "初期金の仮定のみ"
+                else:
+                    _src = "プール未測定"
+                st.subheader(f"🥇 単勝の推奨（{_src}）")
                 ws = result.get("win_summary") or {}
                 if ws:
-                    w1, w2, w3 = st.columns(3)
+                    w0, w1, w2, w3 = st.columns(4)
+                    if _wp:
+                        _d = ("実測なし・NPC初期金" if _assumed
+                              else (f"1,000rrc単位で確定" if _wi.get("exact")
+                                    else f"精度 ±{(_wi.get('err') or 0)*200:.0f}%"
+                                         f"（{int(_wi.get('n') or 0)}頭から）"))
+                        w0.metric("単勝プール総額", f"{_wp:,.0f} rrc", _d)
+                    else:
+                        w0.metric("単勝プール総額", "未測定")
                     w1.metric("投資額", f"{ws['invest']:,} rrc",
                               f"{ws['units']}口 / 上限{ws['max_units']}口")
                     w2.metric("理論EV合計", f"{ws['ev']:+,.0f} rrc")
                     w3.metric("いずれか的中", f"{min(ws['hit'],1.0)*100:.0f}%")
+                if _assumed:
+                    st.warning(
+                        f"⚠ **実測していません。** プールを初期金 {oc.WIN_POOL_SEED:,} rrc と"
+                        "仮定して計算しています。実際のプールはこれより大きいので、"
+                        "**実効オッズは表示よりさらに低くなります**。"
+                        "下の「単勝：プールを実測して推奨を出す」で測ってから買ってください。")
+                elif not _wp:
+                    st.warning("プールを測っていないため、**自分の購入によるオッズ低下を"
+                               "織り込めていません**。下の「単勝：プールを実測して推奨を出す」で"
+                               "測ってから買うことを強くおすすめします。")
                     if ws.get("capped"):
                         st.caption(f"※ 1レースの単勝は**合計{ws['max_units']}口まで**という"
                                    "ゲーム仕様の上限に達したため、エッジの大きい順に配分しています。")
@@ -733,28 +776,6 @@ with tab_pred:
                                 else:
                                     st.info("推定プールでは、エッジ条件を満たす単勝がありません"
                                             "（プールが小さいと希薄化が大きく、+EVになりにくいです）。")
-
-            # ---------- 推奨購入（3連単＋単勝まとめ） ----------
-            if result.get("buy_all"):
-                st.subheader("🧾 推奨購入（3連単＋単勝まとめ）")
-                ba = result["buy_all"]
-                b1, b2, b3 = st.columns(3)
-                b1.metric("合計投資", f"{result['buy_total']:,} rrc",
-                          f"{len(ba)}点 / {sum(x['units'] for x in ba)}口")
-                b2.metric("実効EV合計", f"{result['buy_ev']:+,.0f} rrc")
-                b3.metric("内訳", f"3連単 {sum(1 for x in ba if x['kind']=='3連単')}点"
-                                  f" / 単勝 {sum(1 for x in ba if x['kind']=='単勝')}点")
-                st.dataframe(pd.DataFrame([{
-                    "種別": x["kind"], "状態": x["flag"], "買い目": x["target"],
-                    "口数": f"{x['units']}口",
-                    "1口": f"{x['unit']:,}", "投資": f"{x['stake']:,}",
-                    "的中率": (f"{x['p']*100:.2f}%" if x.get("p") is not None else "—"),
-                    "実効od": (f"{x['od']:.1f}" if x.get("od") else "—"),
-                    "実効EV": (f"{x['ev']:+,.0f}" if x.get("ev") is not None else "—"),
-                } for x in ba]), **_wide(hide_index=True))
-                st.caption("一括購入ブックマークレットにそのまま貼れます"
-                           "（3連単と単勝を1回でまとめて購入します）。")
-                st.code("\n".join(result["buy_lines"]), language=None)
 
             st.subheader("🏆 的中確率ランキング")
             rk = result["ranking"]

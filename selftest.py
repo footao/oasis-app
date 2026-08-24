@@ -14,6 +14,7 @@ selftest.py — Oasis 予測ツール v2 の動作確認
   5. ベットログの記録・精算・レポート
 """
 import itertools
+import math
 import os
 import re
 import sys
@@ -644,6 +645,72 @@ def regression_tests():
     check('P11 黄昏の護りは『末脚』の区間・dutyで効く',
           _tw is not None and abs(_tw['power'] - (1 + 0.053 * _sp11['末脚']['duty'])) < 1e-9,
           f"PW×{_tw['power']:.5f}")
+
+    # --- P13: bm.js の単勝プール実測（試し買い）の算数 ---
+    #   od_j = P/P_j。自分が Δ 入れると自分が買っていない馬は od_j後/od_j前 = (P+Δ)/P = R。
+    #   → P = Δ/(R−1)。オッズは小数2桁なので比は od² を重みにした加重平均で取る。
+    #   ⚠ 誤差の見積もりは**同じオッズの馬を1つに数える**こと。丸め誤差はオッズの値に
+    #     対して決まるので、同値の馬を独立サンプル扱いすると 1/√n ぶん精度を過大評価する
+    #     （NPCが均等に賭けて全馬同オッズのケースで実際に外した）。
+    def _probe(amounts, tgt=0, max_probe=5, unit=oc.WIN_POOL_QUANTUM, step=oc.ODDS_STEP):
+        r2 = lambda x: round(x, oc.ODDS_DECIMALS)
+        p0 = sum(amounts)
+        before = [r2(p0 / a) for a in amounts]
+        am, spent, out = list(amounts), 0, None
+        for _ in range(max_probe):
+            am[tgt] += unit
+            spent += unit
+            p2 = sum(am)
+            after = [r2(p2 / a) for a in am]
+            sw = sr = 0.0
+            n = 0
+            seen = {}
+            for i, (ob, oa) in enumerate(zip(before, after)):
+                if i == tgt or not ob or not oa:
+                    continue
+                w = oa * oa
+                sw += w
+                sr += w * (oa / ob)
+                n += 1
+                seen.setdefault(oa, w)
+            if sw <= 0 or n < 2:
+                continue
+            R = sr / sw
+            if R <= 1:
+                continue
+            P = spent / (R - 1)
+            sd = (step / math.sqrt(12)) * math.sqrt(2 / sum(seen.values()))
+            rel = sd * P / spent
+            if rel * P < unit:
+                P = round(P / unit) * unit
+                rel = max(rel, (unit / 2) / P)      # 量子化の下限より小さくは名乗れない
+            out = (P, rel)
+            if rel <= 0.04:
+                break
+        return p0, out
+
+    _cases = [
+        ('人気に偏り', [150000, 90000, 60000, 40000, 25000, 15000, 8000, 5000,
+                    3000, 2000, 1000, 1000, 1000, 1000, 1000]),
+        ('全馬同オッズ', [27000] * 15),
+        ('8頭・小プール', [40000, 30000, 20000, 12000, 8000, 5000, 3000, 2000]),
+    ]
+    _all_ok = True
+    _detail = []
+    for _lbl, _am in _cases:
+        _true, _res = _probe(_am)
+        if not _res:
+            _all_ok = False
+            _detail.append(f'{_lbl}:測定不可')
+            continue
+        _est, _rel = _res
+        _err = abs(_est - _true) / _true
+        # 「報告した誤差が実際の誤差を下回らない」ことが命。下回ると精度を偽ることになる。
+        if _err > max(_rel, oc.WIN_POOL_QUANTUM / _true):
+            _all_ok = False
+        _detail.append(f'{_lbl}:実{_err*100:.1f}% ≤ 申告{_rel*100:.1f}%')
+    check('P13 単勝プールの実測が真値に届き、申告誤差が実誤差を下回らない',
+          _all_ok, ' / '.join(_detail))
 
     # --- P12: 装備図鑑・スキル図鑑（2026/08/23）の30種を効果名で引けること ---
     check('P12 図鑑の効果は装備16種＋お守り14種の30種',

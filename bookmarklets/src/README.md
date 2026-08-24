@@ -6,14 +6,12 @@
 ```bash
 python minify.py ../../oasis_bookmarklet_v2.html      bm.js      "🏇 レースデータ取得"
 python minify.py ../../oasis_buy_bookmarklet_v2.html  buy.js     "🛒 一括購入 v2"
-python minify.py ../../oasis_probe_bookmarklet.html   probe.js   "🔬 単勝プール実測"
 python minify.py ../../oasis_harvest_bookmarklet.html harvest.js "📥 結果を採取"
 ```
 
 | ソース | 役割 | rrc を使うか |
 |---|---|---|
 | `bm.js` | オッズ・出走馬・パッシブ効果の取得 | 使わない |
-| `probe.js` | 試し買いで単勝プールを実測 ＋ 全データ取得 | **使う**（最大5,000 rrc） |
 | `buy.js` | 買い目の一括購入（3連単・単勝） | **使う** |
 | `harvest.js` | 過去の確定レースを一括取得し、loggと同じ書式で学習データ化 | 使わない |
 | `model.js` | `model.json` を読んで**Pythonと同じ予測**をブラウザで行う（単体では何もしない） | 使わない |
