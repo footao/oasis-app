@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.13.0'
+CORE_VERSION = '3.14.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -694,12 +694,60 @@ _ENTRY_PAT = re.compile(
     r'([^\n｜]+)｜([^\n｜]+)｜([^\n\r]+)'
     r'(.*?)(?=🏇[^\n]*?出走決定|🏁[^\n]*?レース\s*結果|\Z)', re.S)
 
+# 2026/08/19〜 出走数が増えて、1レースの結果が複数メッセージに分割されるようになった
+# （2通目以降は「🏁 第1レース 結果（続き）」）。拾わないとレース丸ごと落ちる。
 _RESULT_PAT = re.compile(
-    r'🏁[^\n]*?(?:第(\d+)レース\s*)?結果\s*\n'
+    r'🏁[^\n]*?(?:第(\d+)レース\s*)?結果(?:（続き）)?\s*\n'
     r'🕘\s*(\d{1,2}:\d{2})｜([^\n｜]+)｜([^\n｜]+)｜([^\n\r]+)'
     r'(.*?)(?=🏇[^\n]*?出走決定|🏁[^\n]*?レース\s*結果|\Z)', re.S)
 
 _DATE_PAT = re.compile(r'\[(\d{4}/\d{2}/\d{2}) \d{1,2}:\d{2}\]')
+
+
+# 2026/08/19〜 装備の実装で、ログのステータス表記が
+#   「🏃 スピード：158 + 🟨 **1** ＝ **159**」（🟨 が無い版もある）
+# に変わった。素の値だけ拾うと**装備の加算ぶんを丸ごと落とす**ので、
+# 「＝ の右」があればそちらを、無ければ従来どおり最初の数字を返す。
+_STAT_RE_CACHE = {}
+
+
+def _stat_in(blk, label):
+    """馬ブロックから 1ステータスを読む。装備込みの合計を優先。読めなければ None。"""
+    pat = _STAT_RE_CACHE.get(label)
+    if pat is None:
+        pat = _STAT_RE_CACHE[label] = re.compile(
+            # 区切りは「：」（出走決定・新結果）と半角スペース（旧結果）の両方がある
+            label + r'\s*[:：]?\s*(\d+)(?:[^\n\r]*?[＝=]\s*\*{0,2}(\d+))?')
+    m = pat.search(blk)
+    if not m:
+        return None
+    return int(m.group(2) or m.group(1))
+
+
+# 2026/08/19〜 Discordログの馬ブロックに装備・お守りが載るようになった。
+#   **装備**
+#   🥾 🔵 疾風のブーツ［レア］
+#   🏃スピード+5
+#   ✨ 二の脚：中盤開始後200mのスピードが3.5%上昇
+# 加算（+5）は上の「＝ 合計」に入っているので触らない。**倍率だけ**をここで拾う。
+# 拾わないと装備持ちの馬が「説明のつかないブレ」になって残差を押し上げる。
+# 効果キーはログに無いが ITEM_EFFECT_CATALOG は**効果名で引ける**のでそのまま通る。
+_ITEM_FX_RE = re.compile(r'✨\s*([^：:\n\r]{2,14})[：:]\s*([^\n\r]+)')
+
+
+def _item_mults_from_block(blk, spec=None):
+    """馬ブロックの装備・お守りの効果 → {'speed':倍率,...}。σ系は '_sigma'。"""
+    out = {}
+    for label, desc in _ITEM_FX_RE.findall(blk or ''):
+        label = label.strip()
+        if label in ('パッシブ', 'パッシブスキル'):
+            continue
+        fx = item_effect_spec(f'{label}：{desc}', None, spec)
+        if not fx:
+            continue
+        for k, v in fx.items():
+            out[k] = out.get(k, 1.0) * float(v)
+    return out
 
 
 def _owner(s):
@@ -735,7 +783,7 @@ def horse_identity(name, owner, sp, st, pw):
     return (str(name).strip(), str(owner).strip(), int(sp), int(st), int(pw))
 
 
-def parse_entries(text):
+def parse_entries(text, spec=None):
     """『出走決定』セクションを全部抜き出す。 -> {race_key: {...}}"""
     entries = {}
     for m in _ENTRY_PAT.finditer(text):
@@ -753,18 +801,20 @@ def parse_entries(text):
         for blk in re.split(r'【枠番\s*\d+】', body)[1:]:
             n_m = re.search(r'🐣\s*([^\n\r]+)', blk)
             o_m = re.search(r'👤\s*(@[^\n\r]+)', blk)
-            s_m = re.search(r'スピード\s*[:：]\s*(\d+)', blk)
-            st_m = re.search(r'スタミナ\s*[:：]\s*(\d+)', blk)
-            p_m = re.search(r'パワー\s*[:：]\s*(\d+)', blk)
+            s_m = _stat_in(blk, 'スピード')
+            st_m = _stat_in(blk, 'スタミナ')
+            p_m = _stat_in(blk, 'パワー')
             c_m = re.search(r'コンディション\s*[:：]\s*([^\s\r\n😄😐😞🙁😰]+)', blk)
             pa_m = re.search(r'✨\s*パッシブ\s*[:：]\s*([^\n\r]+)', blk)
-            if n_m and s_m and st_m and p_m:
+            if n_m and s_m is not None and st_m is not None and p_m is not None:
+                _im = _item_mults_from_block(blk, spec)
                 horses.append({
                     'name': n_m.group(1).strip(),
                     'owner': _owner(o_m.group(1) if o_m else None),
-                    'speed': int(s_m.group(1)),
-                    'stamina': int(st_m.group(1)),
-                    'power': int(p_m.group(1)),
+                    'speed': s_m * _im.get('speed', 1.0),
+                    'stamina': st_m * _im.get('stamina', 1.0),
+                    'power': p_m * _im.get('power', 1.0),
+                    'item_sigma_mult': _im.get('_sigma', 1.0),
                     'condition': c_m.group(1).strip() if c_m else '普通',
                     'passives': parse_passives(pa_m.group(1)) if pa_m else (),
                 })
@@ -773,7 +823,7 @@ def parse_entries(text):
     return entries
 
 
-def parse_results(text):
+def parse_results(text, spec=None):
     """『レース 結果』セクションを全部抜き出す。 -> [row, ...]"""
     rows = []
     for m in _RESULT_PAT.finditer(text):
@@ -790,21 +840,25 @@ def parse_results(text):
             hm = re.search(r'(🥇|🥈|🥉|(\d+)着)\s+([^\n@]+?)\s*\n(?:(@[^\n\r]+)\s*\n)?', block)
             if not hm:
                 continue
-            s_m = re.search(r'スピード\s+(\d+)', block)
-            st_m = re.search(r'スタミナ\s+(\d+)', block)
-            p_m = re.search(r'パワー\s+(\d+)', block)
+            s_m = _stat_in(block, 'スピード')
+            st_m = _stat_in(block, 'スタミナ')
+            p_m = _stat_in(block, 'パワー')
             sc_m = re.search(r'score\s+(\d+\.?\d*)', block)
             pa_m = re.search(r'✨\s*パッシブ\s*[:：]\s*([^\n\r]+)', block)
             od_m = re.search(r'(?:最終)?オッズ\s*[:：]?\s*([0-9.]+)', block)
             # 結果ブロックに直接コンディションが書かれている場合（API採取ログ等）はそれを使う。
             cd_m = re.search(r'コンディション\s*[:：]\s*([^\s\r\n😄😐😞🙁😰]+)', block)
-            if s_m and st_m and p_m and sc_m:
+            if s_m is not None and st_m is not None and p_m is not None and sc_m:
+                _im = _item_mults_from_block(block, spec)
                 rows.append({
                     'race_key': r_key, 'race_no': race_no,
                     'rank': RANK_MAP.get(hm.group(1)) or int(hm.group(2)),
                     'name': hm.group(3).strip(), 'owner': _owner(hm.group(4)),
-                    'speed': int(s_m.group(1)), 'stamina': int(st_m.group(1)),
-                    'power': int(p_m.group(1)), 'score': float(sc_m.group(1)),
+                    'speed': s_m * _im.get('speed', 1.0),
+                    'stamina': st_m * _im.get('stamina', 1.0),
+                    'power': p_m * _im.get('power', 1.0),
+                    'item_sigma_mult': _im.get('_sigma', 1.0),
+                    'score': float(sc_m.group(1)),
                     'passives': parse_passives(pa_m.group(1)) if pa_m else (),
                     'win_odds': float(od_m.group(1)) if od_m else np.nan,
                     'condition': cd_m.group(1).strip() if cd_m else None,
@@ -857,7 +911,7 @@ def is_excluded_race(schedule_id=None, date=None, time=None):
     return bool(k and k in EXCLUDED_RACES)
 
 
-def parse_race_log(log_path=None, texts=None):
+def parse_race_log(log_path=None, texts=None, spec=None):
     """ログ（ファイル/フォルダ/グロブ、または文字列のリスト）→ 1行1頭の DataFrame。"""
     all_rows, all_entries = [], {}
     chunks = list(texts) if texts else []
@@ -867,8 +921,8 @@ def parse_race_log(log_path=None, texts=None):
         except UnicodeDecodeError:
             chunks.append(open(f, encoding='utf-8', errors='replace').read())
     for text in chunks:
-        all_entries.update(parse_entries(text))
-        all_rows.extend(parse_results(text))
+        all_entries.update(parse_entries(text, spec))
+        all_rows.extend(parse_results(text, spec))
 
     # レース番号の表記ゆれ（結果側に番号が無い等）に備えたベースキーの照合表。
     # 同じ「日付 時刻」に複数エントリがある場合は曖昧なのでフォールバックしない。
@@ -1180,7 +1234,8 @@ def train_model(log_path=None, sigma_override=None, train_from=DEFAULT_TRAIN_FRO
         return {'ok': False, 'model': None, 'warnings': [],
                 'messages': [f'ログが見つかりません: {log_path}']}
 
-    df_all = parse_race_log(log_path, texts=texts)
+    # 装備の倍率をログから拾うのに spec が要る（効果名 → 実測 duty）
+    df_all = parse_race_log(log_path, texts=texts, spec=spec)
     if len(df_all) == 0:
         return {'ok': False, 'model': None, 'warnings': [],
                 'messages': ['ログを解析できませんでした（中身を確認してください）。'
