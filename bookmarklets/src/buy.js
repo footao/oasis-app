@@ -10,7 +10,7 @@ ov.style.cssText='position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.75
 ov.innerHTML='<div style="background:#1a1a2e;border:2px solid #e2b96f;border-radius:12px;padding:1.1rem;width:560px;max-width:96vw;max-height:92vh;overflow-y:auto;color:#fff">'
 +'<b style="color:#e2b96f">🛒 一括購入 v2</b><span id=_st style="float:right;font-size:.75rem"></span>'
 +'<p style="font-size:.75rem;color:#aaa;margin:.45rem 0">予測ツールの購入リストを貼り付け → 解析 → 内容を確認 → 購入</p>'
-+'<textarea id=_in placeholder="✅A → B → C&#10;✅A → B → C   （同じ行を並べると口数になります）&#10;馬名 x3      （単勝）" style="width:100%;height:120px;background:#111;color:#e2b96f;border:1px solid #444;border-radius:6px;padding:.5rem;font-size:.78rem;resize:vertical"></textarea>'
++'<textarea id=_in placeholder="3連単&#9;A → B → C&#9;2   ← 予想ツールの「推奨購入」をそのまま貼れます&#10;単勝&#9;馬名&#9;5&#10;&#10;従来の形式も可: ✅A → B → C ／ 馬名 x3" style="width:100%;height:120px;background:#111;color:#e2b96f;border:1px solid #444;border-radius:6px;padding:.5rem;font-size:.78rem;resize:vertical"></textarea>'
 +'<div style="display:flex;gap:.4rem;margin:.5rem 0">'
 +'<button id=_p style="flex:1;padding:.45rem;background:#e2b96f;color:#1a1a2e;border:none;border-radius:6px;font-weight:700;cursor:pointer">解析</button>'
 +'<button id=_c style="padding:.45rem .8rem;background:#444;color:#fff;border:none;border-radius:6px;cursor:pointer">✕</button></div>'
@@ -74,10 +74,24 @@ $('_p').onclick=()=>{
     let l=raw.replace(/[✅◎●・]/g,'').trim();
     if(!l) continue;
     let mult=1;
+    // 予想ツールの「推奨購入（3連単＋単勝まとめ）」形式: 種別<TAB>買い目<TAB>口数
+    // 3連単と単勝が1本のリストで来るので、そのまま貼れば両方まとめて買える。
+    const tab=l.split('\t').map(x=>x.trim());
+    if(tab.length>=3&&/^(3連単|単勝)$/.test(tab[0])&&/^\d+$/.test(tab[2])){
+      mult=parseInt(tab[2]); l=tab[1];
+      if(tab[0]==='単勝'){
+        if(ambiguous.has(l)){ log('❌ 同名馬がいるため「'+esc(l)+'」だけでは特定できません。#1 / #2 を付けてください。','#ef5350'); bad++; continue; }
+        const id0=idx[l];
+        if(!id0){ log('❌ 馬名が一致しません: '+esc(l),'#ef5350'); bad++; continue; }
+        win[id0]=(win[id0]||0)+mult; continue;
+      }
+      // 3連単はこの下の「→」経路にそのまま流す
+    } else {
     const mm=l.match(/[\sx×*]\s*(\d+)\s*口?\s*$/i);
     if(mm && !l.includes('→')){ mult=parseInt(mm[1]); l=l.slice(0,mm.index).trim(); }
     else { const m2=l.match(/(?:[x×*]\s*(\d+)|(\d+)\s*口)\s*$/i);
            if(m2){ mult=parseInt(m2[1]||m2[2]); l=l.slice(0,m2.index).trim(); } }
+    }
     if(l.includes('→')){
       const p=l.split('→').map(s=>s.replace(/\s{2,}[\s\S]*/,'').trim());
       if(p.length<3){ log('❌ 形式不明: '+esc(raw.trim()),'#ef5350'); bad++; continue; }

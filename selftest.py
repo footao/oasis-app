@@ -336,16 +336,19 @@ def regression_tests():
     check('軽微1 同名馬は素名フォールバックの対象外のまま（確率コピー防止）',
           _cnt.get('ぴよ') == 2, f'素名カウント={_cnt}')
 
-    # --- P1: 3連単の初期プール金（サイト側のバグ）の補正 ---
-    # 表示オッズは (プール総額 − 20万) で計算されているのに、払戻はプール総額から出る。
-    # 補正を戻すと EV を過小評価して買い目を取りこぼすので、ここで固定する。
+    # --- P1: 3連単の初期プール金（旧バグ）の補正 ---
+    # 表示オッズが (プール総額 − 初期金) で計算されていた時代の補正式。
+    # 2026/08/23 に「直った」前提で TRIFECTA_SEED_BUG_ACTIVE=False にしたが、
+    # 再発したら True に戻すだけで効くように、**補正式そのものは常に検証しておく**。
     _S = oc.TRIFECTA_POOL_SEED
-    _bets = [3, 5, 1, 12]                       # 各組の口数（1口10,000rrc）
+    # 補正が穏やかになる口数にしておく（初期金がプールの大半だと Σ(1/od) が
+    # 正気の範囲 INV_SUM_SANE を割って、下の CO 判定が安全側に倒れて何も起きない）。
+    _bets = [30, 25, 20, 15]                    # 各組の口数（1口10,000rrc）
     _pool = sum(_bets) * oc.STAKE_UNIT + _S
     _disp_od = [(_pool - _S) / (b * oc.STAKE_UNIT) for b in _bets]   # サイトの表示値
     _true_od = [_pool / (b * oc.STAKE_UNIT) for b in _bets]          # 実際の払戻
     _got = [oc.true_trifecta_odds(o, _pool) for o in _disp_od]
-    check('P1 初期プール金20万ぶんオッズを補正する',
+    check('P1 初期プール金ぶんオッズを補正する',
           all(abs(g - t) < 1e-9 for g, t in zip(_got, _true_od)),
           f'プール{_pool:,} → 補正 x{_pool/(_pool-_S):.3f}')
     # 補正後のオッズから賭け金を逆算すると、必ず1口(10,000)の倍数に戻ること。
@@ -358,6 +361,8 @@ def regression_tests():
           and oc.true_trifecta_odds(10.0, _S - 1) == 10.0
           and oc.true_trifecta_odds(10.0, 0) == 10.0)
     # キャリーオーバー判定は**補正前**の値で行うこと（補正後だと二重に足す）
+    # seed を渡すと「初期金がオッズに入っている(=修正後)」判定が先に効くので、
+    # ここでは**旧仕様の補正が正しいか**だけを見たいので seed は渡さない。
     _pp_raw, _ci_raw = oc.resolve_payout_pool(_pool, _disp_od)
     _pp_cor, _ci_cor = oc.resolve_payout_pool(_pool, _got)
     check('P1 CO判定に補正後オッズを渡すと二重計上になる（＝補正前を渡すのが正）',
@@ -369,8 +374,8 @@ def regression_tests():
     # 補正後で正規化すると Σ(1/od) が 1/_f に落ち、max(...,1.0) のクランプで
     # q が一律 1/_f 倍に縮む（＝λ混合の市場側が実質死ぬ）。
     _S2 = oc.TRIFECTA_POOL_SEED
-    _P2 = 400_000
-    _b2 = [80_000, 60_000, 30_000, 20_000, 10_000]      # 合計 = P − seed（完全な市場）
+    _P2 = 900_000
+    _b2 = [240_000, 180_000, 90_000, 60_000, 30_000]    # 合計 = P − seed（完全な市場）
     check('P2 完全な市場なら補正前 Σ(1/od) は 1.00',
           abs(sum(b / (_P2 - _S2) for b in _b2) - 1.0) < 1e-9)
     _disp2 = [(_P2 - _S2) / b for b in _b2]
@@ -570,9 +575,106 @@ def regression_tests():
     _sl = [x for x in (_r7.get('alloc_rows') or []) if x.get('flag') == '未']
     check('P7 プール0でも初期プール金をプール総額として扱う',
           _r7.get('pool') == oc.TRIFECTA_POOL_SEED, f"pool={_r7.get('pool')}")
-    check('P7 プール0でも未成立スリーブを出す（実効21倍）',
-          bool(_sl) and abs((_sl[0].get('eff_od') or 0) - 21.0) < 1e-6,
+    check('P7 プール0でも未成立スリーブを出す（実効31倍）',
+          bool(_sl) and abs((_sl[0].get('eff_od') or 0)
+                            - (oc.TRIFECTA_POOL_SEED + oc.STAKE_UNIT) / oc.STAKE_UNIT) < 1e-6,
           f"{len(_sl)}点 / 実効od={_sl[0].get('eff_od') if _sl else None}")
+
+    # --- P11: 2026/08/23 アプデ（初期金30万・オッズ修正・単勝NPCプール40万）---
+    #   Σ(1/od) がどちらの世界かを言い当てられること。ここを取り違えると、
+    #   「まだ金が乗っている組を未成立と誤判定して総取り狙いの買い目を出す」
+    #   という一番危ない外し方をする。
+    _P11 = 900_000
+    _bug11 = [(_P11 - oc.TRIFECTA_POOL_SEED) / b for b in (300_000, 200_000, 100_000)]
+    _fix11 = [_P11 / b for b in (300_000, 200_000, 100_000)]
+    check('P11 Σ(1/od)=1.00 なら旧仕様（初期金がオッズに入っていない）と判定',
+          oc.check_seed_regime(_P11, _bug11)[0] == 'buggy',
+          f'Σ={oc.check_seed_regime(_P11, _bug11)[1]:.3f}')
+    check('P11 Σ(1/od)=(P−S)/P なら修正済みと判定',
+          oc.check_seed_regime(_P11, _fix11)[0] == 'fixed',
+          f'Σ={oc.check_seed_regime(_P11, _fix11)[1]:.3f} / 期待 '
+          f'{oc.check_seed_regime(_P11, _fix11)[2]:.3f}')
+    check('P11 初期金がプールに対して小さすぎると判別不能を返す（誤判定しない）',
+          oc.check_seed_regime(oc.TRIFECTA_POOL_SEED * 30, _fix11)[0] == 'unknown')
+    # 修正後の regime では「キャリーオーバー」に化けないこと（払戻を P²/(P−S) と過大評価する）
+    _pp11, _ci11 = oc.resolve_payout_pool(_P11, _fix11, seed=oc.TRIFECTA_POOL_SEED)
+    check('P11 修正後のΣをキャリーオーバーと誤読しない',
+          _ci11['regime'] == 'seeded' and abs(_pp11 - _P11) < 1e-6,
+          f"regime={_ci11['regime']} / 払戻プール {_pp11:,.0f}")
+    check('P11 3連単の初期金は30万・単勝のNPCプールは40万',
+          oc.TRIFECTA_POOL_SEED == 300_000 and oc.WIN_POOL_SEED == 400_000)
+
+    # 実データ race 2097（2026/08/23 アプデ後・全2,730組そろい）で検算:
+    #   プール 360,000 / 6組が各オッズ36 → Σ(1/od)=0.16667=(360,000−300,000)/360,000
+    #   賭け金/組 = P/od = 10,000 rrc = ちょうど1口。**バグは直っている**。
+    check('P11 実データ(race 2097)で修正済みと判定できる',
+          oc.check_seed_regime(360_000, [36.0] * 6)[0] == 'fixed'
+          and abs(360_000 / 36.0 - oc.STAKE_UNIT) < 1e-6,
+          f'Σ={oc.check_seed_regime(360_000, [36.0] * 6)[1]:.5f} / 賭け金 {360_000/36:,.0f} rrc')
+
+    # 装備専用の効果キーは別表で正しいパッシブに寄せること。
+    # 寄せられないと「追い抜かれてから200m」を常時発動と読んで 15倍 盛る。
+    _sp11 = oc.load_passive_spec(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'passive_spec.json'))
+    _rv = oc.item_effect_spec('追い抜かれてから200mの間、パワーが4.4%上昇',
+                              'gear_revenge_mark', _sp11)
+    check('P11 復讐刻印は『不屈』の実測dutyまで割り引く（常時扱いにしない）',
+          _rv is not None and _rv['power'] < 1.005,
+          f"PW×{_rv['power']:.5f}（別表なしなら 1.044）")
+    check('P11 泥啜り（ダート限定）は芝で乗せない',
+          oc.item_effect_spec('ダートでスタミナとパワーがそれぞれ1.6%上昇',
+                              'gear_dirt_gnaw', _sp11) is None)
+    _tw = oc.item_effect_spec('終盤のパワーが5.3%上昇', 'charm_twilight_guard', _sp11)
+    check('P11 黄昏の護りは『末脚』の区間・dutyで効く',
+          _tw is not None and abs(_tw['power'] - (1 + 0.053 * _sp11['末脚']['duty'])) < 1e-9,
+          f"PW×{_tw['power']:.5f}")
+
+    # --- P12: 装備図鑑・スキル図鑑（2026/08/23）の30種を効果名で引けること ---
+    check('P12 図鑑の効果は装備16種＋お守り14種の30種',
+          len(oc.ITEM_EFFECT_CATALOG) == 30, f'{len(oc.ITEM_EFFECT_CATALOG)}種')
+    check('P12 効果名を説明文の頭から取り出せる',
+          oc.item_effect_label('末脚：終盤のパワーが8.2%上昇') == '末脚'
+          and oc.item_effect_label('スピードが常時4.4%上昇') is None)
+    _sp12 = oc.load_passive_spec(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'passive_spec.json'))
+    # 効果キーが分からない新効果でも、**効果名だけ**で実測 duty まで割り引けること
+    _br = oc.item_effect_spec('血走り：残りスタミナ25%以下でスピードが8.5%上昇',
+                              'gear_unknown_key_9999', _sp12)
+    check('P12 コード未知でも効果名で duty を引ける（血走り＝残ST25%以下 0.183）',
+          _br is not None and abs(_br['speed'] - (1 + 0.085 * 0.183)) < 1e-9,
+          f"SP×{_br['speed']:.5f}（割引なしなら 1.085）")
+    # 「AとBがそれぞれN%」型を両方に効かせ、かつ**二重計上しない**こと
+    _pair = oc.spec_from_description('スピードとパワーがそれぞれ3.0%上昇')
+    check('P12 「AとBがそれぞれN%」は両方に1回ずつ掛かる（二重計上しない）',
+          _pair['mult'] == {'speed': 1.03, 'power': 1.03},
+          f"{_pair['mult']}（抜き忘れると power が 1.0609 になる）")
+    check('P12 馬場限定（芝啜り/泥啜り）はこの場では乗せない',
+          oc.item_effect_spec('芝啜り：芝でスピードとパワーがそれぞれ2.4%上昇',
+                              'gear_turf_gnaw', _sp12) is None
+          and oc.item_effect_spec('泥啜り：ダートでスタミナとパワーがそれぞれ1.6%上昇',
+                                  'gear_dirt_gnaw', _sp12) is None)
+    check('P12 安定の加護は図鑑経由でも σ に落ちる',
+          (oc.item_effect_spec('安定の加護：レース中の乱数幅を1.9%狭める',
+                               'charm_consistency', _sp12) or {}).get('_sigma') == 0.981)
+    # 図鑑の全効果名が、説明文つきで渡されたときに例外を出さないこと
+    _ok12 = True
+    for _lb in oc.ITEM_EFFECT_CATALOG:
+        try:
+            oc.item_effect_spec(f'{_lb}：パワーが5.0%上昇', None, _sp12)
+        except Exception:
+            _ok12 = False
+    check('P12 図鑑30種すべてが例外なく処理できる', _ok12)
+
+    # 推奨購入（3連単＋単勝）が1本のリストにまとまること
+    _r11 = oc.analyze(_t7, _b7, {'dist': 'マイル', 'track': '芝',
+                                 'unformed_sleeve': True, 'bankroll': 3_000_000})
+    _ba = _r11.get('buy_all') or []
+    check('P11 推奨購入がまとまって出る（種別＋買い目＋口数）',
+          bool(_ba) and all(x['kind'] in ('3連単', '単勝') for x in _ba)
+          and all(len(l.split('\t')) == 3 for l in _r11['buy_lines']),
+          f"{len(_ba)}点 / 合計 {_r11['buy_total']:,} rrc")
+    check('P11 まとめの投資額は口数×1口の合計と一致',
+          _r11['buy_total'] == sum(x['units'] * x['unit'] for x in _ba))
 
     # --- P9: 分散低減のお守り（安定の加護）を σ に落とすこと ---
     #   「レース中の乱数幅を1.9%狭める」はステータス倍率ではないので _pct_mults では拾えず、
@@ -603,7 +705,7 @@ def regression_tests():
           _sg[0] < _sg[1], f'{_sg[0]:.6f} < {_sg[1]:.6f}')
 
     # --- P6: 貼り付けの balance= を読み、トークンは載っていないこと ---
-    _txt = ('guild=1\nschedule_id=2\npool=400000\nbalance=3120000\n\n'
+    _txt = ('guild=1\nschedule_id=2\npool=900000\nbalance=3120000\n\n'
             '=== 出走馬一覧 ===\n'
             'レース距離,馬場,地面,馬名,成体種,SPEED,POWER,STAMINA,コンディション,'
             'パッシブスキル1,パッシブスキル2,単勝オッズ,自分の購入額\n'

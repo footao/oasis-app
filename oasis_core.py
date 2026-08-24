@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.10.0'
+CORE_VERSION = '3.12.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -56,7 +56,13 @@ STAKE_UNIT          = 10_000   # 3連単 1口 = 10,000 rrc
 #   (プール総額 − 20万) を分子にして計算されている。払戻はプール総額から出るので、
 #   実際の払戻は表示オッズの P/(P−20万) 倍になる。プールが小さいほど差が大きい
 #   （プール30万なら3.0倍、100万なら1.25倍、500万なら1.04倍）。
-TRIFECTA_POOL_SEED  = 200_000
+# 2026/08/23 のアプデで 20万 → 30万 に増額（馬主が装備で金欠になったため）。
+TRIFECTA_POOL_SEED  = 300_000
+# 単勝プールの初期金。NPC が各おあしすっちに自動で賭けてくれるので、
+# **3連単の初期金と違って「実際の投票」として入っている**（＝表示オッズに織り込み済み・
+# Σ(1/od)=1.0 は保たれる）。実測できないときの下限値として使う。
+# 少なめに見るぶんには希薄化を過大評価する＝買い控える方向なので安全側。
+WIN_POOL_SEED       = 400_000
 MAX_UNITS           = 20       # 1組あたり上限口数
 MAX_TOTAL_UNITS     = 20       # 1レース合計口数の上限（2026/04/17 で 10→20）
 WIN_MAX_UNITS       = 100      # 単勝の1頭あたり上限口数
@@ -393,6 +399,12 @@ _PCT_RE = re.compile(r'(スピード|パワー|スタミナ|全ステータス)�
                      r'(\d+(?:\.\d+)?)[%％](上昇|低下|アップ|ダウン)')
 
 
+# 「スピードとパワーがそれぞれ2.4%上昇」型（2026/08/23 の図鑑で判明）。
+# _PCT_RE は『◯◯が』しか見ないので、この書き方だと**前半のステータスを取り逃す**。
+# 該当: 芝啜り / 泥啜り / 逆境祈願 / 禍福転倒（いずれも2ステータス同時）。
+_PAIR_RE = re.compile(r'(スピード|パワー|スタミナ)と(スピード|パワー|スタミナ)が'
+                      r'[^。、%％\d]{0,6}(\d+(?:\.\d+)?)[%％](上昇|低下|アップ|ダウン)')
+
 _ABILITY_RE = re.compile(r'走行能力が(\d+(?:\.\d+)?)[%％](上昇|低下)')
 _PROB_RE = re.compile(r'(\d+(?:\.\d+)?)[%％]の確率で発動')
 _CONSUME_RE = re.compile(r'スタミナ消費量[^。]*?(\d+(?:\.\d+)?)[%％](増加|減少)')
@@ -413,6 +425,14 @@ def _pct_mults(d):
         v = 1 + float(pct) / 100 if dirn == '上昇' else 1 - float(pct) / 100
         for k in ('speed', 'power', 'stamina'):
             mult[k] = mult.get(k, 1.0) * v
+    # 「AとBがそれぞれN%」を先に処理し、**その部分を文字列から抜いて**から _PCT_RE に渡す。
+    # 抜かないと後半（『パワーがそれぞれ3.0%上昇』）が二重に掛かって 1.03 が 1.0609 になる。
+    for a, b_, pct, dirn in _PAIR_RE.findall(d):
+        v = 1 + float(pct) / 100 if dirn in ('上昇', 'アップ') else 1 - float(pct) / 100
+        for st in (a, b_):
+            k = _STAT_JA[st]
+            mult[k] = mult.get(k, 1.0) * v
+    d = _PAIR_RE.sub('', d)
     for st, pct, dirn in _PCT_RE.findall(d):
         v = 1 + float(pct) / 100 if dirn in ('上昇', 'アップ') else 1 - float(pct) / 100
         keys = ['speed', 'power', 'stamina'] if _STAT_JA[st] == 'all' else [_STAT_JA[st]]
@@ -512,10 +532,41 @@ DUTY_MEASURED = {
     'ペース配分': 0.290,      # 推定 0.333
     '末脚': 0.315,           # 推定 0.333
     '不屈': 0.065,           # 推定 0.100
-    '二の脚': 0.128,         # 推定 0.150
-    '競り合い': 0.514,        # 推定 0.500
+    '二の脚': 0.153,         # 推定 0.150（パッシブ0.149 / 装備0.157 で一致）
+    '競り合い': 0.655,        # 推定 0.500 → 2026/08/21 再測（下の注記）
     'ロングスパート': 0.488,   # 推定 0.500
 }
+
+# --- 2026/08/21 再測（races.jsonl 343レース・26,935区間）---------------------
+# 上の値は**パッシブとして持っている馬だけ**で測ったもの。timeline の
+# activated_passives は装備由来だと `gear_◯◯` というタグで入るので、コード名だけで
+# 照合すると装備由来がまるごと 0 として数えられる（この誤りで一度 競り合い 0.286 という
+# 過小値を出した）。両方を数え直した結果:
+#
+#   パッシブ    現行    パッシブ由来      装備由来
+#   末脚       0.315   0.315(n=17)   0.315(n=34)   ← 区間ベースの技は完全に一致
+#   中盤加速     0.400   0.400(n=23)   0.400(n=23)
+#   ロケスタ     0.287   0.286(n=62)   0.289(n=9)
+#   二の脚      0.128   0.149(n=24)   0.157(n=30)   → 0.153 に更新
+#   競り合い     0.514   0.537(n=17)   0.788(n=15)   → 全体平均 0.655 に更新
+#
+# 「区間限定の技は装備由来でもパッシブと同じ duty」という item_effect_spec の前提は、
+# 末脚・中盤加速・ロケットスタートで**厳密に一致**したので裏が取れた。
+#
+# ⚠ 競り合いだけ由来で差が出る（p=0.040 / Mann-Whitney）。ただし n=15 対 17 で、
+# 13種を横断して見ている以上たまたまの可能性が高い。そもそも発動率は**二峰性**で、
+# 「ほぼ全区間ずっと競っている(0.9〜1.0)」か「ほぼ独走(0.1〜0.3)」に割れる。
+#
+# ⚠ 「強い馬ほどトップ争いで競り合いが発動しやすい／弱い馬はまばら」という仮説は
+# **成立しなかった**。着順（相対順位）と発動率の相関は spearman -0.184 (p=0.315, n=32)。
+# 1着馬の実測値も 0.12 / 0.13 / 1.00 / 1.00 とばらばらで、強さではなく
+# そのレースの位置取り次第。よって着順依存の duty は入れない。
+#
+# 位置条件が**説明文に明記されている**技（追い込み・差しの構え＝下位半分のとき）だけは
+# 着順依存が実在する（追い込み: 上位25% 0.00 / 下位25% 0.32）。ただし現状は平均値で
+# 代用している。影響は小さく（PW×1.12・duty差0.3 → レート換算で約1%、残差σ7.5%の1/7）、
+# 予測に使えるのは着順ではなく**予測着順**なので2パス化が要る。n が増えるまで保留。
+# ---------------------------------------------------------------------------
 
 
 def apply_measured_duty(name, sp):
@@ -1761,6 +1812,90 @@ _PASSIVE_COLS2 = [('パッシブスキル1', 'パッシブスキル2')]
 _ITEM_EFFECT_COLS = [('装備効果', '装備', '装備効果キー'), ('お守り効果', 'お守り', 'お守り効果キー')]
 
 
+# =====================================================================
+#  装備・お守りの効果カタログ（2026/08/23「装備図鑑・スキル図鑑」実装で公開）
+# =====================================================================
+# 装備16種＋お守り14種。**効果名（日本語ラベル）で引く**。
+# effect_key はパッシブのコードと一致しないものが多く（復讐刻印・黄昏の護りなど）、
+# 一致しないと item_effect_spec が説明文だけから発動範囲を推測してしまう。
+# 実害の例（race 2097）: gear_revenge_mark「追い抜かれてから200mの間、パワーが4.4%上昇」
+#   → 区間語が無いので常時扱いになり PW×1.044。実体は『不屈』(duty 0.065)で ×1.0029。**15倍**。
+#
+# alias  : 同じ発動条件のパッシブ名。scope と実測 duty をそのまま借りる。
+# duty   : 対応するパッシブが無い新条件。races.jsonl の timeline 1,627頭で実測した値。
+# scope  : 'always'（常時）/ 'aptitude'（馬場一致時のみ）/ 'variance'（σに作用）
+#          / 'conditional'（duty で割り引く）/ 'learned'（倍率に落とせない）
+#
+# ⚠ duty は**全馬平均**。「先頭の間」のように強い馬ほど発動しやすい条件は、
+#    本命では過小・人気薄では過大になる。競り合いで確認したとおり着順との相関は
+#    弱い（spearman -0.184, p=0.315）ので、着順依存にはしていない。
+ITEM_EFFECT_CATALOG = {
+    # ---- 装備（16種）----
+    'ロケットスタート': dict(alias='ロケットスタート'),   # 序盤のスピード
+    '中盤加速':       dict(alias='中盤加速'),           # 中盤のパワー
+    '末脚':           dict(alias='末脚'),               # 終盤のパワー
+    '二の脚':         dict(alias='二の脚'),             # 中盤開始後200mのスピード
+    '追い込み':       dict(alias='追い込み'),           # 終盤で下位半分ならパワー
+    '競り合い':       dict(alias='競り合い'),           # 20m以内にライバル
+    '復讐刻印':       dict(alias='不屈'),               # 追い抜かれてから200m
+    '亡者の追走':     dict(alias='差しの構え'),         # 中盤で下位半分ならスピード
+    '孤影の疾走':     dict(scope='conditional', duty=0.101),  # 50m以内に相手がいない
+    '血走り':         dict(scope='conditional', duty=0.183),  # 残スタミナ25%以下でスピード
+    '骨砕き':         dict(scope='conditional', duty=0.183),  # 残スタミナ25%以下でパワー
+    '王殺し':         dict(scope='conditional', duty=0.175),  # 先頭から20m以内の2位以下
+    '首位の呪い':     dict(scope='conditional', duty=0.079),  # 先頭の間（スタミナ消費も増）
+    '終焉加速':       dict(scope='conditional', duty=0.200),  # 残り300m（下の注記）
+    '芝啜り':         dict(scope='aptitude', scope_arg='芝'),
+    '泥啜り':         dict(scope='aptitude', scope_arg='ダート'),
+    # ---- お守り（14種）----
+    '俊足の加護':     dict(scope='always'),
+    '持久の加護':     dict(scope='always'),
+    '剛力の加護':     dict(scope='always'),
+    '調和の加護':     dict(scope='always'),
+    '禍福の天秤':     dict(scope='always'),             # 調和の加護の数値違い
+    '省エネの加護':   dict(scope='always'),             # スタミナ消費が常時減る
+    '安定の加護':     dict(scope='variance'),           # 乱数幅（σに作用）
+    '苦痛慣れ':       dict(alias='粘り腰'),             # 倍率に落ちない → 学習
+    '魂継ぎ':         dict(alias='緊急回復'),           # 残20%以下で一度だけ回復
+    '黄昏の護り':     dict(alias='末脚'),               # 終盤のパワー
+    '夜明けの護り':   dict(alias='ロケットスタート'),   # 序盤（スタミナ評価）
+    '先導祈願':       dict(scope='conditional', duty=0.079),  # 先頭の間
+    '逆境祈願':       dict(scope='conditional', duty=0.527),  # 下位半分の間
+    '禍福転倒':       dict(scope='conditional', duty=0.183),  # 残スタミナ25%以下
+}
+# 実測の内訳（races.jsonl の timeline / 1,627頭・26,935区間）:
+#   残スタミナ25%以下      0.183
+#   先頭の間               0.079
+#   下位半分の間           0.527
+#   先頭から20m以内の2位以下 0.175
+#   50m以内に相手がいない    0.101
+# 終焉加速「残り300m」は距離で決まるので本来は固定値ではない:
+#   短距離(1000m) 0.300 / マイル(1500m) 0.200 / 中距離(2000m) 0.150 / 長距離(2500m) 0.120
+#   距離を受け取れないので中間の 0.200 を置いている。誤差は倍率のさらに±50%で、
+#   レジェンド10%でもレート換算 0.3ポイント未満（残差σ7.5%の1/25）なので放置。
+
+# effect_key（gear_/charm_ を外したもの）→ パッシブ名。
+# ラベルで引けなかったときの保険。ラベルが図鑑と違う表記で来ても拾えるようにしておく。
+ITEM_KEY_ALIAS = {
+    'revenge_mark': '不屈',
+    'twilight_guard': '末脚',
+    'pain_tolerance': '粘り腰',
+    'dirt_gnaw': 'ダート得意',
+    'turf_gnaw': '芝得意',
+    'soul_relay': '緊急回復',
+    'dawn_guard': 'ロケットスタート',
+    'grave_chase': '差しの構え',
+}
+
+_LABEL_RE = re.compile(r'^\s*([^：:]{2,12})[：:]')
+
+
+def item_effect_label(desc):
+    """『末脚：終盤のパワーが8.2%上昇』→『末脚』。取れなければ None。"""
+    m = _LABEL_RE.match(str(desc or ''))
+    return m.group(1).strip() if m else None
+
+
 def item_effect_spec(desc, effect_key=None, spec=None):
     """装備・お守りの効果 → 発動率まで織り込んだ倍率。読めなければ None。
 
@@ -1782,13 +1917,31 @@ def item_effect_spec(desc, effect_key=None, spec=None):
     if not sp.get('mult'):
         return None
     duty, scope = float(sp.get('duty', 1.0)), sp.get('scope', 'always')
+    # ① 図鑑のラベル（『末脚：…』の『末脚』）が最優先。効果名は公式表記なので
+    #    effect_key より当てになるし、コード名が分からない新効果でも引ける。
+    cat = ITEM_EFFECT_CATALOG.get(item_effect_label(desc) or '')
+    name = (cat or {}).get('alias')
+    if cat and not name:
+        scope = cat.get('scope', scope)
+        if cat.get('duty') is not None:
+            duty = float(cat['duty'])
+        elif scope == 'always':
+            duty = 1.0
+    # ② ラベルで引けなければ effect_key（gear_/charm_ を外したものがパッシブのコード）
     key = str(effect_key or '').strip()
-    if key:
+    if not name and key:
         code = re.sub(r'^(?:gear|charm|item)_', '', key)
-        base = (spec or {}).get(passive_from_code(code) or '')
-        if base:
-            scope, duty = base.get('scope', scope), float(base.get('duty', duty))
-    # 出走メンバーや距離に依存する範囲は、この場では判定できないので採用しない
+        # passive_from_code は未知コードを**そのまま返す**ので or では別表に落ちない。
+        # 正規のコード表を先に引き、無ければ装備専用の別表を見る。
+        name = PASSIVE_CODE_MAP.get(code) or ITEM_KEY_ALIAS.get(code)
+    base = (spec or {}).get(name or '')
+    if base:
+        scope = base.get('scope', scope)
+        duty = float(base.get('duty', duty))
+    if scope == 'learned':          # 倍率に落とせない（粘り腰＝苦痛慣れ）
+        return None
+    # 出走メンバーや馬場に依存する範囲は、この場では判定できないので採用しない
+    # （呼び出し側が「反映しなかった効果」として警告に回す）
     if scope in ('aptitude', 'same_species', 'variance'):
         return None
     return {k: 1.0 + (float(m) - 1.0) * duty for k, m in sp['mult'].items()}
@@ -1989,7 +2142,34 @@ ASSUME_POOL_IS_PAYOUT = False
 # 直ったあとも補正を掛け続けると払戻を過大評価して、エッジの無いところに張ってしまう
 # （逆に、直っていないのに False にすると買い控えるだけなので、迷ったら False が安全側）。
 # 「総取り」のほうは仕様なので、こちらとは無関係に有効なまま。
-TRIFECTA_SEED_BUG_ACTIVE = True
+# 2026/08/23 のアプデで「一旦直った」と仮定して False にした（tao さんの指示）。
+# ⚠ 直ったかどうかは **Σ(1/od) を見れば分かる**:
+#     Σ(1/od) ≈ 1.0            → オッズは今も (プール − 初期金) 基準 ＝ バグ継続 → True に戻す
+#     Σ(1/od) ≈ (P − 初期金)/P → オッズがプール総額基準 ＝ 修正済み → False のまま
+# analyze() が毎回この値を出して食い違えば警告する（下の check_seed_regime）。
+TRIFECTA_SEED_BUG_ACTIVE = False
+
+
+def check_seed_regime(pool, odds_iter, seed=TRIFECTA_POOL_SEED):
+    """Σ(1/od) から「初期金がオッズに入っているか」を判定する。
+
+    バグ時   : od = (P − S)/bet  → Σ(1/od) = Σbet/(P−S) = 1.00
+    修正後   : od = P/bet        → Σ(1/od) = Σbet/P     = (P−S)/P
+    全組そろっている時だけ意味がある（早期打ち切りの部分和では判定できない）。
+    -> (regime, inv_sum, expected_fixed) / regime は 'buggy' / 'fixed' / 'unknown'
+    """
+    vals = [float(o) for o in odds_iter if o and float(o) > 0 and math.isfinite(float(o))]
+    if pool <= 0 or not vals:
+        return 'unknown', None, None
+    inv = sum(1.0 / o for o in vals)
+    exp_fixed = (pool - seed) / pool if pool > seed else None
+    if exp_fixed is None or exp_fixed > 0.95:
+        return 'unknown', inv, exp_fixed          # 初期金がプールに対して小さすぎて区別不能
+    if abs(inv - 1.0) < 0.03:
+        return 'buggy', inv, exp_fixed
+    if abs(inv - exp_fixed) < 0.03:
+        return 'fixed', inv, exp_fixed
+    return 'unknown', inv, exp_fixed
 
 
 def true_trifecta_odds(od, pool, seed=TRIFECTA_POOL_SEED):
@@ -2005,7 +2185,15 @@ def true_trifecta_odds(od, pool, seed=TRIFECTA_POOL_SEED):
     return float(od) * float(pool) / (float(pool) - float(seed))
 
 
-def resolve_payout_pool(pool, odds_iter, manual_co=None, trust=True):
+def resolve_payout_pool(pool, odds_iter, manual_co=None, trust=True,
+                        seed=None):
+    """払戻に回るプール総額を決める。
+
+    seed を渡すと「初期金がオッズの分母に入っている（＝バグ修正後）」場合を先に判定する。
+    その regime では Σ(1/od) = (P−S)/P と **1 より小さくなるのが正常**なので、
+    キャリーオーバー判定に流し込むと払戻を P²/(P−S) と過大評価してしまう。
+    2026/08/23 のアプデ（初期金 30万・オッズ修正）で実際に踏む経路なので必ず先に見る。
+    """
     vals = [float(o) for o in odds_iter if o and float(o) > 0 and math.isfinite(float(o))]
     info = {'inv_sum': None, 'regime': 'no_pool', 'carryover': 0.0,
             'bets': float(pool), 'n': len(vals)}
@@ -2013,6 +2201,12 @@ def resolve_payout_pool(pool, odds_iter, manual_co=None, trust=True):
         return pool, info
     inv = sum(1.0 / o for o in vals)
     info['inv_sum'] = inv
+    if seed and pool > seed and manual_co is None:
+        exp_fixed = (pool - seed) / pool
+        if exp_fixed <= 0.95 and abs(inv - exp_fixed) < 0.03:
+            # 初期金ぶんは誰の賭け金でもないが、払戻はプール総額から出る。
+            info.update(regime='seeded', carryover=0.0, bets=float(pool - seed))
+            return pool, info
     if manual_co is not None:
         co = max(0.0, float(manual_co))
         info.update(regime='manual', carryover=co, bets=float(pool))
@@ -2205,6 +2399,140 @@ def unformed_sleeve_picks(combo_prob, disp, od_of, P_total, p_min=0.05, edge_min
 UNBET_ODDS = 1.5           # まだ誰も賭けていない馬に表示される初期値（実測で確認）
 ODDS_DECIMALS = 2          # サイトが単勝オッズを丸めている桁数（実ログで確認）
 ODDS_STEP = 10 ** -ODDS_DECIMALS
+
+
+def estimate_win_pool(before, after, floor=None):
+    """単勝プール総額を「試し買いの前後のオッズ変化」から推定する。
+
+    単勝は控除0%の純パリミュチュエル（実ログ379レースで Σ(1/最終オッズ)=1.000、std 0.001）。
+    そのため **オッズ自体はシェアしか表さず、プール規模の情報を一切含まない**。
+    自分で少額を入れて、その前後の動きから逆算するしかない。
+
+    原理:
+      od_j = P / P_j（P=プール総額, P_j=その馬への投入額）
+      自分が合計 Δ を入れると P → P+Δ。自分が **買っていない** 馬 j は P_j が変わらないので
+          od_j後 / od_j前 = (P+Δ) / P  ＝ 全馬共通の比 R
+      よって  P = Δ / (R − 1)
+
+    推定の要点: オッズは小数2桁に丸められているため、丸め誤差は od に反比例する
+    （高オッズの馬ほど相対誤差が小さい）。そこで比 R を **重み od² の加重平均**で求める。
+    これが分散最小で、丸め誤差だけを考えたときの理論精度も同時に計算できる。
+    """
+    # 同名馬がいると名前キーの辞書では1頭消えるので、まず「名前+ステータス」で対応付け、
+    # 駄目なら出走順（位置）で対応付ける。
+    def _key(h):
+        return (str(h.get('name', '')).strip(), h.get('speed'), h.get('power'), h.get('stamina'))
+
+    pair = []
+    kb = {}
+    for h in before:
+        kb.setdefault(_key(h), []).append(h)
+    used = {}
+    for h in after:
+        k = _key(h)
+        i = used.get(k, 0)
+        cand = kb.get(k, [])
+        if i < len(cand):
+            pair.append((cand[i], h))
+            used[k] = i + 1
+    if len(pair) < len(after) and len(before) == len(after):
+        pair = list(zip(before, after))          # 位置でのフォールバック
+    msgs = []
+
+    deltas = {}
+    total_delta = 0.0
+    for hb, ha in pair:
+        mb, ma = hb.get('my_amount'), ha.get('my_amount')
+        if mb is None or ma is None:
+            continue
+        d = float(ma) - float(mb)
+        if d > 0:
+            deltas[id(ha)] = d
+            total_delta += d
+    if total_delta <= 0:
+        return {'ok': False, 'pool': None, 'messages': [
+            '試し買いの増分が見つかりません。①の後に実際に単勝を買ってから②を取得してください。'
+            '（「自分の購入額」が両方のデータに入っている必要があります）']}
+
+    sw = sr = 0.0
+    detail, singles = [], []
+    for hb, ha in pair:
+        n = str(ha.get('name', ''))
+        ob, oa = hb.get('odds'), ha.get('odds')
+        d_i = deltas.get(id(ha), 0.0)
+        note = '試し買いした馬' if d_i > 0 else ''
+        if ob is None or oa is None or not (np.isfinite(ob) and np.isfinite(oa)) \
+                or ob <= 0 or oa <= 0:
+            detail.append({'name': n, 'est': None, 'note': note or 'オッズ不明'})
+            continue
+        if d_i > 0:                       # 買った馬は P_j が動くので比の推定には使わない
+            detail.append({'name': n, 'est': None, 'od_before': float(ob),
+                           'od_after': float(oa), 'note': note})
+            continue
+        ratio = oa / ob
+        if abs(ratio - 1.0) < 1e-12:
+            detail.append({'name': n, 'est': None, 'od_before': float(ob),
+                           'od_after': float(oa), 'note': '動かず'})
+            continue
+        w = oa * oa
+        sw += w
+        sr += w * ratio
+        est = total_delta / (ratio - 1.0)
+        singles.append(est)
+        detail.append({'name': n, 'est': float(est), 'od_before': float(ob),
+                       'od_after': float(oa), 'note': note})
+
+    if sw <= 0:
+        return {'ok': False, 'pool': None, 'per_horse': detail, 'delta': total_delta,
+                'messages': ['オッズが動いておらず推定できません。'
+                             '試し買いの口数を増やすか、市場が動いてから試してください。']}
+    R = sr / sw
+    if R <= 1:
+        return {'ok': False, 'pool': None, 'per_horse': detail, 'delta': total_delta,
+                'messages': ['オッズが想定と逆に動いています（他の人の投票が大きく入った可能性）。'
+                             '測り直してください。']}
+    pool = total_delta / (R - 1.0)
+    sd_R = (ODDS_STEP / math.sqrt(12)) * math.sqrt(2.0 / sw)
+    rel_err = float(sd_R * pool / total_delta)          # 1σ の相対誤差
+    sd_abs = rel_err * pool                             # 1σ の絶対誤差（rrc）
+    pos = sorted(x for x in singles if x > 0)
+    spread = float((pos[-1] - pos[0]) / pool) if len(pos) > 1 else 0.0
+
+    # 単勝プール総額は 1,000 rrc 単位で決まる。連続推定が十分精密なら、その最も近い
+    # グリッド点にスナップすると値が“確定”する（丸め誤差より格子間隔が広いとき有効）。
+    q = WIN_POOL_QUANTUM
+    snapped = exact = False
+    if sd_abs < q:                                     # 1σ が1格子未満 → 丸めが期待誤差を減らす
+        snap_before = round(pool / q) * q
+        if snap_before > 0:
+            pool = float(snap_before)
+            snapped = True
+            if sd_abs < q / 4:                         # 2σ が半格子未満 → 95%で正しい格子
+                exact = True
+                rel_err = float(q / 4) / pool          # 実質“確定”（残差は半格子未満）
+            else:
+                rel_err = float(sd_abs / pool)         # スナップしても誤差は正直に残す
+
+    if exact:
+        msgs.append(f'✅ プール総額を 1,000 rrc 単位に確定：{pool + total_delta:,.0f} rrc。')
+    elif rel_err > 0.05:
+        msgs.append(f'△ 推定精度は ±{rel_err*200:.0f}%（95%目安）。オッズが小数2桁までしか'
+                    '出ないため、プールが大きいと1口の影響が小さく精度が出ません。'
+                    'もう一度試し買いすると累積で精度が上がります。')
+    if spread > 0.5 and spread > rel_err * 6:
+        msgs.append('⚠ 馬ごとの推定のばらつきが、丸め誤差だけでは説明できないほど大きいです。'
+                    '試し買いの前後で他の人も投票した可能性があります。')
+    if len(pos) < 3:
+        msgs.append('△ 推定に使えた馬が少ないため精度は粗いです。')
+    if not exact:
+        msgs.append(f'自分の投入 {total_delta:,.0f} rrc の前後で、{len(pos)}頭のオッズ変化から'
+                    f'推定しました（推定精度 ±{rel_err*200:.0f}%'
+                    + ('・1000rrc単位にスナップ済み' if snapped else '') + '）。')
+    # pool は試し買い"前"の総額。②のオッズは"後"なので、そちらに合わせた値も返す。
+    return {'ok': True, 'pool': float(pool + total_delta), 'pool_before': float(pool),
+            'per_horse': detail, 'n_used': len(pos), 'rel_err': rel_err,
+            'spread': spread, 'delta': total_delta, 'snapped': snapped,
+            'exact': exact, 'messages': msgs}
 
 
 def win_bet_picks_pool(names, win_p, odds, pool, bankroll, kelly_frac, edge_min,
@@ -2412,7 +2740,7 @@ def analyze(raw_text, bundle, settings=None):
         # 1口入った瞬間に 0 → 21万 に飛ぶ（＝0 のときも 20万 は存在している）。
         # ここを 0 のままにすると未成立スリーブの実効オッズが (0+1口)/1口 = 1.0 になり、
         # **本当は21倍で最も美味しい場面を「価値なし」と判定**してしまう。
-        if P_total == 0 and TRIFECTA_SEED_BUG_ACTIVE:
+        if P_total == 0:
             P_total = TRIFECTA_POOL_SEED
             res['pool_msgs'].append(
                 f'プール表示が 0 なので初期プール金 {TRIFECTA_POOL_SEED:,} rrc を'
@@ -2616,6 +2944,17 @@ def analyze(raw_text, bundle, settings=None):
             res['messages'].append(
                 f'⚠ 単勝プールの推定精度が ±{err*200:.0f}% と粗いです。'
                 'もう一度実測すると精度が上がります。口数は控えめに。')
+    elif WIN_POOL_SEED > 0:
+        # 2026/08/23 のアプデ以降、NPC が各馬に自動で賭けるのでプールは常に
+        # WIN_POOL_SEED 以上ある。実測が無くても**下限として**使えば、
+        # 自分の購入による希薄化を織り込んだ実効オッズが出せる。
+        # 実際のプールはこれより大きい → 希薄化を多めに見積もる＝買い控える方向で安全側。
+        res['win_pool'] = float(WIN_POOL_SEED)
+        res['win_pool_assumed'] = True
+        res['messages'].append(
+            f'ℹ 単勝プールを初期金 {WIN_POOL_SEED:,} rrc として計算します'
+            '（NPCの自動投票ぶん。実際はこれ以上あるので、希薄化は多めに見積もった'
+            '＝控えめな推奨になります）。正確に出すなら「単勝：プールを実測」で測ってください。')
     if str(meta.get('win_market', '')) == 'hidden':
         res['messages'].append(
             '⚠ 全馬のオッズが下限のままですが、プールは空ではありません'
@@ -2661,7 +3000,8 @@ def analyze(raw_text, bundle, settings=None):
             risk_cap_frac=s['max_risk_frac'], my_units=my_units, unbet=unbet)
         res['win_picks'] = picks
         res['win_summary'] = summ
-        res['win_pool_mode'] = '実測プール（希薄化込み）'
+        res['win_pool_mode'] = ('初期金 %s rrc と仮定（希薄化込み・控えめ）' % f'{WIN_POOL_SEED:,}'
+                                if res.get('win_pool_assumed') else '実測プール（希薄化込み）')
     elif s.get('win_bets') and mkt_p is not None:
         res['win_picks'] = win_bet_picks(
             disp, win_p_bet, odds_eff, s['bankroll'], s['kelly_fraction'],
@@ -2797,11 +3137,34 @@ def analyze(raw_text, bundle, settings=None):
         if P_total > 0:
             expected = n * (n - 1) * (n - 2) if n >= 3 else 0
             co_trust = (n_tri_total > 0 and n_tri_total == expected)
+            # 「バグは直った」という前提が崩れていないか、全組そろっている時だけ検算する。
+            # 崩れたまま補正なしで計算すると払戻を P/(P−S) 倍**過小**評価する＝買い控えるので
+            # 損はしないが、美味しい場面を見逃す。逆向きの間違い（過大評価）より安全だが警告は出す。
+            if co_trust:
+                _rg, _inv, _exp = check_seed_regime(P_total, csv_odds_raw.values())
+                if _rg == 'buggy' and not TRIFECTA_SEED_BUG_ACTIVE:
+                    res['messages'].append(
+                        f'⚠ Σ(1/od)={_inv:.3f} は「初期金がオッズに入っていない」旧仕様の値です'
+                        f'（修正後なら {_exp:.3f} になるはず）。'
+                        '`TRIFECTA_SEED_BUG_ACTIVE = True` に戻してください。'
+                        '今のままだと払戻を過小評価して買い控えます。')
+                elif _rg == 'fixed' and TRIFECTA_SEED_BUG_ACTIVE:
+                    res['messages'].append(
+                        f'⚠ Σ(1/od)={_inv:.3f} はオッズがプール総額基準になっている値です。'
+                        '`TRIFECTA_SEED_BUG_ACTIVE = False` にしてください。'
+                        '今のままだと払戻を**過大**評価して、エッジの無い買い目に張ります。')
             payout_pool, cinfo = resolve_payout_pool(
                 P_total, csv_odds_raw.values(),      # ← 補正前。補正後だとCOを二重に足す
-                manual_co=s.get('carryover_rrc'), trust=co_trust)
+                manual_co=s.get('carryover_rrc'), trust=co_trust,
+                seed=TRIFECTA_POOL_SEED)
             inv, reg = cinfo['inv_sum'], cinfo['regime']
-            if reg == 'takeout':
+            if reg == 'seeded':
+                res['pool_msgs'].append(
+                    f'Σ(1/od)={inv:.3f} ≒ (P−{TRIFECTA_POOL_SEED:,})/P → '
+                    f'オッズはプール総額基準（2026/08/23 の修正が効いている）。'
+                    f'初期金 {TRIFECTA_POOL_SEED:,} rrc ぶんは誰の賭け金でもないので、'
+                    'その分だけ全員の払戻が上乗せされています。補正なし。')
+            elif reg == 'takeout':
                 res['pool_msgs'].append(f'Σ(1/od)={inv:.3f} → 控除あり(約{(1-1/inv)*100:.1f}%)。補正なし。')
             elif reg == 'neutral':
                 res['pool_msgs'].append(f'Σ(1/od)={inv:.3f} → 控除0%・CO無し。プール {P_total:,} rrc。')
@@ -2887,6 +3250,28 @@ def analyze(raw_text, bundle, settings=None):
         res['alloc_rows'] = []
         res['bare_used'] = False
         res['unmatched_names'] = []
+
+    # --- 3連単＋単勝をまとめた「推奨購入」（購入ブックマークレット用の1本のリスト）---
+    # 形式は購入側のパーサに合わせて `種別<TAB>買い目<TAB>口数`。
+    #   3連単: `3連単\tA → B → C\t2`
+    #   単勝  : `単勝\tA\t5`
+    buy_all, buy_lines = [], []
+    for r in res.get('alloc_rows', []):
+        if r.get('k'):
+            buy_all.append({'kind': '3連単', 'target': r['combo'], 'units': int(r['k']),
+                            'unit': STAKE_UNIT, 'stake': int(r['k']) * STAKE_UNIT,
+                            'p': r.get('model_p'), 'od': r.get('eff_od'),
+                            'ev': r.get('eff_ev'), 'flag': r.get('flag', '成')})
+    for r in (res.get('win_picks') or []):
+        buy_all.append({'kind': '単勝', 'target': r['name'], 'units': int(r['units']),
+                        'unit': win_unit, 'stake': int(r['units']) * win_unit,
+                        'p': r.get('p'), 'od': r.get('eff_od') or r.get('odds'),
+                        'ev': r.get('ev'), 'flag': '単'})
+    buy_lines = [f"{b['kind']}\t{b['target']}\t{b['units']}" for b in buy_all]
+    res['buy_all'] = buy_all
+    res['buy_lines'] = buy_lines
+    res['buy_total'] = sum(b['stake'] for b in buy_all)
+    res['buy_ev'] = sum((b['ev'] or 0) for b in buy_all)
 
     ranked_p = sorted(combo_prob.items(), key=lambda x: x[1], reverse=True)
     shown = ranked_p[:max(int(s['topn']), 1)]
