@@ -1,7 +1,7 @@
 (async () => {
 // このファイルの版。ローダー経由で本当に最新が読めているかを目視で確かめるため、
 // 完了バッジの末尾に出す。古い版が読まれていたらここの数字が古いまま出る。
-const BM_VER='3.14.0';
+const BM_VER='3.15.0';
 const B='https://api.oasis.red';
 const q=new URLSearchParams(location.search);
 const G=q.get('guild'), S=q.get('race')||q.get('schedule_id'), U=q.get('user');
@@ -188,6 +188,7 @@ try{
     ||num(h.stamina)!==num(h.base_stamina)+num((h.item_bonus||{}).stamina)));
  const horseHeader='レース距離,馬場,地面,馬名,成体種,SPEED,POWER,STAMINA,コンディション,パッシブスキル1,パッシブスキル2,単勝オッズ,自分の購入額,装備,装備効果,装備効果キー,お守り,お守り効果,お守り効果キー,アイテム補正,素SPEED,素POWER,素STAMINA';
  const horseRows=pets.map(h=>[dist,surf,ground,h.displayName,h.adult_key||'',h.speed,h.power,h.stamina,h.condition_label,(h.p1?h.p1.label:''),(h.p2?h.p2.label:''),h.odds,(h.my_amount||0),iname(h.equipment),ieff(h.equipment),ikey(h.equipment),iname(h.charm),ieff(h.charm),ikey(h.charm),ibs(h),(h.base_speed==null?'':h.base_speed),(h.base_power==null?'':h.base_power),(h.base_stamina==null?'':h.base_stamina)].map(csv).join(','));
+ const ownWin=pets.reduce((a,h)=>a+(Number(h.my_amount)||0),0);
  const n=pets.length, total=n*(n-1)*(n-2);
  // ---- 打ち切り条件のためにプールを先に見る ----
  // 取得済みの Σ(賭け金) が「もう見つけた金額」で、実際に賭けられた総額 BASE から
@@ -298,8 +299,10 @@ try{
    ...(bal==null?[]:[`balance=${bal}`]),
    ...(wp?[`win_pool=${Math.round(wp.pool)}`,`win_pool_before=${Math.round(wp.before)}`,
            `win_pool_delta=${wp.delta}`,`win_pool_n=${wp.n}`,
-           `win_pool_err=${wp.err.toFixed(4)}`,`win_pool_exact=${wp.exact?1:0}`,
-           `win_own=${Math.round(wp.own)}`]:[]),
+           `win_pool_err=${wp.err.toFixed(4)}`,`win_pool_exact=${wp.exact?1:0}`]:[]),
+   // 単勝は【1レース合計100口】が上限。試し買いの有無に関わらず、いま自分が
+   // 何口入れているかを必ず出す（予想側で残り枠を計算するのに要る）。
+   `win_own=${Math.round(ownWin)}`,
    ...(failed.length?[`取得失敗=${failed.length}`]:[]),'',
    '=== 出走馬一覧 ===',horseHeader,...horseRows,'',
    '=== パッシブ効果 ===','パッシブ,コード,説明',...effRows,'',
@@ -334,6 +337,7 @@ try{
    +(noBets?`(プール0のため取得省略)`:`(${cut}/${total}点取得)`)
    +` | プール${poolAmt.toLocaleString()}rrc`
    +(wp?` | 単勝プール${Math.round(wp.pool).toLocaleString()}rrc(試買${wp.delta.toLocaleString()})`:'')
+   +(ownWin?` | 単勝購入済${Math.round(ownWin/1000)}口/100`:'')
    +(bal==null?'':` | 残高${bal.toLocaleString()}rrc`);
  const bad=unknown.size||failed.length||geared.length||mismatch.length||newFields.size||regimeBad;
  btn.style.background=(failed.length||regimeBad)?'#b71c1c':(unknown.size?'#e65100':'#1b5e20');btn.style.color='#fff';

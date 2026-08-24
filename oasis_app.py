@@ -117,7 +117,7 @@ st.set_page_config(page_title="Oasis 予測 v2", page_icon="🐎", layout="wide"
 #  片方だけ更新すると「AttributeError（内容は伏せられます）」になって
 #  原因が分からなくなるので、起動時に分かる形で止める。
 # ---------------------------------------------------------------
-REQUIRED_CORE = "3.14.0"
+REQUIRED_CORE = "3.15.0"
 _NEEDED = [
     "CORE_VERSION", "WIN_MAX_TOTAL_UNITS", "WIN_STAKE_UNIT", "UNBET_ODDS",
     "MAX_TOTAL_UNITS", "SIGMA_SAFETY", "DIST_LIST", "TRACK_LIST",
@@ -553,7 +553,10 @@ with tab_pred:
                           f"{len(ba)}点 / {sum(x['units'] for x in ba)}口")
                 b2.metric("実効EV合計", f"{result['buy_ev']:+,.0f} rrc")
                 b3.metric("内訳", f"3連単 {sum(1 for x in ba if x['kind']=='3連単')}点"
-                                  f" / 単勝 {sum(1 for x in ba if x['kind']=='単勝')}点")
+                                  f" / 単勝 {sum(1 for x in ba if x['kind']=='単勝')}点",
+                          (f"単勝 購入済{result['win_own_units']}口 / "
+                           f"残枠{result.get('win_left_units', 0)}口"
+                           if result.get("win_own_units") else None))
                 st.dataframe(pd.DataFrame([{
                     "種別": x["kind"], "状態": x["flag"], "買い目": x["target"],
                     "口数": f"{x['units']}口",
@@ -648,8 +651,11 @@ with tab_pred:
                         w0.metric("単勝プール総額", f"{_wp:,.0f} rrc", _d)
                     else:
                         w0.metric("単勝プール総額", "未測定")
+                    _ou = result.get("win_own_units", 0)
                     w1.metric("投資額", f"{ws['invest']:,} rrc",
-                              f"{ws['units']}口 / 上限{ws['max_units']}口")
+                              f"追加{ws['units']}口"
+                              + (f" / 購入済{_ou}口" if _ou else "")
+                              + f" / 残枠{result.get('win_left_units', oc.WIN_MAX_TOTAL_UNITS)}口")
                     w2.metric("理論EV合計", f"{ws['ev']:+,.0f} rrc")
                     w3.metric("いずれか的中", f"{min(ws['hit'],1.0)*100:.0f}%")
                 if _assumed:
@@ -663,8 +669,16 @@ with tab_pred:
                                "織り込めていません**。下の「単勝：プールを実測して推奨を出す」で"
                                "測ってから買うことを強くおすすめします。")
                     if ws.get("capped"):
-                        st.caption(f"※ 1レースの単勝は**合計{ws['max_units']}口まで**という"
+                        st.caption(f"※ 1レースの単勝は**合計{oc.WIN_MAX_TOTAL_UNITS}口まで**という"
                                    "ゲーム仕様の上限に達したため、エッジの大きい順に配分しています。")
+                    if result.get("win_own_units"):
+                        st.caption(
+                            f"※ このレースでは既に **{result['win_own_units']}口"
+                            f"（{int(result.get('win_own_rrc', 0)):,} rrc）** 購入済みです"
+                            "（オッズ取得時の試し買いぶんを含む）。"
+                            f"上限 {oc.WIN_MAX_TOTAL_UNITS}口 のうち残り "
+                            f"**{result.get('win_left_units', 0)}口**、"
+                            "上の推奨はその範囲に収めています。")
                 st.dataframe(pd.DataFrame([{
                     "馬": r["name"], "モデル勝率": f"{r['p']*100:.1f}%",
                     "オッズ": ("未投票" if r.get("unbet") else f"{r['odds']:.2f}"),

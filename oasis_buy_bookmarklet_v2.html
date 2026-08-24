@@ -178,7 +178,7 @@ document.getElementById('bm-code').textContent =
   document.querySelector('.bm-btn').getAttribute('href');
 // iOS 用の短縮版。本体は GitHub から読み込むのでブックマークに収まる。
 document.getElementById('bm-lite').textContent =
-  "javascript:(t=>fetch('https://raw.githubusercontent.com/footao/oasis-app/main/bookmarklets/src/buy.js?'+t).then(r=>r.text()).then(eval).catch(_=>{var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/gh/footao/oasis-app@main/bookmarklets/src/buy.js?'+t;document.body.appendChild(s)}))(Date.now())";
+  "javascript:(t=&gt;{var u=&#x27;https://raw.githubusercontent.com/footao/oasis-app/main/bookmarklets/src/buy.js?&#x27;+t;fetch(u).then(r=&gt;r.text()).then(x=&gt;{(0,eval)(x)}).catch(e=&gt;{console.warn(&#x27;Oasis loader fallback:&#x27;,e);var a=document.createElement(&#x27;script&#x27;);a.src=&#x27;https://raw.githack.com/footao/oasis-app/main/bookmarklets/src/buy.js?&#x27;+t;a.onerror=function(){var b=document.createElement(&#x27;script&#x27;);b.src=&#x27;https://cdn.jsdelivr.net/gh/footao/oasis-app@main/bookmarklets/src/buy.js?&#x27;+t;document.body.appendChild(b)};document.body.appendChild(a)})})(Date.now())";
 function copyTo(id, b){
   navigator.clipboard.writeText(document.getElementById(id).textContent).then(()=>{
     b.textContent='✓ 完了'; setTimeout(()=>b.textContent='コピー',2000);

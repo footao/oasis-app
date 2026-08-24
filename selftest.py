@@ -646,6 +646,61 @@ def regression_tests():
           _tw is not None and abs(_tw['power'] - (1 + 0.053 * _sp11['末脚']['duty'])) < 1e-9,
           f"PW×{_tw['power']:.5f}")
 
+    # --- P16: 手打ち用の購入ブックマークレット（buy_pick.js）---
+    #   予測ツールを持っていない人向け。買い方は違うが**上限と二重購入防止は同じ**でないと
+    #   ゲームに弾かれる／二重に買う事故になるので、そこだけ固定しておく。
+    _bp = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'bookmarklets', 'src', 'buy_pick.js'), encoding='utf-8').read()
+    check('P16 口数と上限が本家と一致（3連単1万/20口・単勝1千/100口）',
+          'TRI_UNIT=10000' in _bp.replace(' ', '') and 'WIN_UNIT=1000' in _bp.replace(' ', '')
+          and f'TRI_MAX_UNITS={oc.MAX_TOTAL_UNITS}' in _bp.replace(' ', '')
+          and f'WIN_MAX_UNITS={oc.WIN_MAX_TOTAL_UNITS}' in _bp.replace(' ', ''))
+    check('P16 購入済みの単勝を上限から引いている',
+          'ownWin' in _bp and 'WIN_MAX_UNITS-Math.round(ownWin)' in _bp.replace(' ', ''))
+    check('P16 二重購入防止（executed フラグ）と確認チェックがある',
+          'executed=true' in _bp.replace(' ', '') and "$('_ok')" in _bp
+          and '購入済みです' in _bp)
+    check('P16 締切済みのレースでは購入させない',
+          "phase==='betting'" in _bp.replace(' ', '') and 'open' in _bp)
+    check('P16 トークンは購入APIにだけ使い、画面には出さない',
+          _bp.count('token:T') == 2 and 'token' not in _bp.split('drawHorses')[1][:2000])
+
+    # --- P15: 単勝は【1レース合計100口】。購入済みぶんを残り枠から引くこと ---
+    #   オッズ取得の試し買い（最大5口）も自分の購入額に入るので、引かないと上限超過の
+    #   買い目を出してしまう。貼り付けの「自分の購入額」が現在値なのでそれを合計する。
+    _hdr15 = ('レース距離,馬場,地面,馬名,成体種,SPEED,POWER,STAMINA,コンディション,'
+              'パッシブスキル1,パッシブスキル2,単勝オッズ,自分の購入額')
+    def _mk15(per):
+        rows = '\n'.join(
+            'マイル,芝,,馬%d,a%d,%d,50,48,普通,スピードスター,マイル得意,%.2f,%d'
+            % (i, i, 150 - i * 3, 3.0 + i, per) for i in range(10))
+        return ('guild=1\nschedule_id=15\npool=900000\n\n=== 出走馬一覧 ===\n%s\n%s\n'
+                % (_hdr15, rows))
+    _b15 = oc.train_model('logg')
+    _r0 = oc.analyze(_mk15(0), _b15, {'dist': 'マイル', 'track': '芝',
+                                      'win_bets': True, 'bankroll': 3_000_000})
+    _r6 = oc.analyze(_mk15(6000), _b15, {'dist': 'マイル', 'track': '芝',
+                                         'win_bets': True, 'bankroll': 3_000_000})
+    _rx = oc.analyze(_mk15(11000), _b15, {'dist': 'マイル', 'track': '芝',
+                                          'win_bets': True, 'bankroll': 3_000_000})
+    _u = lambda r: sum(x['units'] for x in (r.get('win_picks') or []))
+    check('P15 購入済みの口数を合計して残り枠を出す',
+          _r0.get('win_own_units') == 0 and _r6.get('win_own_units') == 60
+          and _r6.get('win_left_units') == 40,
+          f"0口→残{_r0.get('win_left_units')} / 60口→残{_r6.get('win_left_units')}")
+    check('P15 推奨が残り枠を超えない',
+          _u(_r6) <= _r6['win_left_units'] and _u(_r0) <= oc.WIN_MAX_TOTAL_UNITS,
+          f"残枠{_r6['win_left_units']}口に対して推奨{_u(_r6)}口")
+    check('P15 上限に達していたら単勝を出さない',
+          _rx.get('win_left_units') == 0 and _u(_rx) == 0,
+          f"購入済{_rx.get('win_own_units')}口 → 推奨{_u(_rx)}口")
+    _bm15 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              'bookmarklets', 'src', 'bm.js'), encoding='utf-8').read()
+    check('P15 bm.js は試し買いの有無に関わらず win_own を出す',
+          'win_own=${Math.round(ownWin)}' in _bm15
+          and 'const ownWin=pets.reduce' in _bm15,
+          '試し買いしなくても購入済み口数が分かる')
+
     # --- P14: 2026/08/19〜 の Discord ログ新フォーマット ---
     #   ① ステータスが「素 + 装備 ＝ 合計」表記に変わった（合計を取らないと装備を丸ごと落とす）
     #   ② 結果が複数メッセージに分割され、2通目以降が「結果（続き）」になった

@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.14.0'
+CORE_VERSION = '3.15.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -3020,7 +3020,23 @@ def analyze(raw_text, bundle, settings=None):
             '⚠ 単勝プールが空です（全馬のオッズが初期値のまま）。'
             'この状態で単勝を買っても実効オッズは 1.0 で、自分の掛け金を取り返すだけです。'
             '他の人の投票が入ってから買ってください。')
-    own = float(meta.get('win_own') or 0)
+    # 単勝は【1レース合計100口】が上限。すでに買った口数を数えて残り枠を出す。
+    # 貼り付けの「自分の購入額」は試し買いぶんも含んだ**現在値**なので、これが正。
+    # meta の win_own はブックマークレットが出す合計（同じ値だが念のため両方見る）。
+    own_rrc = sum(float(h.get('my_amount') or 0) for h in horses)
+    own_rrc = max(own_rrc, float(meta.get('win_own') or 0))
+    res['win_own_rrc'] = own_rrc
+    res['win_own_units'] = int(own_rrc // win_unit)
+    res['win_left_units'] = max(0, WIN_MAX_TOTAL_UNITS - res['win_own_units'])
+    res['win_max_units'] = WIN_MAX_TOTAL_UNITS
+    if res['win_own_units']:
+        res['messages'].append(
+            f'ℹ このレースの単勝は既に {res["win_own_units"]}口 '
+            f'（{int(own_rrc):,} rrc）購入済みです。'
+            f'上限 {WIN_MAX_TOTAL_UNITS}口 に対して残り **{res["win_left_units"]}口**。'
+            + ('（上限に達しているので単勝の追加購入は出しません）'
+               if res['win_left_units'] == 0 else ''))
+    own = float(own_rrc)
     others_ok = True
     if own and res['win_pool']:
         others = float(res['win_pool']) - own
@@ -3052,17 +3068,18 @@ def analyze(raw_text, bundle, settings=None):
         picks, summ = win_bet_picks_pool(
             names_o, win_p_bet, odds_eff, res['win_pool'], s['bankroll'], s['kelly_fraction'],
             s.get('win_edge_min', 0.15), stake_unit=win_unit,
-            risk_cap_frac=s['max_risk_frac'], my_units=my_units, unbet=unbet)
+            risk_cap_frac=s['max_risk_frac'], my_units=my_units, unbet=unbet,
+            total_units=WIN_MAX_TOTAL_UNITS)
         res['win_picks'] = picks
         res['win_summary'] = summ
         res['win_pool_mode'] = ('初期金 %s rrc と仮定（希薄化込み・控えめ）' % f'{WIN_POOL_SEED:,}'
                                 if res.get('win_pool_assumed') else '実測プール（希薄化込み）')
-    elif s.get('win_bets') and mkt_p is not None:
+    elif s.get('win_bets') and mkt_p is not None and res['win_left_units'] > 0:
         res['win_pool_mode'] = 'プール未測定（希薄化を織り込めていません）'
         res['win_picks'] = win_bet_picks(
             disp, win_p_bet, odds_eff, s['bankroll'], s['kelly_fraction'],
             s.get('win_edge_min', 0.15), stake_unit=win_unit,
-            risk_cap_frac=s['max_risk_frac'])
+            risk_cap_frac=s['max_risk_frac'], total_units=res['win_left_units'])
         if res['win_picks']:
             wu = sum(r['units'] for r in res['win_picks'])
             res['win_summary'] = {

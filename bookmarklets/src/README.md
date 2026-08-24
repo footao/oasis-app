@@ -58,3 +58,4 @@ node ../test_logic.js                                    # 判定と安全弁の
 ツール側の `race_key` は「日付＋時刻＋レース番号」で作るため、番号が無いと
 `race_time` が取れず `0:00` になったレースが**1レースに合成**されてしまうためです。
 番号を外すと学習データが壊れるので変更しないでください。
+python minify.py ../../oasis_buy_pick_bookmarklet.html buy_pick.js "🎫 馬券を選んで購入"
