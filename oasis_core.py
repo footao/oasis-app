@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.12.0'
+CORE_VERSION = '3.12.1'
 
 # =====================================================================
 #  0. ゲーム仕様の定数

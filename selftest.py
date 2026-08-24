@@ -183,7 +183,8 @@ def _bm_scrape(n_field, bet_units, order, par=20):
     返り値: (取得した組の集合, 何組取ったか)
     """
     SEED_, UNIT = oc.TRIFECTA_POOL_SEED, oc.STAKE_UNIT
-    base = sum(bet_units.values()) * UNIT          # プール総額 − 初期プール金
+    base = sum(bet_units.values()) * UNIT          # 実際に賭けられた総額 = プール − 初期金
+    pool = base + SEED_                            # プール総額（オッズの分母）
     w = {i: 1.0 for i in range(n_field)}
     queue, seen_set = list(order), set()
     got_amt = 0.0
@@ -196,17 +197,20 @@ def _bm_scrape(n_field, bet_units, order, par=20):
                 hit = True
                 for h in c:
                     w[h] *= 3
-        # 表示オッズは小数2桁なので 賭け金=base/od に最大 0.005/od の相対誤差が乗る。
-        # 誤差ぶん残額を多めに見て、取り逃しが起きない側に倒す（bm.js と同じ式）。
-        got_amt, err = 0.0, 0.0
+        # 2026/08/23 以降、表示オッズは**プール総額**基準（od = P / 賭け金）。
+        # 賭け金は必ず1口の倍数なので、P/od を口数に丸め直せば端数が消えて
+        # 残額がちょうど 1口 の倍数になる（「残 238,806rrc」のような表示は出ない）。
+        # 丸め切れない組（オッズの丸め幅が半口を超える大本命）だけ 1口ぶん多めに見る。
+        got_amt, slack = 0, 0
         for c in seen_set:
             if c not in bet_units:
                 continue
-            od = base / (bet_units[c] * UNIT)      # サイトが表示するオッズ
-            b = base / od
-            err += b * 0.005 / od
-            got_amt += b
-        if base > 0 and base - got_amt + err < UNIT:
+            od = round(pool / (bet_units[c] * UNIT), oc.ODDS_DECIMALS)  # サイトの表示値
+            u = pool / od / UNIT
+            if abs(u - round(u)) > 0.25:
+                slack += UNIT
+            got_amt += round(u) * UNIT
+        if base > 0 and base - got_amt + slack < UNIT:
             break
         if hit:
             queue.sort(key=lambda c: -(w[c[0]] * w[c[1]] * w[c[2]]))
@@ -457,6 +461,18 @@ def regression_tests():
             _total += len(_all)
     check('P3 打ち切っても金の乗った組を取り逃さない',
           _worst == 0, f'取り逃し{_worst}組 / リクエスト削減 {100 * _saved // _total}%')
+
+    # 残額は必ず1口の倍数（端数が出るなら賭け金の丸めがおかしい）
+    _rem_ok = True
+    for _n, _bet in [(10, {(0, 1, 2): 3, (1, 0, 2): 5, (3, 4, 5): 1}),
+                     (14, {(0, 1, 2): 20, (2, 1, 0): 1, (5, 6, 7): 2, (8, 9, 1): 4})]:
+        _pool = sum(_bet.values()) * oc.STAKE_UNIT + oc.TRIFECTA_POOL_SEED
+        for _c, _u in _bet.items():
+            _od = round(_pool / (_u * oc.STAKE_UNIT), oc.ODDS_DECIMALS)
+            if round(_pool / _od / oc.STAKE_UNIT) != _u:
+                _rem_ok = False
+    check('P3 表示オッズから口数をぴったり復元できる（残額に端数が出ない）',
+          _rem_ok, '丸め幅 ±0.005 は半口(5,000rrc)より十分小さい')
 
     # プールが取れない(=0)ときは打ち切らず全件取ること
     _allp = [c for c in itertools.permutations(range(10), 3)]

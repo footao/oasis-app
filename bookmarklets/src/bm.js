@@ -107,7 +107,13 @@ try{
  // **早く止まりすぎて「金が乗っている組」を未成立と誤判定する**ので、
  // 最後に Σ(P/od) > BASE になっていないか検算して、超えていたら赤で警告する。
  const SEED=300000, UNIT=10000, BASE=Math.max(pool0-SEED,0);
- const betOf=od=>pool0/od;
+ // 賭け金は必ず1口(10,000rrc)の倍数。表示オッズは小数2桁に丸められているので
+ // P/od をそのまま足すと端数が出て「残 238,806rrc」のような有り得ない表示になる。
+ // 口数に丸め直すと**端数が消えるうえに打ち切りも正確になる**（誤差の積み上げが要らない）。
+ // 丸めが効くかの検算: od の丸め幅 ±0.005 → 賭け金の幅は P×0.01/od²。
+ //   プール90万・od1.5（＝60口）でも ±2,000rrc で、半口(5,000)よりずっと小さい。
+ //   プールが数百万まで育つと大本命だけ曖昧になりうるので、その組だけ slack を積む。
+ const betOf=od=>Math.round(pool0/od/UNIT)*UNIT;
  // 金が乗っていそうな順に取りたい。単勝オッズは下限1.5に張り付いていて
  // （直近20レースの45%が全馬同値）人気の代理にならないので使わない。
  //   初期順  : 簡易スコア（距離重み×パッシブ×スタミナ収支）の高い組から
@@ -183,23 +189,27 @@ try{
    cut+=batch.length;
    // 取りこぼした組は seenAmt に入らない＝残額を多めに見積もる方向なので、
    // 打ち切りが早まることはない（安全側）。
-   // 表示オッズは小数2桁なので 賭け金=P/od には最大 0.005/od の相対誤差が乗る。
-   // 積み上がった誤差 err のぶん残額を多めに見て、取り逃しが起きない側に倒す。
-   let err=0;
+   // 口数に丸め切れない組（オッズの丸め幅が半口を超える大本命）だけ、
+   // 1口ぶん残額を多めに見て取り逃しが起きない側に倒す。通常は 0 のまま。
+   let slack=0;
    seenAmt=results.reduce((s,r)=>{if(!r.odds)return s;
-     const b=betOf(r.odds);err+=b*0.005/r.odds;return s+b;},0);
+     const u=pool0/r.odds/UNIT;
+     if(Math.abs(u-Math.round(u))>0.25)slack+=UNIT;
+     return s+Math.round(u)*UNIT;},0);
    // 見つけた金額が「実際に賭けられた総額」を超えたら、賭け金の見積もり式が違う
    // ＝バグが直っていない（od は今も (P−S) 基準）。このまま続けると早く止まりすぎて
    // 金の乗った組を未成立と誤判定するので、印を立てて**打ち切りをやめる**。
    if(BASE>0&&seenAmt>BASE*1.02)regimeBad=true;
-   if(!regimeBad&&BASE>0&&BASE-seenAmt+err<UNIT)break;
+   if(!regimeBad&&BASE>0&&BASE-seenAmt+slack<UNIT)break;
    // 当たった組の馬を重くして残りを並べ替える
    let hit=false;
    got.forEach((r,k)=>{if(r&&r.odds!==null){hit=true;
      for(const h of batch[k])w.set(h.pet_id,w.get(h.pet_id)*3);}});
    if(hit)queue.sort((p,q)=>sc(q)-sc(p));
+   // 残額は必ず1口の倍数になるので口数も出す（端数が出たら丸めがおかしい合図）
+   const left=Math.max(BASE-seenAmt,0);
    btn.textContent=`🏇 3連単 ${cut}/${combos.length} 取得中`
-     +(BASE>0?`（残 ${Math.max(Math.round(BASE-seenAmt),0).toLocaleString()}rrc）`:'');
+     +(BASE>0?`（残 ${left.toLocaleString()}rrc = ${left/UNIT}口）`:'');
  }
  // 残った分は上の判定で「1口も入っていない」ことが確定しているので未成立として出す。
  // 出力の書式は今までと同じ（「未取得」という状態は作らない）。
