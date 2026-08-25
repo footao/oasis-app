@@ -700,6 +700,27 @@ def regression_tests():
           f"購入済{_rx.get('win_own_units')}口 → 推奨{_u(_rx)}口")
     _bm15 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               'bookmarklets', 'src', 'bm.js'), encoding='utf-8').read()
+    _ap = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'bookmarklets', 'src', 'autopilot.js'), encoding='utf-8').read()
+    # オッズのバグ補正を無条件に掛けると EV を 1.5倍ほど過大評価する（race 2097 で修正済みを確認）
+    check('P18 autopilot はオッズ補正を trifecta_seed_bug_active でゲートする',
+          'M.trifecta_seed_bug_active && pool > SEED' in _ap
+          and _ap.count('pool / (pool - SEED)') == 1,
+          '初期プール金ぶんの補正はバグが生きているときだけ')
+    check('P18 autopilot は装備・お守りの倍率を掛ける',
+          'OasisModel.applyItems(' in _ap)
+    check('P18 autopilot は単勝も出す',
+          'winBetPicksPool(' in _ap and '/api/bet' in _ap)
+    # トークンはレースごとに失効する。アームが次のレースを跨いだら「無人で買い続ける」
+    # 状態になるので、armFor が今の次レースと一致するときだけ自動購入する。
+    check('P18 autopilot の自動購入アームは1レース限り',
+          'nextRaceTime().getTime() === ST.armFor' in _ap and 'disarm(' in _ap,
+          'レースが過ぎたらアームは自動で外れる')
+    check('P18 モデルは装備の scope/duty と既定値を JSON に出す',
+          set(['item_scope', 'item_key_alias', 'trifecta_seed_bug_active', 'defaults',
+               'win_pool_seed', 'win_max_total_units'])
+          <= set(oc.export_model_json(_b7).keys()))
+
     check('P17 bm.js はプールが初期金のままなら1リクエストも投げない',
           'const noBets = !(pool0 > 0) || BASE < UNIT;' in _bm15,
           '3連単プール30万＝賭け0件。全組が未成立なので取得を省略する')

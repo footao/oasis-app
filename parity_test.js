@@ -3,7 +3,8 @@ const fs = require('fs');
 const path = require('path');
 const HERE = __dirname;
 const M = JSON.parse(fs.readFileSync(path.join(HERE, '_parity_model.json'), 'utf8'));
-const cases = JSON.parse(fs.readFileSync(path.join(HERE, '_parity_cases.json'), 'utf8'));
+const _all = JSON.parse(fs.readFileSync(path.join(HERE, '_parity_cases.json'), 'utf8'));
+const cases = _all.races, items = _all.items || [];
 const OM = require(path.join(HERE, 'bookmarklets/src/model.js'));
 
 let worst = 0, bad = 0;
@@ -15,6 +16,74 @@ for (const c of cases) {
     if (d > 1e-9) bad++;
   }
 }
+// --- 装備・お守りの効果（図鑑30種）---
+let ibad = 0, iworst = 0;
+for (const c of items) {
+  const js = OM.itemMult({ effect_label: c.label, effect_description: c.desc, effect_key: c.key }, M, []);
+  const py = c.py;
+  if ((js == null) !== (py == null)) { ibad++; console.log(`  ❌ ${c.label}: JS=${JSON.stringify(js)} / PY=${JSON.stringify(py)}`); continue; }
+  if (js == null) continue;
+  const keys = new Set([...Object.keys(js), ...Object.keys(py)]);
+  for (const k of keys) {
+    const d = Math.abs((js[k] == null ? 1 : js[k]) - (py[k] == null ? 1 : py[k]));
+    if (d > iworst) iworst = d;
+    if (d > 1e-9) { ibad++; console.log(`  ❌ ${c.label}.${k}: JS=${js[k]} / PY=${py[k]}`); }
+  }
+}
+console.log(`装備効果 一致検証: ${items.length}種  最大誤差 ${iworst.toExponential(2)}`);
+if (ibad) { console.log(`❌ 装備効果 不一致 ${ibad}件 — model.js の itemMult が oasis_core に追随していません`); process.exit(1); }
+
+// --- 単勝（下限オッズの判定・希薄化を織り込んだ配分）---
+const wins = _all.win || [];
+const _nan = v => (v === null ? NaN : v);   // Python の NaN は JSON に書けないので null で来る
+let wbad = 0, wworst = 0;
+const chk = (a, b, what) => {               // NaN 同士は一致、片方だけ NaN は不一致
+  a = _nan(a); b = _nan(b);
+  const d = (Number.isNaN(a) || Number.isNaN(b))
+    ? ((Number.isNaN(a) && Number.isNaN(b)) ? 0 : Infinity) : Math.abs(a - b);
+  if (d > wworst) wworst = d;
+  if (d > 1e-9) { wbad++; console.log(`  ❌ ${what}: JS=${a} / PY=${b}`); }
+};
+const eq = (a, b, what) => {
+  if (a !== b) { wbad++; console.log(`  ❌ ${what}: JS=${JSON.stringify(a)} / PY=${JSON.stringify(b)}`); }
+};
+for (let ci = 0; ci < wins.length; ci++) {
+  const c = wins[ci], tag = `win[${ci}]`;
+  const od = c.odds.map(_nan);
+  const mkt = OM.marketWinProb(od, c.floor);
+  eq(mkt === null, c.mkt === null, `${tag}.mkt null`);
+  if (mkt && c.mkt) for (let i = 0; i < mkt.length; i++) chk(mkt[i], c.mkt[i], `${tag}.mkt[${i}]`);
+
+  const dg = OM.diagnoseOddsFloor(od, c.my_amounts, M);
+  eq(dg.ambiguous, c.diag.ambiguous, `${tag}.ambiguous`);
+  chk(dg.residual, c.diag.residual, `${tag}.residual`);
+  eq(JSON.stringify(dg.unbet), JSON.stringify(c.diag.unbet), `${tag}.unbet`);
+  eq(JSON.stringify(dg.messages), JSON.stringify(c.diag.messages), `${tag}.messages`);
+  for (let i = 0; i < od.length; i++) chk(dg.odds_eff[i], c.diag.odds_eff[i], `${tag}.odds_eff[${i}]`);
+
+  const r = OM.winBetPicksPool(c.names, c.win_p, dg.odds_eff, c.pool, c.bankroll,
+    c.kelly, c.edge_min, { stakeUnit: M.win_stake_unit, totalUnits: M.win_max_total_units,
+      maxUnits: M.win_max_units, riskCapFrac: c.risk_cap_frac,
+      myUnits: c.my_units, unbet: dg.unbet });
+  const picks = r[0], summ = r[1];
+  eq(picks.length, c.picks.length, `${tag}.picks 件数`);
+  for (let i = 0; i < Math.min(picks.length, c.picks.length); i++) {
+    const a = picks[i], b = c.picks[i];
+    eq(a.name, b.name, `${tag}.picks[${i}].name`);
+    eq(a.unbet, b.unbet, `${tag}.picks[${i}].unbet`);
+    eq(a.odds === null, b.odds === null, `${tag}.picks[${i}].odds null`);
+    if (a.odds !== null && b.odds !== null) chk(a.odds, b.odds, `${tag}.picks[${i}].odds`);
+    for (const k of ['p', 'eff_od', 'edge', 'units', 'stake', 'ev']) chk(a[k], b[k], `${tag}.picks[${i}].${k}`);
+  }
+  eq(summ === null, c.summary === null, `${tag}.summary null`);
+  if (summ && c.summary) for (const k of Object.keys(c.summary)) {
+    if (typeof c.summary[k] === 'number') chk(summ[k], c.summary[k], `${tag}.summary.${k}`);
+    else eq(summ[k], c.summary[k], `${tag}.summary.${k}`);
+  }
+}
+console.log(`単勝配分 一致検証: ${wins.length}件  最大誤差 ${wworst.toExponential(2)}`);
+if (wbad) { console.log(`❌ 単勝配分 不一致 ${wbad}件 — model.js の単勝ロジックが oasis_core に追随していません`); process.exit(1); }
+
 const n = cases.reduce((s, c) => s + c.base.length, 0);
 console.log(`Python↔JS 一致検証: ${n}頭  最大誤差 ${worst.toExponential(2)}`);
 if (bad) { console.log(`❌ 不一致 ${bad}件 — model.js が oasis_core に追随していません`); process.exit(1); }

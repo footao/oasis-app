@@ -8,7 +8,7 @@
   1. logg/ を学習して model.json を書き出す
   2. model.js + model.json + autopilot.js を結合して autopilot.bundle.js を作る
      （モデルを埋め込むので、実行時に外部から取りに行かなくても動く）
-  3. oasis_autopilot.html / oasis_autopilot_setup.html を作り直す
+  3. oasis_autopilot_setup.html（ローダー版の設置ページ）を作り直す
   4. 生成物の構文チェック（node があれば）
 
 **再学習したら必ずこれを実行してください。**
@@ -142,6 +142,15 @@ def _write_setup_page(combined, mod):
                       page, count=1)
     if n != 1:
         raise RuntimeError('setup ページの textarea を差し替えられませんでした')
+    # ローダー（href と s2 の textarea）も差し替える。jsDelivr 単独から
+    # raw → raw.githack → jsDelivr の3段に変えたので、古いページに残っていると
+    # push 直後に12時間ぶん古いバンドルを掴む（bm.js で実際に起きた）。
+    page, n2 = re.subn(r'href="javascript:[^"]*autopilot\.bundle\.js[^"]*"',
+                       lambda m: 'href="' + e(loader) + '"', page)
+    page, n3 = re.subn(r'(<textarea id="s2" readonly>)[\s\S]*?(</textarea>)',
+                       lambda m: m.group(1) + H.escape(loader) + m.group(2), page, count=1)
+    if not (n2 and n3):
+        raise RuntimeError('setup ページのローダーを差し替えられませんでした')
     io.open(os.path.join(HERE, 'oasis_autopilot_setup.html'), 'w',
             encoding='utf-8').write(page)
 

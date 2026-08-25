@@ -47,7 +47,7 @@ python build_autopilot.py
 
 ```bash
 git add -A
-git commit -m "v3.6.0: スタミナ不足を特徴量に追加 + Python↔JS一致テスト"
+git commit -m "v3.6.0: スタミナ収支を特徴量に追加 + Python↔JS一致テスト"
 git push
 ```
 
@@ -104,7 +104,7 @@ node bookmarklets/test_logic.js             # 判定と安全弁
 | アプリ | `oasis_app.py` `oasis_core.py` `passive_spec.json` |
 | 保存/取得 | `sheets_backend.py` `drive_backend.py` |
 | 生成 | `build_autopilot.py` `make_formula_doc.py` |
-| オートパイロット | `model.json` `autopilot.bundle.js` `oasis_autopilot.html` `oasis_autopilot_setup.html` |
+| オートパイロット | `model.json` `autopilot.bundle.js` `oasis_autopilot_setup.html` |
 | ブックマークレット | `oasis_*_bookmarklet*.html` / `bookmarklets/src/*.js` |
 | テスト | `selftest.py` `bookmarklets/verify*.js` `bookmarklets/test_logic.js` |
 | 資料 | `README.md` `DEPLOY.md` `HANDOFF.md` `REVIEW.md` `CODE_REVIEW_20260809.md` |

@@ -23,9 +23,80 @@ const OasisModel = (() => {
     return v;
   }
 
+  // --- 装備・お守りの効果 → 倍率（Python: _pct_mults + item_effect_spec）---
+  // 倍率の**大きさ**は説明文から、**発動範囲(scope/duty)は M.item_scope から**取る。
+  // 効果名で引けなければ effect_key、それでも引けなければ**乗せない**。
+  // （説明文だけから推測すると『首位の呪い』が 0.49% → 6.2% に化ける。12倍。）
+  const _STAT_JA = {'スピード':'speed','パワー':'power','スタミナ':'stamina','全ステータス':'all'};
+  const _RE_PCT  = /(スピード|パワー|スタミナ|全ステータス)が[^。、%％\d]{0,6}(\d+(?:\.\d+)?)[%％](上昇|低下|アップ|ダウン)/g;
+  const _RE_PAIR = /(スピード|パワー|スタミナ)と(スピード|パワー|スタミナ)が[^。、%％\d]{0,6}(\d+(?:\.\d+)?)[%％](上昇|低下|アップ|ダウン)/g;
+  const _RE_ABIL = /走行能力が(\d+(?:\.\d+)?)[%％](上昇|低下)/g;
+  const _RE_CONS = /スタミナ消費量[^。]*?(\d+(?:\.\d+)?)[%％](増加|減少)/g;
+  const _RE_RECV = /(?:最大)?スタミナの(\d+(?:\.\d+)?)[%％]を?回復/g;
+  const _UP = new Set(['上昇','アップ']);
+  const _all = (re, d) => { re.lastIndex = 0; const o = []; let m; while ((m = re.exec(d))) o.push(m); return o; };
+
+  function pctMults(desc) {
+    let d = String(desc || ''), mult = {};
+    const mul = (k, v) => { mult[k] = (mult[k] == null ? 1 : mult[k]) * v; };
+    for (const m of _all(_RE_CONS, d)) mul('stamina', m[2] === '減少' ? 1 + +m[1] / 100 : 1 - +m[1] / 100);
+    for (const m of _all(_RE_RECV, d)) mul('stamina', 1 + +m[1] / 100);
+    for (const m of _all(_RE_ABIL, d)) { const v = m[2] === '上昇' ? 1 + +m[1] / 100 : 1 - +m[1] / 100;
+      for (const k of ['speed','power','stamina']) mul(k, v); }
+    // 「AとBがそれぞれN%」を先に処理し、**その部分を文字列から抜いてから** _RE_PCT に渡す
+    // （抜かないと後半が二重に掛かって 1.03 が 1.0609 になる）。
+    for (const m of _all(_RE_PAIR, d)) { const v = _UP.has(m[4]) ? 1 + +m[3] / 100 : 1 - +m[3] / 100;
+      mul(_STAT_JA[m[1]], v); mul(_STAT_JA[m[2]], v); }
+    d = d.replace(_RE_PAIR, '');
+    for (const m of _all(_RE_PCT, d)) { const v = _UP.has(m[3]) ? 1 + +m[2] / 100 : 1 - +m[2] / 100;
+      for (const k of (_STAT_JA[m[1]] === 'all' ? ['speed','power','stamina'] : [_STAT_JA[m[1]]])) mul(k, v); }
+    return mult;
+  }
+
+  // item = APIの equipment / charm。戻り値 {speed,power,stamina,_sigma} か null。
+  // 反映できなかったものは skipped 配列に効果名を積む（黙って落とさない）。
+  function itemMult(item, M, skipped) {
+    if (!item) return null;
+    const label = String(item.effect_label || '').trim();
+    const desc  = String(item.effect_description || '');
+    const push  = () => { if (skipped) skipped.push(label || item.name || '?'); return null; };
+    const scopeTbl = M.item_scope || {};
+    const alias = (M.item_key_alias || {})[String(item.effect_key || '').replace(/^(?:gear|charm|item)_/, '')];
+    const c = scopeTbl[label] || scopeTbl[alias || ''];
+    if (!c) return push();
+    if (c.scope === 'variance') {
+      const m = desc.match(/約?(半分|\d+(?:\.\d+)?)[%％]?/);
+      let sg = 0.5;
+      if (m && m[1] !== '半分') sg = 1 - parseFloat(m[1]) / 100;
+      return { _sigma: Math.max(0.05, sg) };
+    }
+    if (c.scope === 'learned' || c.scope === 'aptitude' || c.scope === 'same_species') return push();
+    const mult = pctMults(desc);
+    if (!Object.keys(mult).length) return push();
+    const duty = Math.min(Math.max(c.duty == null ? 1 : c.duty, 0), 1);
+    const out = {};
+    for (const k of Object.keys(mult)) out[k] = 1 + (mult[k] - 1) * duty;
+    return out;
+  }
+
+  // 1頭ぶんの装備＋お守りを畳み込んで {speed,power,stamina} に掛ける。
+  // ⚠ ステータスの**加算**ぶん（SP+25 など）は API の speed に既に入っている。
+  //    ここで掛けるのは**倍率**だけ（Python: parse_unified と同じ切り分け）。
+  function applyItems(h, M, skipped) {
+    let sig = 1;
+    for (const it of [h.equipment, h.charm]) {
+      const m = itemMult(it, M, skipped);
+      if (!m) continue;
+      if (m._sigma != null) { sig *= m._sigma; continue; }
+      for (const k of ['speed','power','stamina']) if (m[k]) h[k] = h[k] * m[k];
+    }
+    h.item_sigma_mult = sig;
+    return h;
+  }
+
   // --- 分散低減スキル（安定感など）による σ 倍率（Python: sigma_multiplier）---
-  function sigmaMultiplier(passives, M) {
-    let m = 1;
+  function sigmaMultiplier(passives, M, extraMult) {
+    let m = (extraMult == null ? 1 : +extraMult);
     for (const p of (passives || [])) {
       const sp = M.spec[p];
       if (sp) m *= (sp.sigma_mult == null ? 1 : +sp.sigma_mult);
@@ -167,11 +238,205 @@ const OasisModel = (() => {
   }
 
   function horseSigmas(horses, sigma, M) {
-    return horses.map(h => sigma * sigmaMultiplier(h.passives, M));
+    return horses.map(h => sigma * sigmaMultiplier(h.passives, M, h.item_sigma_mult));
+  }
+
+  // --- 表示オッズ → 市場の暗黙勝率（Python: market_win_prob）---
+  // floor 以下は「まだ誰も賭けていない（プレースホルダ）」として除外する。
+  // 下限に張り付いた本命の**本当の**オッズを渡すときは floor=1.0 で呼ぶこと。
+  // floor は呼び出し側が M.odds_floor を渡す（JS 側に 1.5 を持たせない）。
+  function marketWinProb(odds, floor) {
+    const raw = [];
+    let sum = 0;
+    for (let i = 0; i < odds.length; i++) {
+      const o = +odds[i];
+      const r = (Number.isFinite(o) && o > floor) ? 1.0 / o : 0.0;
+      raw.push(r);
+      sum += r;
+    }
+    if (!(sum > 0)) return null;
+    return raw.map(r => r / sum);
+  }
+
+  // --- 下限オッズの正体を判定（Python: diagnose_floor_odds）---
+  // 1.5 は未投票馬のプレースホルダであると同時に**ゲームの最低オッズ**でもある。
+  // シェア 2/3 超の大本命はお金が入っていても 1.50 と表示されるので、これを
+  // 「投入額0」と誤認すると実効オッズを桁違いに過大評価して大本命に高配当の
+  // 買い推奨を出してしまう。単勝は控除0%なので、お金が入っている馬だけで
+  // Σ(1/od)=1 が成り立つ。その不足分 residual が下限表示の馬のシェアになる。
+  function diagnoseOddsFloor(odds, myAmounts, M) {
+    const fl = M.odds_floor, n = odds.length;
+    const od = [], mine = [], atFloor = [], priced = [];
+    let mineSum = 0;
+    for (let i = 0; i < n; i++) {
+      const o = +odds[i];
+      // Python の nan_to_num(nan=0.0) 相当。未入力（undefined）も 0 扱い。
+      const m = myAmounts ? +myAmounts[i] : 0;
+      od.push(o);
+      mine.push(Number.isNaN(m) ? 0 : m);
+      mineSum += mine[i];
+      atFloor.push(Number.isFinite(o) && Math.abs(o - fl) < 1e-9);
+      priced.push(Number.isFinite(o) && o > fl);
+    }
+    const out = { unbet: od.map(() => false), odds_eff: od.slice(),
+                  ambiguous: false, residual: null, messages: [] };
+    if (!atFloor.some(Boolean)) return out;
+
+    // 自分で買った馬は、下限表示でも「お金が入っている」ことが確定している
+    const knownBet = atFloor.map((f, i) => f && mine[i] > 0);
+    const cand = atFloor.map((f, i) => f && !knownBet[i]);   // 未投票かもしれない馬
+    const nanAtFloor = () => { for (let i = 0; i < n; i++) if (atFloor[i]) out.odds_eff[i] = NaN; };
+    const markUnbet = () => { for (let i = 0; i < n; i++) if (cand[i]) out.unbet[i] = true; };
+
+    if (!priced.some(Boolean)) {
+      // 全馬が下限表示。誰も賭けていない（プール空）か、1頭が総取りしている状態。
+      if (mineSum > 0) {
+        out.ambiguous = true;
+        nanAtFloor();
+        out.messages.push(`⚠ 全馬のオッズが下限 ${fl} のままですが、自分の購入額があるためプールは` +
+          '空ではありません。どの馬にお金が入っているか判別できないため、' +
+          '単勝の推奨は出しません。');
+      } else {
+        markUnbet();
+      }
+      return out;
+    }
+
+    let S = 0;
+    for (let i = 0; i < n; i++) if (priced[i]) S += 1.0 / od[i];
+    const residual = 1.0 - S;
+    out.residual = residual;
+
+    if (residual <= M.floor_residual_unbet) {
+      // Σ(1/od) がほぼ 1 → 下限表示の馬にはお金が入っていない
+      markUnbet();
+      if (knownBet.some(Boolean)) for (let i = 0; i < n; i++) if (knownBet[i]) out.odds_eff[i] = NaN;
+      return out;
+    }
+    if (residual < M.floor_residual_real) {
+      // どちらとも言い切れない中間帯（丸め誤差・データの取得ずれなど）。安全側に倒す。
+      out.ambiguous = true;
+      nanAtFloor();
+      out.messages.push(`△ 単勝オッズの合計 Σ(1/od)=${S.toFixed(3)} がわずかに 1 を割っています` +
+        `（残り ${(residual * 100).toFixed(1)}%）。オッズ ${fl} 表示の馬が未投票か` +
+        '本命かを判別できないため、その馬は単勝の推奨から外します。');
+      return out;
+    }
+
+    // residual が大きい＝下限表示の馬に実際のお金が入っている
+    const idx = [];
+    for (let i = 0; i < n; i++) if (cand[i]) idx.push(i);
+    if (idx.length === 1 && !knownBet.some(Boolean)) {
+      out.odds_eff[idx[0]] = 1.0 / residual;   // 下限で隠れていた本当のオッズ
+      out.messages.push(`⚠ オッズ ${fl} 表示の馬は「未投票」ではなく、プールの約 ${(residual * 100).toFixed(0)}% を` +
+        `集めた大本命です（Σ(1/od)=${S.toFixed(3)}）。表示は下限に張り付いているだけなので、` +
+        `本当のオッズ ≒ ${(1.0 / residual).toFixed(2)} 倍として計算します。`);
+    } else {
+      out.ambiguous = true;
+      nanAtFloor();
+      out.messages.push(`⚠ オッズ ${fl} 表示の馬が ${atFloor.filter(Boolean).length}頭 あり、そのうち1頭が` +
+        `プールの約 ${(residual * 100).toFixed(0)}% を集めた大本命です（Σ(1/od)=${S.toFixed(3)}）。` +
+        `どの馬かはオッズだけでは判別できないため、${fl} 表示の馬は` +
+        '単勝の推奨から外します（ゲーム画面の投票額を確認してください）。');
+    }
+    return out;
+  }
+
+  // --- 単勝の配分（Python: win_bet_picks_pool）---
+  // パリミュチュエルなので自分が k口 入れると 実効オッズ=(P+Σk·u)/(P_i+k_i·u) と必ず下がる。
+  // 表示オッズのまま計算すると期待値を過大評価するので、合計EVが最大になる配分を
+  // 「限界EVが一番大きい馬へ1口ずつ」の貪欲法で求める。
+  // opts = {stakeUnit, totalUnits, maxUnits, riskCapFrac, myUnits, unbet}（単位は M.win_* から）。
+  function winBetPicksPool(names, winP, odds, pool, bankroll, kellyFrac, edgeMin, opts) {
+    const o = opts || {};
+    const unit = +o.stakeUnit, totalUnits = +o.totalUnits, maxUnits = +o.maxUnits;
+    const riskCapFrac = (o.riskCapFrac == null ? 0.10 : +o.riskCapFrac);
+    const n = names.length;
+    const od = [], p = [], unb = [], k0 = [], ok = [];
+    for (let i = 0; i < n; i++) {
+      od.push(+odds[i]);
+      p.push(+winP[i]);
+      unb.push(o.unbet ? !!o.unbet[i] : false);
+      // k0 = すでに買った分。pool と P_i は「現在の値」＝ k0 を含んでいるので、
+      // プールの再計算で k0 を足してはいけない（二重計上で希薄化を過小評価する）。
+      k0.push(o.myUnits && o.myUnits[i] != null ? Math.trunc(o.myUnits[i]) : 0);
+      ok.push(Number.isFinite(od[i]) && p[i] > 0 && (od[i] > 1.0 || unb[i]));
+    }
+    if (pool == null || pool <= 0 || !ok.some(Boolean)) return [[], null];
+    // 未投票の馬（オッズが初期値のまま）は「その馬への投入額 0」。
+    // 表示オッズ 1.5 をそのまま使うと実際とかけ離れるので 0 として扱う。
+    const P_i = [];
+    for (let i = 0; i < n; i++) P_i.push((ok[i] && !unb[i]) ? pool / (od[i] > 0 ? od[i] : 1.0) : 0.0);
+
+    const k = od.map(() => 0);
+    const already = k0.reduce((a, b) => a + b, 0);
+    const riskUnits = Math.max(1, Math.floor(riskCapFrac * bankroll / unit));
+    const budget = Math.min(Math.trunc(totalUnits), riskUnits) - already;
+    if (budget <= 0) return [[], { note: '既に上限まで購入済み' }];
+
+    // これから追加する kv 口ぶんの期待値。既存の k0 は pool / P_i に織り込み済み。
+    const totalEv = kv => {
+      let sk = 0;
+      for (let i = 0; i < n; i++) sk += kv[i];
+      const Pnew = pool + sk * unit;
+      let ev = 0;
+      for (let i = 0; i < n; i++) {
+        if (kv[i] <= 0) continue;
+        const Pi = P_i[i] + kv[i] * unit;
+        ev += kv[i] * unit * (p[i] * (Pi > 0 ? Pnew / Pi : 0.0) - 1.0);
+      }
+      return ev;
+    };
+
+    // ケリー上限（1口時の実効オッズで計算）
+    const caps = od.map(() => 0);
+    for (let i = 0; i < n; i++) {
+      if (!ok[i]) continue;
+      const eff1 = (pool + unit) / (P_i[i] + unit);
+      const edge = p[i] * eff1 - 1;
+      if (edge < edgeMin || eff1 <= 1) continue;
+      const f = edge / (eff1 - 1);
+      caps[i] = Math.max(0, Math.min(Math.floor(kellyFrac * f * bankroll / unit), Math.trunc(maxUnits)));
+    }
+
+    let base = totalEv(k), used = 0;
+    while (used < budget) {
+      let bestI = -1, bestGain = 1e-9;
+      for (let i = 0; i < n; i++) {
+        if (!ok[i] || k[i] + k0[i] >= caps[i]) continue;
+        const trial = k.slice();
+        trial[i] += 1;
+        const g = totalEv(trial) - base;
+        if (g > bestGain) { bestGain = g; bestI = i; }
+      }
+      if (bestI < 0) break;
+      k[bestI] += 1;
+      base = totalEv(k);
+      used += 1;
+    }
+
+    const units = k.reduce((a, b) => a + b, 0);
+    const Pnew = pool + units * unit;
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      if (k[i] <= 0) continue;
+      const eff = Pnew / (P_i[i] + k[i] * unit);
+      out.push({ name: names[i], p: p[i], odds: (unb[i] ? null : od[i]), unbet: unb[i],
+                 eff_od: eff, edge: p[i] * eff - 1, units: k[i], stake: k[i] * unit,
+                 ev: k[i] * unit * (p[i] * eff - 1) });
+    }
+    out.sort((a, b) => b.ev - a.ev);
+    const summary = { units: units, invest: units * unit, ev: base,
+                      pool_before: pool, pool_after: Pnew,
+                      hit: out.reduce((s, r) => s + r.p, 0), unit: unit,
+                      max_units: Math.trunc(totalUnits), already: already };
+    return [out, summary];
   }
 
   return { effectiveStats, sigmaMultiplier, rowFeatures, predictBase,
-           sameSpeciesFlags, simulateTrifecta, horseSigmas, makeRng };
+           sameSpeciesFlags, simulateTrifecta, horseSigmas, makeRng,
+           pctMults, itemMult, applyItems,
+           marketWinProb, diagnoseOddsFloor, winBetPicksPool };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = OasisModel;

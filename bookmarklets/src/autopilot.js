@@ -1,14 +1,19 @@
-// ===== おあしすっち 3連単 オートパイロット（半自動）=====
-// レースは 9/12/15/18/21/23 時の定期開催。各レースの発走前に
-//   レース発見 → 予測 → +EVの点だけ抽出 → 買い目生成 → 通知
-// までを自動で行い、**購入だけ人が1クリック**する。
+// ===== おあしすっち オートパイロット（3連単＋単勝）=====
+// レースは 9/12/15/18/21/23 時の定期開催。各レースの締切前に
+//   レース発見 → 予測（装備・お守り込み） → 3連単と単勝の+EV点を抽出
+//   → 買い目生成 → 通知 → 購入
+// までを自動で行う。
 //
 // 認証について:
 //   購入には Discord のBOTが発行したリンクの guild / user / token が要る。
-//   リンクの自動発行はセルフボット＝Discord規約違反なので行わない。
-//   ・token が使い回せる場合  … 一度貼れば以降は自動（localStorage に保存）
-//   ・レースごとに変わる場合  … 発走前に新しいリンクを下の欄に貼り直す
-//   どちらでも動くように、貼り付け欄と保存を両方持たせてある。
+//   リンクの自動発行はセルフボット＝Discord規約違反なので**行わない**。
+//   リンクは人が発行して貼る。トークンはレースごとに失効するので、
+//   **貼った時点で「次の1レースぶん」だけ自動購入を予約（アーム）する**。
+//   そのレースが終わればアームは自動で解除され、次は貼り直しが要る。
+//   これが「事前アームで全自動」の実体で、放置で走り続けることはない。
+//
+// 計算は Python の oasis_core と同じ（model.js が同じ式を持ち、
+// parity_test.py で数値一致を検証している）。装備・お守りの倍率も同じ表を使う。
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -20,13 +25,14 @@ try {
 const CFG = {
   RACE_HOURS: [9, 12, 15, 18, 21, 23],   // 開催時刻（時）
   RACE_MINUTE: 0,
-  LEAD_SEC: 120,            // 発走の何秒前を狙って解析するか
+  LEAD_SEC: 60,             // 締切の何秒前を狙って解析・購入するか
   WINDOW_SEC: 900,          // 発走何秒前から準備を始めるか
-  MAX_UNITS_PER_RACE: 3,    // 1レースの上限口数（分散のため20口上限より絞る）
+  MAX_UNITS_PER_RACE: 3,    // 3連単の1レース上限口数（分散のため20口上限より絞る）
   UNITS_PER_COMBO: 1,
   EDGE_MIN: 0.10,
-  MODEL_WEIGHT: 0.7,
+  MODEL_WEIGHT: 1.0,        // λ。model.json の defaults から上書きされる
   MIN_PROB: 0.02,
+  WIN_ON: true,             // 単勝も買う（NPCが40万入れるのでプールが常にある）
   ODDS_TOP_N: 40,           // オッズを取る上位点数（全点だと最大3360リクエストになる）
   // レースサイトとAPIのドメインが違うことがあるので候補を順に試す。
   // 先に成功したものを使い、以降はそれを覚える。
@@ -36,10 +42,12 @@ const CFG = {
   DAILY_BUDGET: 200000,     // 1日の上限（rrc）
   MAX_SANE_EDGE: 3.0,       // +300%超のエッジは計算がおかしいとみなして中止
   MAX_SANE_ODDS: 5000,
-  // プール総額の下限。**初期プール金20万を含んだ値**なので、実際の投票額の下限は
-  // これ − 20万。100000 のままだと「誰も賭けていないレース」を通してしまい、
-  // オッズ補正が x20 などに跳ねる（数学的には正しいが、データも薄く危険）。
-  MIN_POOL: 300000,
+  // 3連単プールがこれ未満なら3連単は見送る。既定は model.json の初期プール金
+  // （＝賭け0件の状態）。プールがちょうど初期金なら全組が未成立なので、
+  // オッズは1件も取りに行かず「未成立スリーブ」として扱う（下の unformed）。
+  MIN_POOL: null,           // null = model.json の trifecta_pool_seed を使う
+  UNFORMED_ON: true,        // 未成立組（誰も賭けていない組）にも置くか
+  UNFORMED_MAX_UNITS: 10,
   MIN_TRAIN_RACES: 20,      // 学習レースがこれ未満のモデルでは賭けない（雛形のまま等）
   MODEL_URL: 'https://raw.githubusercontent.com/footao/oasis-app/main/model.json',
   MODEL_JSON: null,
@@ -80,6 +88,27 @@ const saveState = s => { try { localStorage.setItem(LS, JSON.stringify(s)); } ca
 let ST = loadState();
 let PENDING = null;   // 承認待ちの買い目
 
+// ---- アーム（自動購入の予約）----
+// token はレースごとに失効するので、リンクを貼った時点で「次の1レースぶん」だけ
+// 自動購入を許可する。ST.armFor はそのレースの締切時刻(ms)。
+// レースが過ぎたら自動で外れるので、放置で走り続けることはない。
+function isArmed() {
+  return !!(ST.armFor && Date.now() < ST.armFor && nextRaceTime().getTime() === ST.armFor);
+}
+function arm() {
+  ST.armFor = nextRaceTime().getTime();
+  saveState(ST);
+  const t = new Date(ST.armFor).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+  log(`⏳ ${t} のレースを自動購入にアームしました（このレース限り）`, '#e2b96f');
+  render();
+}
+function disarm(msg) {
+  if (!ST.armFor) return;
+  ST.armFor = null; saveState(ST);
+  if (msg) log(msg, '#888');
+  render();
+}
+
 // ---- 画面 ----
 const ov = document.createElement('div');
 ov.id = 'oasis-autopilot-panel';
@@ -93,9 +122,12 @@ ov.style.cssText = 'position:fixed;z-index:99999;right:8px;left:auto;width:470px
 if (window.matchMedia && window.matchMedia('(max-width:640px)').matches) {
   ov.style.left = '8px'; ov.style.width = 'auto';    // スマホは全幅にする
 }
-ov.innerHTML = '<b style="color:#e2b96f">🛩 3連単 オートパイロット</b>'
+ov.innerHTML = '<b style="color:#e2b96f">🛩 オートパイロット（3連単＋単勝）</b>'
   + '<span id=_auth style="float:right;font-size:.72rem"></span>'
   + '<div id=_stat style="margin:.45rem 0;font-size:.76rem;line-height:1.6"></div>'
+  + '<label style="display:block;margin:.35rem 0;font-size:.76rem;cursor:pointer">'
+  + '<input type=checkbox id=_arm> <b>次の1レースだけ自動購入する</b>'
+  + '<span style="color:#888"> — リンクを貼ると自動で入ります</span></label>'
   + '<div id=_pick style="display:none;margin:.5rem 0;padding:.5rem;background:#0d1a0d;'
   + 'border:1px solid #2e7d32;border-radius:6px;font-size:.76rem"></div>'
   + '<details style="margin:.4rem 0"><summary style="cursor:pointer;font-size:.74rem;color:#aaa">'
@@ -129,6 +161,11 @@ function render() {
     + `（あと ${Math.floor(left/60)}分${String(left%60).padStart(2,'0')}秒）<br>`
     + `本日 <b>${ST.spent.toLocaleString()}</b>/${CFG.DAILY_BUDGET.toLocaleString()} rrc`
     + `　解析済み ${Object.keys(ST.done).length} レース`;
+  const ab = $('_arm');
+  if (ab) ab.checked = isArmed();
+  $('_stat').innerHTML += isArmed()
+    ? '<br><span style="color:#e2b96f">⏳ このレースは自動で購入します</span>'
+    : '<br><span style="color:#888">🛑 自動購入なし（買い目を出して止まります）</span>';
   $('_log').innerHTML = ST.log.map(x =>
     `<span style="color:${x.c || '#aaa'}">${esc(x.m)}</span>`).join('<br>')
     || '<span style="color:#666">（待機中）</span>';
@@ -177,8 +214,17 @@ async function loadModel() {
     throw new Error(`学習レースが ${M.n_races} 件しかありません`
       + `（${CFG.MIN_TRAIN_RACES}件以上必要）。model.json を作り直してください`);
   }
+  // 既定値は model.json（＝Python の DEFAULT_SETTINGS）から取る。
+  // JS 側に数値を持たせると、Python を直したときに静かにズレる。
+  const D = M.defaults || {};
+  if (D.model_weight != null) CFG.MODEL_WEIGHT = +D.model_weight;
+  if (D.edge_min != null) CFG.EDGE_MIN = +D.edge_min;
+  if (D.min_prob != null) CFG.MIN_PROB = Math.max(+D.min_prob, 0.02);
+  if (D.unformed_max_units != null) CFG.UNFORMED_MAX_UNITS = +D.unformed_max_units;
+  if (CFG.MIN_POOL == null) CFG.MIN_POOL = M.trifecta_pool_seed || 300000;
   log(`モデル読込 v${M.core_version} / 学習${M.n_races}レース`
-      + ` / σ3連単 ${Number(M.tri_sigma).toFixed(4)}`, '#81c784');
+      + ` / σ3連単 ${Number(M.tri_sigma).toFixed(4)} / σ単勝 ${Number(M.race_sigma).toFixed(4)}`,
+      '#81c784');
 }
 
 // ---- 受付中のレースを探す ----
@@ -208,35 +254,85 @@ async function fetchOdds(sid, pets, combo) {
   return out;
 }
 
-// ---- 解析して買い目を用意する（購入はしない）----
+// ---- 解析して買い目を用意する（購入はここではしない）----
 async function analyseRace(sid, info) {
   const pets = info.pets, n = pets.length;
-  if (n < (M.min_field_trifecta || 8)) { log(`R${sid}: ${n}頭 → 3連単なし`, '#888'); return null; }
   const dist = info.distance || '', track = info.surface || '';
   if (!M.dist_list.includes(dist)) { log(`R${sid}: 距離「${esc(dist)}」が未知 → 見送り`, '#ffb74d'); return null; }
 
-  const horses = pets.map(h => ({
+  // 装備・お守りの**加算**ぶん（SP+25 など）は API の speed に既に入っている。
+  // ここで掛けるのは**倍率**だけ（Python: parse_unified と同じ切り分け）。
+  const fxSkipped = [];
+  const horses = pets.map(h => OasisModel.applyItems({
     name: h.display_name || h.name, species: h.adult_key || null,
     speed: h.speed, power: h.power, stamina: h.stamina,
     condition: h.condition_label || '普通',
     passives: [h.passive_skill, h.passive_skill_2]
       .map(c => (c && c !== 'none') ? (M.code_map[c] || null) : null).filter(Boolean),
-  }));
+    equipment: h.equipment, charm: h.charm,
+  }, M, fxSkipped));
+  if (fxSkipped.length) {
+    log(`R${sid}: 反映しなかった効果 ${esc([...new Set(fxSkipped)].join(' / '))}`, '#ffb74d');
+  }
   const base = OasisModel.predictBase(horses, dist, track, M);
-  const sig = OasisModel.horseSigmas(horses, M.tri_sigma, M);
-  const { combo } = OasisModel.simulateTrifecta(base, sig, CFG.N_SIM, 42);
+  // 単勝は race_sigma、3連単は tri_sigma。Python と同じ使い分け。
+  const winP = OasisModel.simulateTrifecta(
+    base, OasisModel.horseSigmas(horses, M.race_sigma, M), CFG.N_SIM, 42).win;
+  const { combo } = OasisModel.simulateTrifecta(
+    base, OasisModel.horseSigmas(horses, M.tri_sigma, M), CFG.N_SIM, 42);
 
+  const U_ = M.stake_unit || 10000;
+  const triPicks = await analyseTrifecta(sid, pets, combo, U_);
+  const winPicks = CFG.WIN_ON ? analyseWin(sid, pets, winP) : { picks: [], cost: 0 };
+  const cost = (triPicks.cost || 0) + (winPicks.cost || 0);
+  if (!cost) return null;
+  if (ST.spent + cost > CFG.DAILY_BUDGET) { log(`R${sid}: 本日の予算上限 → 見送り`, '#ffb74d'); return null; }
+  return { sid, pets, picks: triPicks.picks, win: winPicks.picks, cost,
+           unit: U_, winUnit: M.win_stake_unit || 1000 };
+}
+
+// ---- 3連単 ----
+async function analyseTrifecta(sid, pets, combo, U_) {
+  const none = { picks: [], cost: 0 };
+  const n = pets.length;
+  if (n < (M.min_field_trifecta || 8)) { log(`R${sid}: ${n}頭 → 3連単なし`, '#888'); return none; }
   const pool = ((await jget(`${API}/api/trifecta/pool?guild=${AUTH.guild}&schedule_id=${sid}`)) || {}).pool || 0;
-  if (pool < CFG.MIN_POOL) { log(`R${sid}: プール ${pool.toLocaleString()} rrc は小さすぎ → 見送り`, '#888'); return null; }
+  const SEED = (M.trifecta_pool_seed == null ? 300000 : M.trifecta_pool_seed);
+  const BASE = Math.max(pool - SEED, 0);
+
+  // プールが初期プール金のまま ＝ 賭け0件 ＝ **全組が未成立**。
+  // 賭け金は必ず1口の倍数なので BASE < 1口 なら誰も賭けていない。
+  // オッズを取りに行っても全部 null が返るだけなので1リクエストも投げない。
+  if (BASE < U_) {
+    if (!CFG.UNFORMED_ON) { log(`R${sid}: 賭け0件（プール ${pool.toLocaleString()}）→ 見送り`, '#888'); return none; }
+    const eff = (pool + U_) / U_;
+    const pmin = (M.defaults || {}).unformed_p_min || 0.05;
+    const emin = (M.defaults || {}).unformed_edge_min || 0.30;
+    const picks = [];
+    for (const c of combo) {
+      if (c.p < pmin) continue;
+      const edge = c.p * eff - 1;
+      if (edge < emin) continue;
+      picks.push({ c, od: eff, eff, edge, p: c.p, unformed: true,
+                   names: [pets[c.i], pets[c.j], pets[c.k]].map(h => h.display_name || h.name) });
+      if (picks.length >= CFG.UNFORMED_MAX_UNITS) break;
+    }
+    if (!picks.length) { log(`R${sid}: 賭け0件だが+EVの組なし → 見送り`, '#888'); return none; }
+    log(`R${sid}: 賭け0件（プール ${pool.toLocaleString()}）→ 全組未成立・実効od ${eff.toFixed(1)}倍`, '#e2b96f');
+    const chosen = picks.slice(0, Math.min(CFG.UNFORMED_MAX_UNITS, CFG.MAX_UNITS_PER_RACE * 3));
+    return { picks: chosen, cost: chosen.length * CFG.UNITS_PER_COMBO * U_ };
+  }
+  if (pool < CFG.MIN_POOL) { log(`R${sid}: プール ${pool.toLocaleString()} rrc は小さすぎ → 見送り`, '#888'); return none; }
 
   const oddsRaw = await fetchOdds(sid, pets, combo);
-  if (!oddsRaw.size) { log(`R${sid}: オッズ取得失敗 → 見送り`, '#ffb74d'); return null; }
+  if (!oddsRaw.size) { log(`R${sid}: オッズ取得失敗 → 3連単は見送り`, '#ffb74d'); return none; }
   let odds = oddsRaw;
-  // サイト側のバグ補正: 表示オッズは (プール総額 − 初期プール金) で計算されているが、
-  // 払戻はプール総額から出る。ここを直さないとEVを過小評価して買い目を取りこぼす。
-  // Python 側は oasis_core.true_trifecta_odds()。定数は model.json 経由。
-  const SEED = (M.trifecta_pool_seed == null ? 200000 : M.trifecta_pool_seed);
-  if (pool > SEED) {
+  // かつてサイト側に「表示オッズが (プール総額 − 初期プール金) 基準」というバグがあり、
+  // 払戻はプール総額から出るので x pool/(pool−SEED) の補正を掛けていた。
+  // 2026/08/24 のアプデで修正されたことを race 2097 で確認済み（Σ(1/od)=(P−S)/P）。
+  // **補正を掛けたままだとEVを 1.5倍ほど過大評価する**ので、Python の
+  // TRIFECTA_SEED_BUG_ACTIVE を model.json 経由で見て、生きているときだけ掛ける。
+  if (M.trifecta_seed_bug_active && pool > SEED) {
     const f = pool / (pool - SEED);
     const fixed = new Map();
     for (const [k, v] of odds) fixed.set(k, v * f);
@@ -248,7 +344,7 @@ async function analyseRace(sid, info) {
   // 実際には市場の一部しか持っていないのに q が膨らむ（12頭立てで約1.8倍、
   // エッジ +0.06 過大 = EDGE_MIN と同じ大きさ）。オッズ取得が落ちるほど悪化する。
   let inv = 0; for (const od of oddsRaw.values()) inv += 1 / od;
-  const norm = Math.max(inv, 1.0), U_ = M.stake_unit || 10000;
+  const norm = Math.max(inv, 1.0);
 
   const picks = [];
   for (const c of combo.slice(0, CFG.ODDS_TOP_N)) {
@@ -261,76 +357,154 @@ async function analyseRace(sid, info) {
     if (eff > CFG.MAX_SANE_ODDS) continue;
     if (edge > CFG.MAX_SANE_EDGE) {      // 異常値は「大当たり」ではなく「バグ」
       log(`R${sid}: エッジ +${(edge*100).toFixed(0)}% は異常 → このレースは中止`, '#ef5350');
-      return null;
+      return none;
     }
     if (edge < CFG.EDGE_MIN) continue;
     picks.push({ c, od, eff, edge, p: c.p,
                  names: [pets[c.i], pets[c.j], pets[c.k]].map(h => h.display_name || h.name) });
   }
-  if (!picks.length) { log(`R${sid}: エッジ${(CFG.EDGE_MIN*100)|0}%以上の点なし → 見送り`, '#888'); return null; }
+  if (!picks.length) { log(`R${sid}: エッジ${(CFG.EDGE_MIN*100)|0}%以上の点なし → 3連単は見送り`, '#888'); return none; }
   picks.sort((a, b) => b.edge - a.edge);
   const chosen = picks.slice(0, CFG.MAX_UNITS_PER_RACE);
-  const cost = chosen.length * CFG.UNITS_PER_COMBO * U_;
-  if (ST.spent + cost > CFG.DAILY_BUDGET) { log(`R${sid}: 本日の予算上限 → 見送り`, '#ffb74d'); return null; }
-  return { sid, pets, picks: chosen, cost, unit: U_ };
+  return { picks: chosen, cost: chosen.length * CFG.UNITS_PER_COMBO * U_ };
 }
 
-// ---- 承認待ちを画面に出す ----
+// ---- 単勝（Python: analyze の単勝ブロックと同じ手順）----
+function analyseWin(sid, pets, winP) {
+  const none = { picks: [], cost: 0 };
+  const WU = M.win_stake_unit || 1000;
+  const odds = pets.map(h => (typeof h.odds === 'number' ? h.odds : NaN));
+  const mine = pets.map(h => +(h.my_amount || 0));
+  const ownRrc = mine.reduce((a, b) => a + b, 0);
+  const ownUnits = Math.floor(ownRrc / WU);
+  const left = Math.max(0, (M.win_max_total_units || 100) - ownUnits);
+  if (left <= 0) { log(`R${sid}: 単勝は既に上限 ${ownUnits}口 → 追加なし`, '#888'); return none; }
+
+  const fl = OasisModel.diagnoseOddsFloor(odds, mine, M);
+  for (const m of fl.messages) log(`R${sid}: ${esc(m)}`, '#ffb74d');
+  // 市場確率は「未投票馬を除外し、下限に張り付いた本命は本当のオッズで」計算する
+  const oddsMkt = fl.odds_eff.map((o, i) => (fl.unbet[i] ? NaN : o));
+  const mktP = OasisModel.marketWinProb(oddsMkt, 1.0);
+  if (!mktP) { log(`R${sid}: 単勝オッズを読めません → 単勝は見送り`, '#888'); return none; }
+
+  // NPC が自動投票するのでプールは常に初期金以上ある。実測が無くても**下限として**
+  // 使えば希薄化を多めに見積もれる ＝ 買い控える方向で安全側。
+  const pool = M.win_pool_seed || 0;
+  if (pool <= 0) return none;
+  const others = pool - ownRrc;
+  if (others <= 0.15 * pool) {
+    log(`R${sid}: 単勝プールの大半が自分の掛け金 → どう買っても期待値マイナス。単勝なし`, '#ffb74d');
+    return none;
+  }
+  const lam = CFG.MODEL_WEIGHT;
+  const pBet = winP.map((p, i) => lam * p + (1 - lam) * (Number.isFinite(mktP[i]) ? mktP[i] : p));
+  const D = M.defaults || {};
+  // 同名馬がいると name で引き戻せないので、一意キー「i:名前」を渡して後で剥がす。
+  const key = pets.map((h, i) => `${i}:${h.display_name || h.name}`);
+  const [picks] = OasisModel.winBetPicksPool(
+    key, pBet, fl.odds_eff, pool,
+    D.bankroll || 1200000, D.kelly_fraction || 0.25, D.win_edge_min || 0.15,
+    { stakeUnit: WU, totalUnits: Math.min(left, M.win_max_total_units || 100),
+      maxUnits: M.win_max_units || 100, riskCapFrac: D.max_risk_frac || 0.10,
+      myUnits: mine.map(a => Math.floor(a / WU)), unbet: fl.unbet });
+  if (!picks || !picks.length) { log(`R${sid}: 単勝に+EVの馬なし`, '#888'); return none; }
+  const out = picks.map(r => {
+    const i = parseInt(String(r.name).split(':')[0], 10);
+    return { i, name: pets[i].display_name || pets[i].name,
+             units: r.units, eff: r.eff, edge: r.edge, p: r.p };
+  }).filter(x => x.i >= 0 && pets[x.i]);
+  return { picks: out, cost: out.reduce((a, x) => a + x.units * WU, 0) };
+}
+
+// ---- 買い目を画面に出す（アーム中ならそのまま購入する）----
 function showPending(pl) {
   PENDING = pl;
+  const WU = pl.winUnit;
+  const rows = [];
+  for (const p of pl.picks) {
+    rows.push(`　3連単 ${esc(p.names.join(' → '))}　実効od ${p.eff.toFixed(1)}`
+      + (p.unformed ? '（未成立）' : '')
+      + `　<span style="color:#81c784">+${(p.edge*100).toFixed(0)}%</span>`);
+  }
+  for (const w of (pl.win || [])) {
+    rows.push(`　単勝 ${esc(w.name)} ${w.units}口　実効od ${w.eff.toFixed(2)}`
+      + `　<span style="color:#81c784">+${(w.edge*100).toFixed(0)}%</span>`);
+  }
+  const armed = isArmed();
   $('_pick').style.display = 'block';
   $('_pick').innerHTML =
-    `<b style="color:#81c784">R${pl.sid} 推奨 ${pl.picks.length}点 / ${pl.cost.toLocaleString()} rrc</b><br>`
-    + pl.picks.map(p => `　${esc(p.names.join(' → '))}　実効od ${p.eff.toFixed(1)}　`
-        + `<span style="color:#81c784">+${(p.edge*100).toFixed(0)}%</span>`).join('<br>')
+    `<b style="color:#81c784">R${pl.sid} 推奨 ${rows.length}件 / ${pl.cost.toLocaleString()} rrc</b><br>`
+    + rows.join('<br>')
     + '<br><button id=_buy style="width:100%;margin-top:.5rem;padding:.7rem;background:#2e7d32;'
-    + 'color:#fff;border:none;border-radius:5px;font-weight:700;cursor:pointer">🛒 これを購入する</button>';
+    + `color:#fff;border:none;border-radius:5px;font-weight:700;cursor:pointer">${armed ? '⏳ 自動購入します…' : '🛒 これを購入する'}</button>`;
   $('_buy').onclick = doBuy;
   try {
     if (Notification && Notification.permission === 'granted') {
       new Notification('おあしすっち 買い目を用意しました',
-        { body: `R${pl.sid}　${pl.picks.length}点 / ${pl.cost.toLocaleString()} rrc` });
+        { body: `R${pl.sid}　${rows.length}件 / ${pl.cost.toLocaleString()} rrc` });
     }
   } catch (e) {}
+  // アーム済み（＝人がこのレースぶんのリンクを貼って自動購入を許可した）なら
+  // ここでそのまま買う。アームは1レース限りで、買った時点で外れる。
+  if (armed) { log(`R${pl.sid}: アーム中なので自動購入します`, '#e2b96f'); doBuy(); }
 }
 
-// ---- 購入（人が押したときだけ動く）----
+// ---- 購入 ----
+// 3連単は /api/trifecta/buy、単勝は /api/bet。1リクエストあたりの口数は
+// buy.js と同じ（3連単10口・単勝20口）。それを超えると弾かれる。
 let buying = false;
 async function doBuy() {
   if (buying || !PENDING) return;
   buying = true;
   const btn = $('_buy'); if (btn) { btn.disabled = true; btn.style.opacity = .5; btn.textContent = '購入中…'; }
   const pl = PENDING;
-  for (const pk of pl.picks) {
-    const label = pk.names.join('→');
+  let bought = 0;
+  const post = async (url, body, label, amount) => {
     try {
-      const r = await fetch(`${API}/api/trifecta/buy`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user: AUTH.user, guild: AUTH.guild, race: pl.sid,
-          first: pl.pets[pk.c.i].pet_id, second: pl.pets[pk.c.j].pet_id,
-          third: pl.pets[pk.c.k].pet_id,
-          amount: CFG.UNITS_PER_COMBO * pl.unit, token: AUTH.token }) });
+      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                   body: JSON.stringify(body) });
       let d = {}; try { d = await r.json(); } catch (e) {}
       if (r.ok && d.status !== 'error') {
-        ST.spent += CFG.UNITS_PER_COMBO * pl.unit;
-        log(`R${pl.sid} ✅ ${label} +${(pk.edge*100).toFixed(0)}%`, '#81c784');
+        ST.spent += amount; bought++;
+        log(`R${pl.sid} ✅ ${label}`, '#81c784');
       } else {
         const msg = String(d.detail || d.message || ('HTTP ' + r.status));
         log(`R${pl.sid} ❌ ${label} ${esc(msg)}`, '#ef5350');
         if (/token|auth|unauthor|expire/i.test(msg)) {
-          log('→ token が無効のようです。新しい購入リンクを貼り直してください。', '#ffb74d');
+          log('→ token が無効です。新しい購入リンクを貼り直してください。', '#ffb74d');
         }
       }
     } catch (e) {
       // 届いているかもしれないので**予算は減らす**。減らさないと、実際には
       // 買えているのに残額が過大なまま1日分ずっとズレ続ける（安全側に倒す）。
-      ST.spent += CFG.UNITS_PER_COMBO * pl.unit;
+      ST.spent += amount;
       log(`R${pl.sid} ⚠ ${label} 通信エラー（送信済みか不明・予算からは引きました）: `
           + esc(e.message), '#ffb74d');
     }
     await sleep(400);
+  };
+  for (const pk of pl.picks) {
+    const amount = CFG.UNITS_PER_COMBO * pl.unit;
+    await post(`${API}/api/trifecta/buy`,
+      { user: AUTH.user, guild: AUTH.guild, race: pl.sid,
+        first: pl.pets[pk.c.i].pet_id, second: pl.pets[pk.c.j].pet_id,
+        third: pl.pets[pk.c.k].pet_id, amount, token: AUTH.token },
+      `3連単 ${pk.names.join('→')} +${(pk.edge*100).toFixed(0)}%`, amount);
   }
-  ST.done[pl.sid] = { t: Date.now(), n: pl.picks.length };
+  for (const w of (pl.win || [])) {
+    let leftU = w.units;
+    while (leftU > 0) {
+      const u = Math.min(leftU, 20);          // 単勝は1リクエスト20口まで
+      const amount = u * pl.winUnit;
+      await post(`${API}/api/bet`,
+        { user: AUTH.user, guild: AUTH.guild, race: pl.sid,
+          pet_id: pl.pets[w.i].pet_id, amount, token: AUTH.token },
+        `単勝 ${w.name} ${u}口 +${(w.edge*100).toFixed(0)}%`, amount);
+      leftU -= u;
+    }
+  }
+  ST.done[pl.sid] = { t: Date.now(), n: bought };
+  disarm(`R${pl.sid} の購入が終わったのでアームを解除しました`);
   saveState(ST);
   PENDING = null; $('_pick').style.display = 'none'; buying = false; render();
 }
@@ -382,7 +556,9 @@ $('_save').onclick = () => {
   if (!a) { log('リンクを読めません（guild と token を含むURLを貼ってください）', '#ef5350'); return; }
   AUTH = a; localStorage.setItem(LSA, JSON.stringify(a));
   $('_link').value = ''; log('購入リンクを更新しました', '#81c784');
+  arm();               // 貼った＝そのレースぶんの購入を人が許可した、とみなす
 };
+$('_arm').onchange = () => { if ($('_arm').checked) arm(); else disarm('自動購入を解除しました'); };
 $('_x').onclick = () => { stopped = true; log('停止しました', '#ffb74d'); };
 $('_clr').onclick = () => { ST.log = []; saveState(ST); render(); };
 $('_now').onclick = () => { log('手動で解析します', '#e2b96f'); tick(true); };

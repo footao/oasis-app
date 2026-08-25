@@ -1607,6 +1607,23 @@ def export_model_json(bundle, path=None):
         'odds_floor': ODDS_FLOOR, 'stake_unit': STAKE_UNIT,
         'trifecta_pool_seed': TRIFECTA_POOL_SEED,
         'max_total_units': MAX_TOTAL_UNITS, 'min_field_trifecta': MIN_FIELD_TRIFECTA,
+        # 単勝（2026/08/24 実装。NPC が自動投票するので初期プールが常にある）
+        'win_pool_seed': WIN_POOL_SEED, 'win_stake_unit': WIN_STAKE_UNIT,
+        # オッズのバグ（od=(P-S)/bet）が生きているか。race 2097 で修正済みを確認。
+        # JS 側はこれを見て「初期プール金ぶんのオッズ補正」を掛けるか決める。
+        'trifecta_seed_bug_active': bool(TRIFECTA_SEED_BUG_ACTIVE),
+        'defaults': {k: DEFAULT_SETTINGS[k] for k in
+                     ('bankroll', 'kelly_fraction', 'max_risk_frac', 'edge_min',
+                      'win_edge_min', 'model_weight', 'min_prob',
+                      'unformed_max_units', 'unformed_p_min', 'unformed_edge_min')},
+        'win_max_total_units': WIN_MAX_TOTAL_UNITS, 'win_max_units': WIN_MAX_UNITS,
+        # 下限オッズ判定（JS 側に 1.5 や 0.02 を直書きさせないため一式を渡す）
+        'unbet_odds': UNBET_ODDS, 'odds_step': ODDS_STEP,
+        'floor_residual_unbet': FLOOR_RESIDUAL_UNBET,
+        'floor_residual_real': FLOOR_RESIDUAL_REAL,
+        # 装備・お守り。効果名 → scope/duty（alias は解決済み）と、コード名の別表。
+        'item_scope': item_scope_table(spec),
+        'item_key_alias': dict(ITEM_KEY_ALIAS),
     }
     if path:
         with open(path, 'w', encoding='utf-8') as f:
@@ -2000,6 +2017,29 @@ def item_effect_spec(desc, effect_key=None, spec=None):
     if scope in ('aptitude', 'same_species', 'variance'):
         return None
     return {k: 1.0 + (float(m) - 1.0) * duty for k, m in sp['mult'].items()}
+
+
+def item_scope_table(spec=None):
+    """ITEM_EFFECT_CATALOG を `{効果名: {scope, duty}}` に解決して返す。
+
+    alias（別のパッシブの発動条件を借りる）を **ここで潰しておく**ので、
+    JS 側は「効果名 → scope/duty」を引くだけでよく、別表を持たなくて済む。
+    倍率の**大きさ**は説明文から取るのが Python と同じ（instance ごとに違うため）。
+    """
+    spec = spec or default_spec()
+    out = {}
+    for label, cat in ITEM_EFFECT_CATALOG.items():
+        scope, duty = cat.get('scope', 'always'), cat.get('duty')
+        name = cat.get('alias')
+        if name:
+            base = spec.get(name) or {}
+            scope = base.get('scope', 'conditional')
+            duty = float(base.get('duty', 1.0))
+        elif duty is None:
+            duty = 1.0 if scope == 'always' else 1.0
+        out[label] = {'scope': scope, 'duty': float(duty),
+                      'scope_arg': cat.get('scope_arg')}
+    return out
 
 
 def item_mults_from_row(r, cols, spec=None):

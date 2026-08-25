@@ -30,11 +30,19 @@ DIAG = (
     "catch(e){alert(m)}})()"
 )
 
+# ⚠ jsDelivr は @main を12時間キャッシュし、クエリ文字列を無視する。
+# push 直後に古いバンドルを掴む事故を bm.js で実際にやったので、
+# 「raw（キャッシュなし）→ raw.githack（キャッシュなし）→ jsDelivr（最後の砦）」
+# の順に落とす。他のブックマークレットのローダーと同じ構成。
+RAW = 'https://raw.githubusercontent.com/footao/oasis-app/main/autopilot.bundle.js'
+GHACK = 'https://raw.githack.com/footao/oasis-app/main/autopilot.bundle.js'
 LOADER = (
-    "javascript:(()=>{var s=document.createElement('script');"
-    "s.src='" + CDN + "?'+Date.now();"
-    "s.onerror=function(){alert('本体を読み込めません。URLとCSPを確認してください')};"
-    "document.body.appendChild(s);})()"
+    "javascript:(t=>{fetch('" + RAW + "?'+t).then(r=>r.text()).then(x=>{(0,eval)(x)})"
+    ".catch(e=>{console.warn('Oasis autopilot loader fallback:',e);"
+    "var a=document.createElement('script');a.src='" + GHACK + "?'+t;"
+    "a.onerror=function(){var b=document.createElement('script');"
+    "b.src='" + CDN + "?'+t;document.body.appendChild(b)};"
+    "document.body.appendChild(a)})})(Date.now())"
 )
 
 

@@ -21,29 +21,21 @@ python minify.py ../../oasis_harvest_bookmarklet.html harvest.js "📥 結果を
 パッシブ2枠を取得し、Discordログと同じ書式で出力します。保存して `logg` に入れると学習データが増えます。
 （`parse_results` はこの書式の `📉 コンディション：` 行を直接読めるよう v3.0 で対応済み。）
 
-## オートパイロット（半自動）のビルド
+## オートパイロット（3連単＋単勝）のビルド
 
-`model.js` と `autopilot.js` を**1つのIIFEに包んで**結合し、`oasis_autopilot.html` に注入します
-（`javascript:` URL はページのグローバルスコープで動くため、包まないと2回目に
-`const` の再宣言でエラーになります）。
+**手で組み立てないこと。** `build_autopilot.py` が全部やります。
 
 ```bash
-python - <<'EOF'
-import io, html as H, re, sys
-sys.path.insert(0, '.')
-import minify
-js = '(()=>{' + minify.minify_js(open('model.js', encoding='utf-8').read()) + ' ' \
-   + minify.minify_js(open('autopilot.js', encoding='utf-8').read()) + '})();'
-page = io.open('../../oasis_autopilot.html', encoding='utf-8').read()
-page, n = re.subn(r'href="javascript:.*?">🛩 オートパイロット',
-                  lambda m: 'href="' + H.escape('javascript:' + js, quote=True) + '">🛩 オートパイロット',
-                  page, count=1, flags=re.S)
-assert n == 1, '置換できませんでした'
-io.open('../../oasis_autopilot.html', 'w', encoding='utf-8').write(page)
-EOF
-node ../verify_autopilot.js ../../oasis_autopilot.html   # 構文チェック
-node ../test_logic.js                                    # 判定と安全弁のテスト
+python build_autopilot.py       # logg を学習 → model.json → autopilot.bundle.js → 検証
 ```
+
+やること: ①`logg` を学習して `model.json` を書き出す ②`model.js` + `model.json` +
+`autopilot.js` を**1つのIIFEに包んで** `autopilot.bundle.js` に結合する
+（`javascript:` URL はページのグローバルスコープで動くため、包まないと2回目に
+`const` の再宣言でエラーになる）③`oasis_autopilot_setup.html` の埋め込みを差し替える
+④`parity_test.py` で Python↔JS の一致を検証する ⑤構文チェック。
+
+**再学習したら必ず実行してください。** しないと画面のモデルと自動売買のモデルがズレます。
 
 モデルは `oc.export_model_json(bundle, 'model.json')` で書き出し、GitHubに置いて
 `autopilot.js` の `MODEL_URL` から読みます。**再学習したら model.json も更新すること**
