@@ -380,7 +380,9 @@ def regression_tests():
     # q が一律 1/_f 倍に縮む（＝λ混合の市場側が実質死ぬ）。
     _S2 = oc.TRIFECTA_POOL_SEED
     _P2 = 900_000
-    _b2 = [240_000, 180_000, 90_000, 60_000, 30_000]    # 合計 = P − seed（完全な市場）
+    # 合計がちょうど P − seed になるように按分する（＝完全な市場）。
+    # 金額を直書きすると初期金が変わるたびに壊れるので、seed から作ること。
+    _b2 = [(_P2 - _S2) * f for f in (0.40, 0.30, 0.15, 0.10, 0.05)]
     check('P2 完全な市場なら補正前 Σ(1/od) は 1.00',
           abs(sum(b / (_P2 - _S2) for b in _b2) - 1.0) < 1e-9)
     _disp2 = [(_P2 - _S2) / b for b in _b2]
@@ -597,13 +599,17 @@ def regression_tests():
                             - (oc.TRIFECTA_POOL_SEED + oc.STAKE_UNIT) / oc.STAKE_UNIT) < 1e-6,
           f"{len(_sl)}点 / 実効od={_sl[0].get('eff_od') if _sl else None}")
 
-    # --- P11: 2026/08/23 アプデ（初期金30万・オッズ修正・単勝NPCプール40万）---
+    # --- P11: 初期プール金とオッズのレジーム判定 ---
+    #   2026/08/23 30万・単勝40万 → 2026/08/25 どちらも20万（賞金増額と引き換え）。
     #   Σ(1/od) がどちらの世界かを言い当てられること。ここを取り違えると、
     #   「まだ金が乗っている組を未成立と誤判定して総取り狙いの買い目を出す」
     #   という一番危ない外し方をする。
     _P11 = 900_000
-    _bug11 = [(_P11 - oc.TRIFECTA_POOL_SEED) / b for b in (300_000, 200_000, 100_000)]
-    _fix11 = [_P11 / b for b in (300_000, 200_000, 100_000)]
+    # 賭け金の合計は P − seed（＝全部の金が乗り切っている状態）。
+    # 直書きすると初期金が変わるたびに壊れるので、seed から按分して作る。
+    _bets11 = [(_P11 - oc.TRIFECTA_POOL_SEED) * f for f in (0.5, 1 / 3, 1 / 6)]
+    _bug11 = [(_P11 - oc.TRIFECTA_POOL_SEED) / b for b in _bets11]
+    _fix11 = [_P11 / b for b in _bets11]
     check('P11 Σ(1/od)=1.00 なら旧仕様（初期金がオッズに入っていない）と判定',
           oc.check_seed_regime(_P11, _bug11)[0] == 'buggy',
           f'Σ={oc.check_seed_regime(_P11, _bug11)[1]:.3f}')
@@ -618,16 +624,19 @@ def regression_tests():
     check('P11 修正後のΣをキャリーオーバーと誤読しない',
           _ci11['regime'] == 'seeded' and abs(_pp11 - _P11) < 1e-6,
           f"regime={_ci11['regime']} / 払戻プール {_pp11:,.0f}")
-    check('P11 3連単の初期金は30万・単勝のNPCプールは40万',
-          oc.TRIFECTA_POOL_SEED == 300_000 and oc.WIN_POOL_SEED == 400_000)
+    check('P11 3連単の初期金・単勝のNPCプールはどちらも20万（2026/08/25〜）',
+          oc.TRIFECTA_POOL_SEED == 200_000 and oc.WIN_POOL_SEED == 200_000,
+          f'3連単 {oc.TRIFECTA_POOL_SEED:,} / 単勝 {oc.WIN_POOL_SEED:,}')
 
-    # 実データ race 2097（2026/08/23 アプデ後・全2,730組そろい）で検算:
+    # 実データ race 2097（初期金30万の時代・全2,730組そろい）で検算:
     #   プール 360,000 / 6組が各オッズ36 → Σ(1/od)=0.16667=(360,000−300,000)/360,000
     #   賭け金/組 = P/od = 10,000 rrc = ちょうど1口。**バグは直っている**。
+    #   ⚠ 当時の初期金 30万 を明示して渡すこと（今の 20万 で判定すると別の答えになる）。
     check('P11 実データ(race 2097)で修正済みと判定できる',
-          oc.check_seed_regime(360_000, [36.0] * 6)[0] == 'fixed'
+          oc.check_seed_regime(360_000, [36.0] * 6, seed=300_000)[0] == 'fixed'
           and abs(360_000 / 36.0 - oc.STAKE_UNIT) < 1e-6,
-          f'Σ={oc.check_seed_regime(360_000, [36.0] * 6)[1]:.5f} / 賭け金 {360_000/36:,.0f} rrc')
+          f'Σ={oc.check_seed_regime(360_000, [36.0] * 6, seed=300_000)[1]:.5f}'
+          f' / 賭け金 {360_000/36:,.0f} rrc')
 
     # 装備専用の効果キーは別表で正しいパッシブに寄せること。
     # 寄せられないと「追い抜かれてから200m」を常時発動と読んで 15倍 盛る。
@@ -728,6 +737,19 @@ def regression_tests():
           "const fx = (v, d) => (Number.isFinite(+v)" in _ap
           and '.eff.toFixed' not in _ap and '.edge*100).toFixed' not in _ap)
 
+    # 2026/08/25 の実害: 開いた瞬間に解析する作り(IMMEDIATE)なのに購入の窓を見ておらず、
+    # 締切1時間前にアーム済みで開いたら**その場で買った**。1時間前のオッズ・プールは
+    # 締切時点の前提と別物なので、購入も試し買いも LEAD_SEC の窓の中だけに限る。
+    check('P19 autopilot は締切60秒前の窓の中でしか買わない',
+          'function inBuyWindow()' in _ap
+          and 'const canBuy = inBuyWindow();' in _ap
+          and 'const armed = isArmed() && pl.canBuy;' in _ap,
+          '窓の外は下見（買い目を出すだけ）')
+    check('P19 autopilot は窓の外では試し買いもしない',
+          'if (!isArmed() || !inBuyWindow()) {' in _ap)
+    check('P19 autopilot は窓に入ったら下見を捨ててオッズを取り直す',
+          'if (PENDING && !PENDING.canBuy && inBuyWindow()) {' in _ap)
+
     # カウントダウンは毎秒動くこと（render() は20秒に1回しか回らないので別立て）
     check('P19 autopilot のカウントダウンは毎秒更新する',
           'function renderClock()' in _ap
@@ -748,7 +770,7 @@ def regression_tests():
 
     # 試し買いは**実際の購入**。アーム（人が購入を許可したレース）でしか走らせないこと。
     check('P18 autopilot の試し買いはアーム中だけ・1レース1回',
-          'if (!isArmed()) {' in _ap and 'ST.probed[sid]' in _ap,
+          '!isArmed()' in _ap and 'ST.probed[sid]' in _ap,
           '[今すぐ解析]の連打で二重に買わない')
     # 実測の式は bm.js と1文字も違わないこと（片方だけ直す事故を止める）
     for _frag in ('const w = oa * oa; sw += w; sr += w * (oa / ob); n++;'.replace(' ', ''),
@@ -765,7 +787,7 @@ def regression_tests():
 
     check('P17 bm.js はプールが初期金のままなら1リクエストも投げない',
           'const noBets = !(pool0 > 0) || BASE < UNIT;' in _bm15,
-          '3連単プール30万＝賭け0件。全組が未成立なので取得を省略する')
+          '3連単プールが初期金のまま＝賭け0件。全組が未成立なので取得を省略する')
 
     check('P15 bm.js は試し買いの有無に関わらず win_own を出す',
           'win_own=${Math.round(ownWin)}' in _bm15

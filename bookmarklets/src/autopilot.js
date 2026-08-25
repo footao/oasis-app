@@ -33,12 +33,12 @@ const CFG = {
   EDGE_MIN: 0.10,
   MODEL_WEIGHT: 1.0,        // λ。model.json の defaults から上書きされる
   MIN_PROB: 0.02,
-  WIN_ON: true,             // 単勝も買う（NPCが40万入れるのでプールが常にある）
+  WIN_ON: true,             // 単勝も買う（NPCの初期金があるのでプールが常にある）
   // 単勝プールの実測（試し買い）。1口ずつ買って前後のオッズの動きから逆算する。
   // **これは実際の購入**なので、アーム中（＝人が購入を許可したレース）でしか走らせない。
   // 買う先はモデルの本命なので、どのみち買いたい馬＝試し買いは無駄にならない。
   WIN_PROBE: true,
-  WIN_PROBE_MAX_UNITS: 5,   // 0 にすると実測しない（初期金40万を下限として使う）
+  WIN_PROBE_MAX_UNITS: 5,   // 0 にすると実測しない（初期金を下限として使う）
   WIN_PROBE_TARGET_ERR: 0.04,
   ODDS_TOP_N: 40,           // オッズを取る上位点数（全点だと最大3360リクエストになる）
   // レースサイトとAPIのドメインが違うことがあるので候補を順に試す。
@@ -105,6 +105,14 @@ let PENDING = null;   // 承認待ちの買い目
 // レースが過ぎたら自動で外れるので、放置で走り続けることはない。
 function isArmed() {
   return !!(ST.armFor && Date.now() < ST.armFor && nextRaceTime().getTime() === ST.armFor);
+}
+// 締切まで LEAD_SEC 以内か。**購入と試し買いはこの窓の中でしかやらない。**
+// ブックマークレットを押した瞬間に解析する（IMMEDIATE）作りなので、
+// これが無いと1時間前に開いただけで買ってしまう（2026/08/25 に実際にやった）。
+// 1時間前のオッズ・プールで買っても、締切までに他人の金が入って前提が変わる。
+function inBuyWindow() {
+  const left = (nextRaceTime() - Date.now()) / 1000;
+  return left > 0 && left <= CFG.LEAD_SEC;
 }
 function arm() {
   ST.armFor = nextRaceTime().getTime();
@@ -240,7 +248,7 @@ async function loadModel() {
   if (D.edge_min != null) CFG.EDGE_MIN = +D.edge_min;
   if (D.min_prob != null) CFG.MIN_PROB = Math.max(+D.min_prob, 0.02);
   if (D.unformed_max_units != null) CFG.UNFORMED_MAX_UNITS = +D.unformed_max_units;
-  if (CFG.MIN_POOL == null) CFG.MIN_POOL = M.trifecta_pool_seed || 300000;
+  if (CFG.MIN_POOL == null) CFG.MIN_POOL = M.trifecta_pool_seed || 200000;
   log(`モデル読込 v${M.core_version} / 学習${M.n_races}レース`
       + ` / σ3連単 ${Number(M.tri_sigma).toFixed(4)} / σ単勝 ${Number(M.race_sigma).toFixed(4)}`,
       '#81c784');
@@ -274,7 +282,7 @@ async function fetchOdds(sid, pets, combo) {
 }
 
 // ---- 解析して買い目を用意する（購入はここではしない）----
-async function analyseRace(sid, info) {
+async function analyseRace(sid, info, canBuy) {
   const pets = info.pets, n = pets.length;
   const dist = info.distance || '', track = info.surface || '';
   if (!M.dist_list.includes(dist)) { log(`R${sid}: 距離「${esc(dist)}」が未知 → 見送り`, '#ffb74d'); return null; }
@@ -313,7 +321,7 @@ async function analyseRace(sid, info) {
   // **実測後の pets** をそのまま単勝の計算に使う（プールと同じ時点に揃える）。
   let wpets = pets, wpool = null;
   if (winOn && CFG.WIN_PROBE && CFG.WIN_PROBE_MAX_UNITS > 0) {
-    const pr = await probeWinPool(sid, pets, winP);
+    const pr = canBuy ? await probeWinPool(sid, pets, winP) : null;
     if (pr) { wpets = pr.pets; wpool = pr.pool; }
   }
   const winPicks = winOn ? analyseWin(sid, wpets, winP, wpool) : { picks: [], cost: 0 };
@@ -321,7 +329,7 @@ async function analyseRace(sid, info) {
   if (!cost) return null;
   if (ST.spent + cost > CFG.DAILY_BUDGET) { log(`R${sid}: 本日の予算上限 → 見送り`, '#ffb74d'); return null; }
   return { sid, pets: wpets, picks: triPicks.picks, win: winPicks.picks, cost,
-           unit: U_, winUnit: M.win_stake_unit || 1000 };
+           unit: U_, winUnit: M.win_stake_unit || 1000, canBuy: !!canBuy };
 }
 
 // ---- 3連単 ----
@@ -330,7 +338,7 @@ async function analyseTrifecta(sid, pets, combo, U_) {
   const n = pets.length;
   if (n < (M.min_field_trifecta || 8)) { log(`R${sid}: ${n}頭 → 3連単なし`, '#888'); return none; }
   const pool = ((await jget(`${API}/api/trifecta/pool?guild=${AUTH.guild}&schedule_id=${sid}`)) || {}).pool || 0;
-  const SEED = (M.trifecta_pool_seed == null ? 300000 : M.trifecta_pool_seed);
+  const SEED = (M.trifecta_pool_seed == null ? 200000 : M.trifecta_pool_seed);
   const BASE = Math.max(pool - SEED, 0);
 
   // プールが初期プール金のまま ＝ 賭け0件 ＝ **全組が未成立**。
@@ -411,8 +419,10 @@ async function analyseTrifecta(sid, pets, combo, U_) {
 // （分散最小）。1口ずつ買って目標精度に届いた時点で止める。
 // bm.js の同じ処理と式を揃えてある（Python: oasis_core.estimate_win_pool）。
 async function probeWinPool(sid, pets, winP) {
-  if (!isArmed()) {           // 試し買いは**実際の購入**。許可の無いレースでは走らせない。
-    log(`R${sid}: アームされていないので単勝プールの実測は行いません`, '#888');
+  if (!isArmed() || !inBuyWindow()) {  // 試し買いは**実際の購入**。
+    // 許可（アーム）が無いレース、締切60秒前より手前では走らせない。
+    log(`R${sid}: ${isArmed() ? `締切${CFG.LEAD_SEC}秒前まで待ちます` : 'アームされていません'}`
+        + ' → 単勝プールの実測はしません', '#888');
     return null;
   }
   // [今すぐ解析] を連打すると同じレースで何度も試し買いしてしまう。1レース1回に固定する。
@@ -561,7 +571,7 @@ function showPending(pl) {
     rows.push(`　単勝 ${esc(w.name)} ${w.units}口　実効od ${fx(w.eff, 2)}`
       + `　<span style="color:#81c784">+${fx(w.edge * 100, 0)}%</span>`);
   }
-  const armed = isArmed();
+  const armed = isArmed() && pl.canBuy;
   $('_pick').style.display = 'block';
   $('_pick').innerHTML =
     `<b style="color:#81c784">R${pl.sid} 推奨 ${rows.length}件 / ${pl.cost.toLocaleString()} rrc</b><br>`
@@ -577,7 +587,12 @@ function showPending(pl) {
   } catch (e) {}
   // アーム済み（＝人がこのレースぶんのリンクを貼って自動購入を許可した）なら
   // ここでそのまま買う。アームは1レース限りで、買った時点で外れる。
-  if (armed) { log(`R${pl.sid}: アーム中なので自動購入します`, '#e2b96f'); doBuy(); }
+  if (armed) { log(`R${pl.sid}: アーム中なので自動購入します`, '#e2b96f'); doBuy(); return; }
+  if (isArmed() && !pl.canBuy) {
+    const left = Math.round((nextRaceTime() - Date.now()) / 1000);
+    log(`R${pl.sid}: これは下見です（締切まで ${Math.floor(left/60)}分）。`
+        + `締切 ${CFG.LEAD_SEC}秒前にオッズを取り直して買います`, '#e2b96f');
+  }
 }
 
 // ---- 購入 ----
@@ -652,6 +667,12 @@ async function tick(force) {
     saveState(ST);
     PENDING = null; $('_pick').style.display = 'none'; buying = false;
   }
+  // 窓の外で作った買い目（下見）は、窓に入ったら捨てて取り直す。
+  // 1時間前のオッズ・プールのまま買うと前提がズレている。
+  if (PENDING && !PENDING.canBuy && inBuyWindow()) {
+    log(`R${PENDING.sid}: 締切が近いのでオッズを取り直します`, '#e2b96f');
+    PENDING = null; $('_pick').style.display = 'none';
+  }
   if (PENDING) { render(); return; }
   if (!AUTH) { render(); return; }
   const left = (nextRaceTime() - Date.now()) / 1000;
@@ -670,8 +691,12 @@ async function tick(force) {
     }
     else if (ST.done[r.sid] && !force) { /* 見送り済み */ }
     else {
-      const pl = await analyseRace(r.sid, r.info);
-      if (pl) showPending(pl); else ST.done[r.sid] = { t: Date.now(), n: 0 };
+      // 購入していいのは「締切 LEAD_SEC 前の窓の中」だけ。
+      // 窓の外は下見（買い目を出すだけ・試し買いもしない）。
+      const canBuy = inBuyWindow();
+      const pl = await analyseRace(r.sid, r.info, canBuy);
+      // 下見で見送っても done にはしない（窓の中で取り直す機会を残す）。
+      if (pl) showPending(pl); else if (canBuy) ST.done[r.sid] = { t: Date.now(), n: 0 };
       saveState(ST);
     }
     errors = 0;
