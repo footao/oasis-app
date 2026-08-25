@@ -700,6 +700,10 @@ def regression_tests():
           f"購入済{_rx.get('win_own_units')}口 → 推奨{_u(_rx)}口")
     _bm15 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               'bookmarklets', 'src', 'bm.js'), encoding='utf-8').read()
+    check('P17 bm.js はプールが初期金のままなら1リクエストも投げない',
+          'const noBets = !(pool0 > 0) || BASE < UNIT;' in _bm15,
+          '3連単プール30万＝賭け0件。全組が未成立なので取得を省略する')
+
     check('P15 bm.js は試し買いの有無に関わらず win_own を出す',
           'win_own=${Math.round(ownWin)}' in _bm15
           and 'const ownWin=pets.reduce' in _bm15,

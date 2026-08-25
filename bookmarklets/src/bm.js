@@ -1,7 +1,7 @@
 (async () => {
 // このファイルの版。ローダー経由で本当に最新が読めているかを目視で確かめるため、
 // 完了バッジの末尾に出す。古い版が読まれていたらここの数字が古いまま出る。
-const BM_VER='3.15.0';
+const BM_VER='3.15.2';
 const B='https://api.oasis.red';
 const q=new URLSearchParams(location.search);
 const G=q.get('guild'), S=q.get('race')||q.get('schedule_id'), U=q.get('user');
@@ -236,12 +236,13 @@ try{
  // **20 がすでに最適**なので上げても下げても速くならない。触らないこと。
  const PAR=20;
  const queue=combos.slice(), results=[], failed=[]; let seenAmt=0, cut=0, regimeBad=false;
- // プール表示が 0 ＝ 誰も1口も買っていない ＝ **全組が未成立**。
+ // プールが初期プール金(30万)のまま ＝ 誰も1口も買っていない ＝ **全組が未成立**。
+ // 賭け金は必ず1口(10,000rrc)の倍数なので、BASE が1口に満たなければ賭けは0件。
  // 取りに行っても全部 null が返るだけなので、1リクエストも投げない
  // （14頭なら 2,184回、16頭なら 3,360回まるごと不要）。
  // queue を空にせず残すことで、下の rest がそのまま全組を未成立として出す。
- const noBets = !(pool0 > 0);
- if(noBets) btn.textContent=`🏇 プール0 → 全${combos.length}通り未成立。オッズ取得を省略`;
+ const noBets = !(pool0 > 0) || BASE < UNIT;
+ if(noBets) btn.textContent=`🏇 プール${(pool0||0).toLocaleString()}rrc（賭け0件）→ 全${combos.length}通り未成立。オッズ取得を省略`;
  while(!noBets && queue.length){
    const batch=queue.splice(0,PAR);
    const got=await Promise.all(batch.map(async([a,b,x])=>{
