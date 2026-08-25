@@ -33,6 +33,12 @@ const CFG = {
   MODEL_WEIGHT: 1.0,        // λ。model.json の defaults から上書きされる
   MIN_PROB: 0.02,
   WIN_ON: true,             // 単勝も買う（NPCが40万入れるのでプールが常にある）
+  // 単勝プールの実測（試し買い）。1口ずつ買って前後のオッズの動きから逆算する。
+  // **これは実際の購入**なので、アーム中（＝人が購入を許可したレース）でしか走らせない。
+  // 買う先はモデルの本命なので、どのみち買いたい馬＝試し買いは無駄にならない。
+  WIN_PROBE: true,
+  WIN_PROBE_MAX_UNITS: 5,   // 0 にすると実測しない（初期金40万を下限として使う）
+  WIN_PROBE_TARGET_ERR: 0.04,
   ODDS_TOP_N: 40,           // オッズを取る上位点数（全点だと最大3360リクエストになる）
   // レースサイトとAPIのドメインが違うことがあるので候補を順に試す。
   // 先に成功したものを使い、以降はそれを覚える。
@@ -82,6 +88,7 @@ function loadState() {
   try { s = JSON.parse(localStorage.getItem(LS) || '{}'); } catch (e) {}
   if (s.day !== today()) s = { day: today(), spent: 0, done: {}, log: [] };
   s.done = s.done || {}; s.log = s.log || []; s.spent = s.spent || 0;
+  s.probed = s.probed || {};   // 試し買い済みのレース（[今すぐ解析]の連打で二重に買わない）
   return s;
 }
 const saveState = s => { try { localStorage.setItem(LS, JSON.stringify(s)); } catch (e) {} };
@@ -283,11 +290,18 @@ async function analyseRace(sid, info) {
 
   const U_ = M.stake_unit || 10000;
   const triPicks = await analyseTrifecta(sid, pets, combo, U_);
-  const winPicks = CFG.WIN_ON ? analyseWin(sid, pets, winP) : { picks: [], cost: 0 };
+  // 単勝プールの実測はここで。試し買いでオッズが動くので、
+  // **実測後の pets** をそのまま単勝の計算に使う（プールと同じ時点に揃える）。
+  let wpets = pets, wpool = null;
+  if (CFG.WIN_ON && CFG.WIN_PROBE && CFG.WIN_PROBE_MAX_UNITS > 0) {
+    const pr = await probeWinPool(sid, pets, winP);
+    if (pr) { wpets = pr.pets; wpool = pr.pool; }
+  }
+  const winPicks = CFG.WIN_ON ? analyseWin(sid, wpets, winP, wpool) : { picks: [], cost: 0 };
   const cost = (triPicks.cost || 0) + (winPicks.cost || 0);
   if (!cost) return null;
   if (ST.spent + cost > CFG.DAILY_BUDGET) { log(`R${sid}: 本日の予算上限 → 見送り`, '#ffb74d'); return null; }
-  return { sid, pets, picks: triPicks.picks, win: winPicks.picks, cost,
+  return { sid, pets: wpets, picks: triPicks.picks, win: winPicks.picks, cost,
            unit: U_, winUnit: M.win_stake_unit || 1000 };
 }
 
@@ -369,8 +383,101 @@ async function analyseTrifecta(sid, pets, combo, U_) {
   return { picks: chosen, cost: chosen.length * CFG.UNITS_PER_COMBO * U_ };
 }
 
+// ---- 単勝プールの実測（試し買い）----
+// 単勝は控除0%の純パリミュチュエルなので Σ(1/od)=1.000。つまり**オッズはシェアしか
+// 表さず、プール総額の情報を含まない**。自分で少額入れて前後の動きから逆算するしかない。
+//   od_j = P / P_j。自分が Δ 入れると P→P+Δ。**自分が買っていない**馬 j は P_j 不変なので
+//   od_j後 / od_j前 = (P+Δ)/P = R（全馬共通）→ P = Δ/(R−1)
+// オッズは小数2桁なので丸め誤差は od に反比例する。比 R は**重み od² の加重平均**で取る
+// （分散最小）。1口ずつ買って目標精度に届いた時点で止める。
+// bm.js の同じ処理と式を揃えてある（Python: oasis_core.estimate_win_pool）。
+async function probeWinPool(sid, pets, winP) {
+  if (!isArmed()) {           // 試し買いは**実際の購入**。許可の無いレースでは走らせない。
+    log(`R${sid}: アームされていないので単勝プールの実測は行いません`, '#888');
+    return null;
+  }
+  // [今すぐ解析] を連打すると同じレースで何度も試し買いしてしまう。1レース1回に固定する。
+  if (ST.probed[sid]) {
+    log(`R${sid}: 単勝プールは実測済み（${(ST.probed[sid] || 0).toLocaleString()} rrc）`, '#888');
+    const again = await jget(`${API}/api/race/by-id/${AUTH.guild}/${sid}?user=${AUTH.user}`);
+    return { pets: (again && again.pets) || pets, pool: ST.probedPool && ST.probedPool[sid] };
+  }
+  const WU = M.win_stake_unit || 1000;
+  const FLOOR = M.unbet_odds == null ? 1.5 : M.unbet_odds;
+  const STEP = M.odds_step == null ? 0.01 : M.odds_step;
+  const priced = pets.filter(h => Number.isFinite(+h.odds) && +h.odds > 0 && +h.odds !== FLOOR);
+  if (priced.length < 3) { log(`R${sid}: オッズの出ている馬が少なく単勝プールを測れません`, '#888'); return null; }
+  // 試し買い先はモデルの本命（オッズが出ている馬の中で）。どのみち買いたい馬。
+  let ti = -1;
+  pets.forEach((h, i) => {
+    if (!priced.includes(h)) return;
+    if (ti < 0 || winP[i] > winP[ti]) ti = i;
+  });
+  if (ti < 0) return null;
+  const tgt = pets[ti];
+  const maxU = Math.min(CFG.WIN_PROBE_MAX_UNITS,
+                        Math.floor(Math.max(CFG.DAILY_BUDGET - ST.spent, 0) / WU));
+  if (maxU < 1) { log(`R${sid}: 予算が残っておらず実測できません`, '#ffb74d'); return null; }
+  const before = new Map(pets.map(h => [h.pet_id, +h.odds]));
+  let spent = 0, cur = pets, wp = null;
+  for (let k = 0; k < maxU; k++) {
+    try {
+      const r = await fetch(`${API}/api/bet`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user: AUTH.user, guild: AUTH.guild, race: sid,
+                               pet_id: tgt.pet_id, amount: WU, token: AUTH.token }) });
+      if (!r.ok) { if (!spent) log(`R${sid}: 単勝の試し買いに失敗（実測なし）`, '#ffb74d'); break; }
+      spent += WU; ST.spent += WU;
+      ST.probed[sid] = spent;
+      saveState(ST);
+    } catch (e) { break; }
+    const info2 = await jget(`${API}/api/race/by-id/${AUTH.guild}/${sid}?user=${AUTH.user}`);
+    if (!info2 || !Array.isArray(info2.pets) || !info2.pets.length) break;
+    cur = info2.pets;
+    // 買った馬は P_j が動くので比に使えない。残りの馬で od² 加重平均を取る。
+    let sw = 0, sr = 0, n = 0; const seenOd = new Map();
+    for (const h of cur) {
+      if (h.pet_id === tgt.pet_id) continue;
+      const ob = before.get(h.pet_id), oa = +h.odds;
+      if (!ob || !Number.isFinite(oa) || oa <= 0 || ob === FLOOR || oa === FLOOR) continue;
+      const w = oa * oa; sw += w; sr += w * (oa / ob); n++;
+      // 誤差の見積もりだけは**オッズが同じ馬をまとめて1つ**として数える。
+      // 丸め誤差は「オッズの値」に対して決まるので、同値の馬を独立サンプル扱いすると
+      // 1/√n ぶん精度を過大評価する（NPCが均等に賭けて全馬同オッズのとき実際に外した）。
+      if (!seenOd.has(oa)) seenOd.set(oa, w);
+    }
+    if (sw <= 0 || n < 2) continue;
+    const R = sr / sw;
+    if (R <= 1) continue;
+    let P = spent / (R - 1);
+    let swErr = 0; for (const w of seenOd.values()) swErr += w;
+    const sdR = (STEP / Math.sqrt(12)) * Math.sqrt(2 / swErr);
+    let rel = sdR * P / spent;
+    const sdAbs = rel * P;
+    let exact = false;
+    if (sdAbs < WU) {                       // 1σ が1格子未満 → 1,000rrc単位に確定できる
+      P = Math.round(P / WU) * WU;
+      if (sdAbs < WU / 4) exact = true;
+      // 格子に載せた以上、誤差は**半格子より小さくは名乗れない**（量子化の下限）
+      rel = Math.max(rel, (WU / 2) / P);
+    }
+    wp = { pool: P + spent, delta: spent, n: n, err: rel, exact: exact };
+    if (exact || rel <= CFG.WIN_PROBE_TARGET_ERR) break;
+  }
+  if (!wp) {
+    if (spent) log(`R${sid}: 試し買い ${spent.toLocaleString()} rrc したが実測できず → 初期金で計算`, '#ffb74d');
+    return spent ? { pets: cur, pool: null } : null;
+  }
+  log(`R${sid}: ${wp.exact ? '✅ 単勝プールを確定' : '🔬 単勝プールを実測'} `
+      + `${wp.pool.toLocaleString()} rrc`
+      + `（試し買い ${wp.delta.toLocaleString()} rrc / ${wp.n}頭`
+      + (wp.exact ? '' : ` / 精度 ±${(wp.err * 200).toFixed(0)}%`) + `）`, '#81c784');
+  ST.probedPool = ST.probedPool || {}; ST.probedPool[sid] = wp.pool; saveState(ST);
+  return { pets: cur, pool: wp.pool };
+}
+
 // ---- 単勝（Python: analyze の単勝ブロックと同じ手順）----
-function analyseWin(sid, pets, winP) {
+function analyseWin(sid, pets, winP, measuredPool) {
   const none = { picks: [], cost: 0 };
   const WU = M.win_stake_unit || 1000;
   const odds = pets.map(h => (typeof h.odds === 'number' ? h.odds : NaN));
@@ -387,9 +494,12 @@ function analyseWin(sid, pets, winP) {
   const mktP = OasisModel.marketWinProb(oddsMkt, 1.0);
   if (!mktP) { log(`R${sid}: 単勝オッズを読めません → 単勝は見送り`, '#888'); return none; }
 
-  // NPC が自動投票するのでプールは常に初期金以上ある。実測が無くても**下限として**
-  // 使えば希薄化を多めに見積もれる ＝ 買い控える方向で安全側。
-  const pool = M.win_pool_seed || 0;
+  // 実測できたらそれを使う。無ければ NPC の初期金を**下限として**使う
+  // （実際のプールはこれ以上あるので希薄化を多めに見積もる＝買い控える方向で安全側）。
+  const pool = measuredPool || M.win_pool_seed || 0;
+  if (!measuredPool && (M.win_pool_seed || 0) > 0) {
+    log(`R${sid}: 単勝プールは初期金 ${(M.win_pool_seed).toLocaleString()} rrc と仮定（控えめ）`, '#888');
+  }
   if (pool <= 0) return none;
   const others = pool - ownRrc;
   if (others <= 0.15 * pool) {

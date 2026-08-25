@@ -716,6 +716,18 @@ def regression_tests():
     check('P18 autopilot の自動購入アームは1レース限り',
           'nextRaceTime().getTime() === ST.armFor' in _ap and 'disarm(' in _ap,
           'レースが過ぎたらアームは自動で外れる')
+    # 試し買いは**実際の購入**。アーム（人が購入を許可したレース）でしか走らせないこと。
+    check('P18 autopilot の試し買いはアーム中だけ・1レース1回',
+          'if (!isArmed()) {' in _ap and 'ST.probed[sid]' in _ap,
+          '[今すぐ解析]の連打で二重に買わない')
+    # 実測の式は bm.js と1文字も違わないこと（片方だけ直す事故を止める）
+    for _frag in ('const w = oa * oa; sw += w; sr += w * (oa / ob); n++;'.replace(' ', ''),
+                  # 刻み幅の定数名だけ違う（bm.js は直書き ODD_STEP、autopilot は model.json の STEP）
+                  'const sdR = (@ / Math.sqrt(12)) * Math.sqrt(2 / swErr);'.replace(' ', ''),
+                  'if (!seenOd.has(oa)) seenOd.set(oa, w);'.replace(' ', '')):
+        _n = lambda t: t.replace(' ', '').replace('ODD_STEP', '@').replace('STEP', '@')
+        check(f'P18 実測の式が bm.js と一致 [{_frag[:28]}…]',
+              _frag in _n(_ap) and _frag in _n(_bm15))
     check('P18 モデルは装備の scope/duty と既定値を JSON に出す',
           set(['item_scope', 'item_key_alias', 'trifecta_seed_bug_active', 'defaults',
                'win_pool_seed', 'win_max_total_units'])
