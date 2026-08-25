@@ -62,6 +62,8 @@ let API = null;      // 実際に通じた API のベースURL
 const LS = 'oasis_autopilot_v1', LSA = 'oasis_autopilot_auth', LSB = 'oasis_autopilot_api';
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// 表示用の数値整形。undefined/NaN でも落とさない（表示のために解析全体を落とさない）。
+const fx = (v, d) => (Number.isFinite(+v) ? (+v).toFixed(d) : '—');
 const jget = async u => { try { const r = await fetch(u); if (!r.ok) return null; return await r.json(); } catch (e) { return null; } };
 const today = () => new Date().toLocaleDateString('sv-SE');
 
@@ -285,19 +287,26 @@ async function analyseRace(sid, info) {
   // 単勝は race_sigma、3連単は tri_sigma。Python と同じ使い分け。
   const winP = OasisModel.simulateTrifecta(
     base, OasisModel.horseSigmas(horses, M.race_sigma, M), CFG.N_SIM, 42).win;
-  const { combo } = OasisModel.simulateTrifecta(
-    base, OasisModel.horseSigmas(horses, M.tri_sigma, M), CFG.N_SIM, 42);
+  // 7頭以下のレースに3連単は無い。組のシミュレーション自体を回さない
+  // （Python の analyze も need_combo=tri_ok で同じことをしている）。
+  // このレースで買えるのは単勝だけなので、WIN_ON を切っていても単勝は出す。
+  const triOk = n >= (M.min_field_trifecta || 8);
+  const combo = triOk ? OasisModel.simulateTrifecta(
+    base, OasisModel.horseSigmas(horses, M.tri_sigma, M), CFG.N_SIM, 42).combo : [];
+  const winOn = CFG.WIN_ON || !triOk;
 
   const U_ = M.stake_unit || 10000;
-  const triPicks = await analyseTrifecta(sid, pets, combo, U_);
+  const triPicks = triOk ? await analyseTrifecta(sid, pets, combo, U_)
+                         : { picks: [], cost: 0 };
+  if (!triOk) log(`R${sid}: ${n}頭 → 3連単なし（8頭未満）。単勝だけ出します`, '#888');
   // 単勝プールの実測はここで。試し買いでオッズが動くので、
   // **実測後の pets** をそのまま単勝の計算に使う（プールと同じ時点に揃える）。
   let wpets = pets, wpool = null;
-  if (CFG.WIN_ON && CFG.WIN_PROBE && CFG.WIN_PROBE_MAX_UNITS > 0) {
+  if (winOn && CFG.WIN_PROBE && CFG.WIN_PROBE_MAX_UNITS > 0) {
     const pr = await probeWinPool(sid, pets, winP);
     if (pr) { wpets = pr.pets; wpool = pr.pool; }
   }
-  const winPicks = CFG.WIN_ON ? analyseWin(sid, wpets, winP, wpool) : { picks: [], cost: 0 };
+  const winPicks = winOn ? analyseWin(sid, wpets, winP, wpool) : { picks: [], cost: 0 };
   const cost = (triPicks.cost || 0) + (winPicks.cost || 0);
   if (!cost) return null;
   if (ST.spent + cost > CFG.DAILY_BUDGET) { log(`R${sid}: 本日の予算上限 → 見送り`, '#ffb74d'); return null; }
@@ -521,7 +530,9 @@ function analyseWin(sid, pets, winP, measuredPool) {
   const out = picks.map(r => {
     const i = parseInt(String(r.name).split(':')[0], 10);
     return { i, name: pets[i].display_name || pets[i].name,
-             units: r.units, eff: r.eff, edge: r.edge, p: r.p };
+             // ⚠ winBetPicksPool が返すキーは Python と同じ `eff_od`。
+             //   `eff` にすると undefined になって .toFixed() で落ちる（実際に落とした）。
+             units: r.units, eff: r.eff_od, edge: r.edge, p: r.p };
   }).filter(x => x.i >= 0 && pets[x.i]);
   return { picks: out, cost: out.reduce((a, x) => a + x.units * WU, 0) };
 }
@@ -532,13 +543,13 @@ function showPending(pl) {
   const WU = pl.winUnit;
   const rows = [];
   for (const p of pl.picks) {
-    rows.push(`　3連単 ${esc(p.names.join(' → '))}　実効od ${p.eff.toFixed(1)}`
+    rows.push(`　3連単 ${esc(p.names.join(' → '))}　実効od ${fx(p.eff, 1)}`
       + (p.unformed ? '（未成立）' : '')
-      + `　<span style="color:#81c784">+${(p.edge*100).toFixed(0)}%</span>`);
+      + `　<span style="color:#81c784">+${fx(p.edge * 100, 0)}%</span>`);
   }
   for (const w of (pl.win || [])) {
-    rows.push(`　単勝 ${esc(w.name)} ${w.units}口　実効od ${w.eff.toFixed(2)}`
-      + `　<span style="color:#81c784">+${(w.edge*100).toFixed(0)}%</span>`);
+    rows.push(`　単勝 ${esc(w.name)} ${w.units}口　実効od ${fx(w.eff, 2)}`
+      + `　<span style="color:#81c784">+${fx(w.edge * 100, 0)}%</span>`);
   }
   const armed = isArmed();
   $('_pick').style.display = 'block';
@@ -599,7 +610,7 @@ async function doBuy() {
       { user: AUTH.user, guild: AUTH.guild, race: pl.sid,
         first: pl.pets[pk.c.i].pet_id, second: pl.pets[pk.c.j].pet_id,
         third: pl.pets[pk.c.k].pet_id, amount, token: AUTH.token },
-      `3連単 ${pk.names.join('→')} +${(pk.edge*100).toFixed(0)}%`, amount);
+      `3連単 ${pk.names.join('→')} +${fx(pk.edge * 100, 0)}%`, amount);
   }
   for (const w of (pl.win || [])) {
     let leftU = w.units;
@@ -609,7 +620,7 @@ async function doBuy() {
       await post(`${API}/api/bet`,
         { user: AUTH.user, guild: AUTH.guild, race: pl.sid,
           pet_id: pl.pets[w.i].pet_id, amount, token: AUTH.token },
-        `単勝 ${w.name} ${u}口 +${(w.edge*100).toFixed(0)}%`, amount);
+        `単勝 ${w.name} ${u}口 +${fx(w.edge * 100, 0)}%`, amount);
       leftU -= u;
     }
   }

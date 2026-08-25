@@ -791,52 +791,58 @@ with tab_pred:
                                     st.info("推定プールでは、エッジ条件を満たす単勝がありません"
                                             "（プールが小さいと希薄化が大きく、+EVになりにくいです）。")
 
-            st.subheader("🏆 的中確率ランキング")
             rk = result["ranking"]
-            if result["ranking_pool_known"]:
-                st.dataframe(pd.DataFrame([{
-                    "#": r["rank"], "買い目": r["combo"],
-                    "的中率": f"{r['model_p']*100:.2f}%", "累積": f"{r['cum']*100:.1f}%",
-                    "状態": r["flag"], "1口実効od": f"{r['eff1_od']:.1f}倍",
-                    "1口EV": f"{r['ev1']:+,.0f}",
-                    "+EV": ("◎" if r["plus_ev"] else "")} for r in rk]),
-                    **_wide(hide_index=True))
+            # 8頭未満のレースに3連単は存在しない。空の表とガイドを出すと
+            # 「買えるのに見送った」ように見えるので、丸ごと出さない。
+            if not rk:
+                st.info(f"出走 {result['n_field']}頭 → このレースに3連単はありません"
+                        "（8頭未満）。上の🥇単勝だけを見てください。")
             else:
-                st.dataframe(pd.DataFrame([{
-                    "#": r["rank"], "買い目": r["combo"],
-                    "的中率": f"{r['model_p']*100:.2f}%", "累積": f"{r['cum']*100:.1f}%",
-                    "状態": r["flag"]} for r in rk]),
-                    **_wide(hide_index=True))
-                st.caption("プール未取得のため実効odは算出不可。")
-            st.caption(f"上位{len(rk)}点でモデル確率の {result['ranking_cover']*100:.1f}% をカバー。"
-                       f"{result.get('mc_note','')}")
+                st.subheader("🏆 的中確率ランキング")
+                if result["ranking_pool_known"]:
+                    st.dataframe(pd.DataFrame([{
+                        "#": r["rank"], "買い目": r["combo"],
+                        "的中率": f"{r['model_p']*100:.2f}%", "累積": f"{r['cum']*100:.1f}%",
+                        "状態": r["flag"], "1口実効od": f"{r['eff1_od']:.1f}倍",
+                        "1口EV": f"{r['ev1']:+,.0f}",
+                        "+EV": ("◎" if r["plus_ev"] else "")} for r in rk]),
+                        **_wide(hide_index=True))
+                else:
+                    st.dataframe(pd.DataFrame([{
+                        "#": r["rank"], "買い目": r["combo"],
+                        "的中率": f"{r['model_p']*100:.2f}%", "累積": f"{r['cum']*100:.1f}%",
+                        "状態": r["flag"]} for r in rk]),
+                        **_wide(hide_index=True))
+                    st.caption("プール未取得のため実効odは算出不可。")
+                st.caption(f"上位{len(rk)}点でモデル確率の {result['ranking_cover']*100:.1f}% をカバー。"
+                           f"{result.get('mc_note','')}")
 
-            # --- 3連単の買い方ガイド（1点では当たりにくいので、カバー点数や軸流しを案内）---
-            def _pts_for(cov):
-                for r in rk:
-                    if r["cum"] >= cov:
-                        return r["rank"]
-                return len(rk)
-            p50, p70, p80 = _pts_for(0.50), _pts_for(0.70), _pts_for(0.80)
-            top1p = rk[0]["model_p"] * 100 if rk else 0
-            with st.expander("🎫 3連単の買い方ガイド（1点で当てるのは難しい）", expanded=True):
-                st.markdown(
-                    f"3連単は「順番」まで当てる必要があり、**本命1点の的中率は約 {top1p:.0f}%**です"
-                    "（モデルは3頭の顔ぶれは高確率で当てますが、2着3着の順番は乱数で入れ替わります）。"
-                    "狙う的中率に応じて点数を広げるのが基本です。")
-                st.dataframe(pd.DataFrame([
-                    {"狙う的中率(累積)": "50%", "必要な点数": f"上位 {p50} 点"},
-                    {"狙う的中率(累積)": "70%", "必要な点数": f"上位 {p70} 点"},
-                    {"狙う的中率(累積)": "80%", "必要な点数": f"上位 {p80} 点"},
-                ]), **_wide(hide_index=True))
-                if rk:
-                    axis = rk[0]["combo"].split("→")[0].strip() if "→" in rk[0]["combo"] else result.get("model_pick", "")
+                # --- 3連単の買い方ガイド（1点では当たりにくいので、カバー点数や軸流しを案内）---
+                def _pts_for(cov):
+                    for r in rk:
+                        if r["cum"] >= cov:
+                            return r["rank"]
+                    return len(rk)
+                p50, p70, p80 = _pts_for(0.50), _pts_for(0.70), _pts_for(0.80)
+                top1p = rk[0]["model_p"] * 100 if rk else 0
+                with st.expander("🎫 3連単の買い方ガイド（1点で当てるのは難しい）", expanded=True):
                     st.markdown(
-                        f"**軸1頭ながしの目安**: モデルの◎【{result.get('model_pick','')}】を1着固定にして、"
-                        "上位数頭を2・3着に流すと、点数を抑えつつ顔ぶれ的中を取りにいけます。"
-                        "上のランキングで◎が1着の行だけを買う、という買い方です。")
-                st.caption("※ ゲーム上限は3連単 合計20口。予算と相談しつつ、"
-                           "上限内で狙う的中率に届く点数を選んでください。")
+                        f"3連単は「順番」まで当てる必要があり、**本命1点の的中率は約 {top1p:.0f}%**です"
+                        "（モデルは3頭の顔ぶれは高確率で当てますが、2着3着の順番は乱数で入れ替わります）。"
+                        "狙う的中率に応じて点数を広げるのが基本です。")
+                    st.dataframe(pd.DataFrame([
+                        {"狙う的中率(累積)": "50%", "必要な点数": f"上位 {p50} 点"},
+                        {"狙う的中率(累積)": "70%", "必要な点数": f"上位 {p70} 点"},
+                        {"狙う的中率(累積)": "80%", "必要な点数": f"上位 {p80} 点"},
+                    ]), **_wide(hide_index=True))
+                    if rk:
+                        axis = rk[0]["combo"].split("→")[0].strip() if "→" in rk[0]["combo"] else result.get("model_pick", "")
+                        st.markdown(
+                            f"**軸1頭ながしの目安**: モデルの◎【{result.get('model_pick','')}】を1着固定にして、"
+                            "上位数頭を2・3着に流すと、点数を抑えつつ顔ぶれ的中を取りにいけます。"
+                            "上のランキングで◎が1着の行だけを買う、という買い方です。")
+                    st.caption("※ ゲーム上限は3連単 合計20口。予算と相談しつつ、"
+                               "上限内で狙う的中率に届く点数を選んでください。")
 
             with st.expander("🐴 馬ごとの予測スコア ＋ 勝率：モデル vs 市場", expanded=True):
                 sw = result["single_win"]

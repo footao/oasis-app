@@ -716,6 +716,30 @@ def regression_tests():
     check('P18 autopilot の自動購入アームは1レース限り',
           'nextRaceTime().getTime() === ST.armFor' in _ap and 'disarm(' in _ap,
           'レースが過ぎたらアームは自動で外れる')
+    # 2026/08/25 の実バグ: winBetPicksPool の行のキーは Python と同じ `eff_od` なのに
+    # autopilot 側が `r.eff` で読んでいて undefined → .toFixed() で解析ごと落ちた。
+    _wrow = set(oc.win_bet_picks_pool(
+        ['a', 'b'], [0.6, 0.4], [2.0, 3.0], 500_000, 1_000_000, 0.25, 0.0)[0][0].keys())
+    check('P18 autopilot は winBetPicksPool の返すキー名を使う',
+          'r.eff_od' in _ap and 'eff_od' in _wrow and 'eff' not in _wrow,
+          f'行のキー: {sorted(_wrow)}')
+    # 表示で数値が欠けても解析ごと落とさない
+    check('P18 autopilot の数値表示は undefined でも落ちない',
+          "const fx = (v, d) => (Number.isFinite(+v)" in _ap
+          and '.eff.toFixed' not in _ap and '.edge*100).toFixed' not in _ap)
+
+    # 7頭以下は3連単が存在しない。オートパイロットも組を作らず、単勝だけ買うこと
+    # （WIN_ON を切っていても、そのレースで買えるのは単勝だけなので出す）。
+    check('P19 autopilot も7頭以下では3連単を作らない',
+          'const triOk = n >= (M.min_field_trifecta || 8);' in _ap
+          and 'const combo = triOk ?' in _ap
+          and 'const triPicks = triOk ?' in _ap,
+          '組のシミュレーションごと回さない')
+    check('P19 autopilot は3連単が無いレースで単勝を強制的に出す',
+          'const winOn = CFG.WIN_ON || !triOk;' in _ap
+          and 'CFG.WIN_ON ? analyseWin' not in _ap
+          and 'winOn ? analyseWin' in _ap)
+
     # 試し買いは**実際の購入**。アーム（人が購入を許可したレース）でしか走らせないこと。
     check('P18 autopilot の試し買いはアーム中だけ・1レース1回',
           'if (!isArmed()) {' in _ap and 'ST.probed[sid]' in _ap,
@@ -882,6 +906,29 @@ def regression_tests():
         except Exception:
             _ok12 = False
     check('P12 図鑑30種すべてが例外なく処理できる', _ok12)
+
+    # --- P19: 7頭以下のレースに3連単は存在しない（買い目を出さない・単勝だけ出す）---
+    # 以前は警告を出すだけで買い目もランキングも作っていた。**買えない券の推奨購入**は
+    # 害しかない（オートパイロットがそのまま送って弾かれる）ので、作らないこと。
+    _rows19 = '\n'.join(
+        'マイル,芝,,馬%d,a%d,%d,50,48,普通,スピードスター,マイル得意,%.2f,0'
+        % (i, i, 150 - i * 6, 2.0 + i) for i in range(7))
+    _t19 = ('guild=1\nschedule_id=19\npool=0\n\n=== 出走馬一覧 ===\n%s\n%s\n'
+            % (_hdr7, _rows19))
+    _r19 = oc.analyze(_t19, _b7, {'dist': 'マイル', 'track': '芝',
+                                  'win_bets': False, 'bankroll': 3_000_000})
+    _tri19 = [x for x in (_r19.get('buy_all') or []) if x['kind'] == '3連単']
+    check('P19 7頭なら3連単の買い目・ランキングを出さない',
+          _r19['n_field'] == 7 and not _tri19 and not _r19['ranking']
+          and not _r19['picks'] and not _r19.get('summary'),
+          f"n={_r19['n_field']} / 3連単{len(_tri19)}件 / ランキング{len(_r19['ranking'])}行")
+    # このレースで買えるのは単勝だけなので、単勝トグルが切れていても出す
+    check('P19 3連単が無いレースでは単勝トグルを無視して単勝を出す',
+          bool(_r19.get('win_picks')),
+          f"単勝{len(_r19.get('win_picks') or [])}件 / "
+          f"プール{_r19.get('win_pool')}")
+    check('P19 8頭以上なら従来どおり3連単を出す', bool(_r7['ranking']),
+          f"9頭 → ランキング{len(_r7['ranking'])}行")
 
     # --- P17: 貼り付けCSVの装備効果は**ラベルを削らずに**カタログへ渡すこと ---
     # race 2109 の実バグ。`v.split('：',1)[-1]` でラベルを落としていたため

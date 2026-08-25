@@ -2896,10 +2896,16 @@ def analyze(raw_text, bundle, settings=None):
         res['messages'].append(
             f'⚠ ステータスが読めず除外した行が {len(_sk)}件 あります: {", ".join(map(str, _sk[:6]))}。'
             '出走頭数が変わると全確率がずれるので、貼り付けデータを確認してください。')
-    if n < MIN_FIELD_TRIFECTA:
+    # 7頭以下は3連単そのものが存在しない。以前は警告を出すだけで買い目・ランキングは
+    # 作っていたが、**買えない券の推奨購入を出すのは害しかない**ので作らない。
+    # 代わりに単勝は必ず出す（このレースで買えるのは単勝だけなので、
+    # 「単勝を出す」トグルが切れていても出す）。
+    tri_ok = n >= MIN_FIELD_TRIFECTA
+    if not tri_ok:
+        s['win_bets'] = True
         res['messages'].append(
-            f'⚠ 出走 {n}頭。現行ルールでは {MIN_FIELD_TRIFECTA}頭未満のレースで3連単は購入できません'
-            '（単勝のみ）。')
+            f'⚠ 出走 {n}頭。現行ルールでは {MIN_FIELD_TRIFECTA}頭未満のレースで3連単は購入できません。'
+            '3連単の買い目・ランキングは出さず、**単勝だけ**を出します。')
     if n > MAX_FIELD:
         res['messages'].append(f'⚠ 出走 {n}頭は想定（最大{MAX_FIELD}頭）を超えています。')
 
@@ -2953,11 +2959,14 @@ def analyze(raw_text, bundle, settings=None):
     if abs(tri_sigma - sigma) < 1e-9:
         # σが同じなら、単勝用と3連単用のシミュレーションは（シードも同じなので）
         # 完全に同一の結果になる。1回で両方受け取る。
-        win_p, combo_prob = simulate_trifecta(base, sig_vec, n_sim=n_sim)
+        win_p, combo_prob = simulate_trifecta(base, sig_vec, n_sim=n_sim,
+                                              need_combo=tri_ok)
     else:
         win_p, _ = simulate_trifecta(base, sig_vec, n_sim=n_sim, need_combo=False)
-        sig_vec_tri = horse_sigmas(bundle, horses, tri_sigma)
-        _, combo_prob = simulate_trifecta(base, sig_vec_tri, n_sim=n_sim)
+        combo_prob = {}
+        if tri_ok:
+            sig_vec_tri = horse_sigmas(bundle, horses, tri_sigma)
+            _, combo_prob = simulate_trifecta(base, sig_vec_tri, n_sim=n_sim)
     n_steady = int((sig_vec < sigma * 0.999).sum())
     if n_steady:
         res['messages'].append(
