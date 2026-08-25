@@ -83,6 +83,7 @@ function loadAuth() {
   if (fromUrl) { localStorage.setItem(LSA, JSON.stringify(fromUrl)); return fromUrl; }
   try { return JSON.parse(localStorage.getItem(LSA) || 'null'); } catch (e) { return null; }
 }
+const AUTH_FROM_URL = !!authFromUrl(location.href);   // 購入ページ上で開いたか
 let AUTH = loadAuth();
 
 // ---- 状態（1日の使用額・実行済み・ログ）----
@@ -137,11 +138,11 @@ ov.innerHTML = '<b style="color:#e2b96f">🛩 オートパイロット（3連単
   + '<div id=_stat style="margin:.45rem 0;font-size:.76rem;line-height:1.6"></div>'
   + '<label style="display:block;margin:.35rem 0;font-size:.76rem;cursor:pointer">'
   + '<input type=checkbox id=_arm> <b>次の1レースだけ自動購入する</b>'
-  + '<span style="color:#888"> — リンクを貼ると自動で入ります</span></label>'
+  + '<span style="color:#888"> — 購入ページで開いたならチェックだけでOK</span></label>'
   + '<div id=_pick style="display:none;margin:.5rem 0;padding:.5rem;background:#0d1a0d;'
   + 'border:1px solid #2e7d32;border-radius:6px;font-size:.76rem"></div>'
   + '<details style="margin:.4rem 0"><summary style="cursor:pointer;font-size:.74rem;color:#aaa">'
-  + '🔑 購入リンクを貼り直す（token が変わる場合）</summary>'
+  + '🔑 購入リンクを貼る（購入ページ以外で開いたとき用）</summary>'
   + '<textarea id=_link placeholder="BOTが発行した購入リンクを貼り付け" '
   + 'style="width:100%;height:46px;margin-top:.35rem;background:#0b0b14;color:#e2b96f;'
   + 'border:1px solid #444;border-radius:5px;padding:.35rem;font-size:.7rem"></textarea>'
@@ -704,6 +705,15 @@ try {
   if (!AUTH) {
     log('購入リンクが未設定です。BOTが出したリンクを開いてから実行してください。', '#ffb74d');
     render(); return;
+  }
+  // 購入ページの URL に guild/user/token が入っているので、そこで開いたなら
+  // 貼り付けは要らない。**アームだけ**が人の意思表示として残る。
+  if (AUTH_FROM_URL) {
+    log(`購入ページのリンクから認証を取り込みました（R${AUTH.sid || '?'}）。`
+        + '自動で買うなら上のチェックを入れてください。', '#81c784');
+  } else {
+    log('保存済みのリンクを使います。トークンが失効していたら'
+        + '新しいリンクを開き直すか、下の欄に貼り直してください。', '#ffb74d');
   }
   await resolveApi();
   render();
