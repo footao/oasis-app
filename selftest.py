@@ -711,10 +711,12 @@ def regression_tests():
                               'bookmarklets', 'src', 'bm.js'), encoding='utf-8').read()
     _ap = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             'bookmarklets', 'src', 'autopilot.js'), encoding='utf-8').read()
+    # 折り返しの位置が変わるたびに落ちるので、空白を潰してから探す。
+    _ap = re.sub(r'\s+', ' ', _ap)
     # オッズのバグ補正を無条件に掛けると EV を 1.5倍ほど過大評価する（race 2097 で修正済みを確認）
     check('P18 autopilot はオッズ補正を trifecta_seed_bug_active でゲートする',
-          'M.trifecta_seed_bug_active && pool > SEED' in _ap
-          and _ap.count('pool / (pool - SEED)') == 1,
+          'M.trifecta_seed_bug_active && pool0 > SEED' in _ap
+          and _ap.count('pool0 / (pool0 - SEED)') == 1,
           '初期プール金ぶんの補正はバグが生きているときだけ')
     check('P18 autopilot は装備・お守りの倍率を掛ける',
           'OasisModel.applyItems(' in _ap)
@@ -750,6 +752,27 @@ def regression_tests():
     check('P19 autopilot は窓に入ったら下見を捨ててオッズを取り直す',
           'if (PENDING && !PENDING.canBuy && inBuyWindow()) {' in _ap)
 
+    # 上限は「1レース」と「1日」の2本立て。1レースでゲーム上限まで買うと
+    # 3連単20口(200,000) + 単勝100口(100,000) = 300,000 rrc なので、
+    # 1日の上限をそこに置くと最初のレースで使い切って残りが全部見送りになる。
+    check('P19 autopilot はレース単位と1日の上限を別に持つ',
+          'RACE_BUDGET: 300000' in _ap and 'DAILY_BUDGET: 1800000' in _ap
+          and 'Math.min(CFG.RACE_BUDGET, CFG.DAILY_BUDGET - ST.spent)' in _ap,
+          '1レース30万 / 1日180万（6レース分）')
+    # 口数は「1組1口ずつ」ではなく EV 最大の配分で決める（Python と同じ関数）
+    check('P19 autopilot の3連単は allocate_units_stable で配分する',
+          'OasisModel.allocateUnitsStable(' in _ap
+          and 'OasisModel.unformedSleevePicks(' in _ap
+          and 'UNITS_PER_COMBO' not in _ap,
+          '成立組は貪欲配分、余りを未成立スリーブへ')
+    check('P19 autopilot の3連単上限はゲーム上限（20口）',
+          'CFG.TRI_MAX_UNITS = +(M.max_total_units || 20)' in _ap
+          and 'Math.min(CFG.TRI_MAX_UNITS, unitsLeft)' in _ap,
+          f'model.json の max_total_units = {oc.MAX_TOTAL_UNITS}')
+    # 配分された口数ぶん買うこと（1組1口で送ると配分が意味を持たない）
+    check('P19 autopilot は配分口数ぶん買う（3連単は1リクエスト10口まで）',
+          'let leftU = pk.k || 1;' in _ap and 'Math.min(leftU, 10)' in _ap)
+
     # カウントダウンは毎秒動くこと（render() は20秒に1回しか回らないので別立て）
     check('P19 autopilot のカウントダウンは毎秒更新する',
           'function renderClock()' in _ap
@@ -761,12 +784,12 @@ def regression_tests():
     check('P19 autopilot も7頭以下では3連単を作らない',
           'const triOk = n >= (M.min_field_trifecta || 8);' in _ap
           and 'const combo = triOk ?' in _ap
-          and 'const triPicks = triOk ?' in _ap,
+          and 'const triPicks = triOk ? await analyseTrifecta(' in _ap,
           '組のシミュレーションごと回さない')
     check('P19 autopilot は3連単が無いレースで単勝を強制的に出す',
           'const winOn = CFG.WIN_ON || !triOk;' in _ap
           and 'CFG.WIN_ON ? analyseWin' not in _ap
-          and 'winOn ? analyseWin' in _ap)
+          and 'const winPicks = winOn ? analyseWin(' in _ap)
 
     # 試し買いは**実際の購入**。アーム（人が購入を許可したレース）でしか走らせないこと。
     check('P18 autopilot の試し買いはアーム中だけ・1レース1回',
@@ -777,7 +800,7 @@ def regression_tests():
                   # 刻み幅の定数名だけ違う（bm.js は直書き ODD_STEP、autopilot は model.json の STEP）
                   'const sdR = (@ / Math.sqrt(12)) * Math.sqrt(2 / swErr);'.replace(' ', ''),
                   'if (!seenOd.has(oa)) seenOd.set(oa, w);'.replace(' ', '')):
-        _n = lambda t: t.replace(' ', '').replace('ODD_STEP', '@').replace('STEP', '@')
+        _n = lambda t: re.sub(r'\s+', '', t).replace('ODD_STEP', '@').replace('STEP', '@')
         check(f'P18 実測の式が bm.js と一致 [{_frag[:28]}…]',
               _frag in _n(_ap) and _frag in _n(_bm15))
     check('P18 モデルは装備の scope/duty と既定値を JSON に出す',

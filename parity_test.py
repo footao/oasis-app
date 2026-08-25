@@ -179,9 +179,86 @@ def main():
             'my_units': [int(x) for x in my_units],
             'picks': picks, 'summary': summ})
 
+    # --- 3連単（1組の最適口数 → 成立組の配分 → 未成立組の1口買い）---
+    # プールが初期金ちょうど／少しだけ上、inf/nan のオッズ、誰も条件を満たさない
+    # edge_min など、実戦で踏む枝をモードで一巡させる。
+    def _od(x):
+        """inf/nan は JSON に書けないので印にする（JS 側で戻す）。"""
+        x = float(x)
+        if x != x:
+            return None
+        return 'inf' if x == float('inf') else x
+
+    tri_cases = []
+    for i in range(40):
+        n_c = int(rng.integers(5, 41))
+        pool = float([oc.TRIFECTA_POOL_SEED, oc.TRIFECTA_POOL_SEED + oc.STAKE_UNIT,
+                      3_000_000, 420_000, 0][i % 5])
+        od = np.exp(rng.uniform(np.log(1.5), np.log(5000.0), size=n_c))
+        if i % 4 == 1:                                    # 弾かれるべきオッズ
+            for j, bad in zip(rng.choice(n_c, size=3, replace=False),
+                              (np.inf, np.nan, 1.0)):
+                od[j] = bad
+        safe = np.where(np.isfinite(od) & (od > 1.0), od, 100.0)
+        # 1/od の 0.3〜3.0 倍＝プラスEVもマイナスEVも混ざる確率
+        p = np.clip(rng.uniform(0.3, 3.0, size=n_c) / safe, 1e-6, 0.999)
+        if i % 5 == 3:
+            p[0] = 0.0                                    # 0<p<1 の枝
+        # 添字を回して決めると周期が噛み合ってしまい（資金が小さいケースは必ず
+        # 総口数1口、など）、片方の上限だけが効く枝を素通りする。乱数で振る。
+        # kelly 0.03 はケリー口数が 0〜1 口に落ちる値（max(1, k_kelly) の枝）。
+        bankroll = float(rng.integers(12_000, 5_000_000))
+        kelly = float(rng.choice([0.03, 0.25, 0.5, 1.0]))
+        max_risk = float(rng.choice([0.05, 0.10, 0.30]))
+        edge_min = 3.0 if i % 4 == 3 else float(rng.choice([0.0, 0.05, 0.30]))
+        budget = int(rng.choice([oc.MAX_TOTAL_UNITS, 5, 1]))
+        max_per = [oc.MAX_UNITS, 3, None][int(rng.integers(0, 3))]
+        cands = [(f'c{j}', float(p[j]), float(od[j])) for j in range(n_c)]
+        opt = [list(oc.optimal_units_ev(float(p[j]), float(od[j]), pool,
+                                        oc.STAKE_UNIT, oc.MAX_UNITS))
+               for j in range(n_c)]
+        alloc = oc.allocate_units_stable(
+            cands, pool, bankroll, kelly, max_risk, edge_min,
+            budget=budget, stake_unit=oc.STAKE_UNIT, max_per_combo=max_per)
+
+        # 未成立組（od_of が None を返す組）だけに1口ずつ
+        n_h = 8
+        disp = [f'h{j}' for j in range(n_h)]
+        combo_prob = {}
+        for _ in range(int(rng.integers(3, 20))):
+            idx = tuple(int(x) for x in rng.choice(n_h, size=3, replace=False))
+            combo_prob[idx] = float(rng.uniform(0.001, 0.4))
+        od_map = {tuple(disp[j] for j in idx): float(rng.uniform(2, 500))
+                  for idx in list(combo_prob)[::2]}     # 半分は成立済み＝除外される
+        sl = {'pMin': float(rng.choice([0.01, 0.05, 0.2])),
+              'edgeMin': float(rng.choice([0.0, 0.3, 5.0])),   # 5.0 は誰も通らない
+              'maxUnits': int(rng.choice([5, 0, 40])),         # 0 は即 [] を返す枝
+              'remainingBudget': int(rng.choice([budget, 2, -1, 3])),  # -1 も同じ
+              'pScale': float(rng.choice([1.0, 0.6]))}
+        sleeve = oc.unformed_sleeve_picks(
+            combo_prob, disp, lambda nm: od_map.get(nm), pool,
+            p_min=sl['pMin'], edge_min=sl['edgeMin'], max_units=sl['maxUnits'],
+            remaining_budget=sl['remainingBudget'],
+            stake_unit=oc.STAKE_UNIT, p_scale=sl['pScale'])
+
+        tri_cases.append({
+            'pool': pool, 'bankroll': bankroll, 'kelly': kelly,
+            'max_risk_frac': max_risk, 'edge_min': edge_min,
+            'budget': budget, 'max_per_combo': max_per,
+            'cands': [{'key': c, 'p': pp, 'od': _od(o)} for c, pp, o in cands],
+            'opt': [[float(k), float(ev), _od(o)] for k, ev, o in opt],
+            'alloc': {c: [float(k), float(ev), float(e)]
+                      for c, (k, ev, e) in alloc.items()},
+            'combo_prob': [[list(idx), pp] for idx, pp in combo_prob.items()],
+            'disp': disp,
+            'od_map': [['|'.join(nm), o] for nm, o in od_map.items()],
+            'sleeve_opts': sl,
+            'sleeve': [[list(nm), float(pp), float(e), int(k)]
+                       for nm, pp, e, k in sleeve]})
+
     with open(os.path.join(HERE, '_parity_cases.json'), 'w', encoding='utf-8') as f:
-        json.dump({'races': cases, 'items': item_cases, 'win': win_cases},
-                  f, ensure_ascii=False)
+        json.dump({'races': cases, 'items': item_cases, 'win': win_cases,
+                   'tri': tri_cases}, f, ensure_ascii=False)
 
     try:
         # Windows の既定は cp932 で、✅ や ⚠ を書けずに落ちる。明示的に UTF-8 で受ける。

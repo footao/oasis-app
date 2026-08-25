@@ -1608,7 +1608,8 @@ def export_model_json(bundle, path=None):
         'dist_balance': {d: list(v) for d, v in INTERNAL_DIST_BALANCE.items()},
         'odds_floor': ODDS_FLOOR, 'stake_unit': STAKE_UNIT,
         'trifecta_pool_seed': TRIFECTA_POOL_SEED,
-        'max_total_units': MAX_TOTAL_UNITS, 'min_field_trifecta': MIN_FIELD_TRIFECTA,
+        'max_total_units': MAX_TOTAL_UNITS, 'max_units': MAX_UNITS,
+        'min_field_trifecta': MIN_FIELD_TRIFECTA,
         # 単勝（2026/08/24 実装。NPC が自動投票するので初期プールが常にある）
         'win_pool_seed': WIN_POOL_SEED, 'win_stake_unit': WIN_STAKE_UNIT,
         # オッズのバグ（od=(P-S)/bet）が生きているか。race 2097 で修正済みを確認。

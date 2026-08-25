@@ -433,10 +433,149 @@ const OasisModel = (() => {
     return [out, summary];
   }
 
+  // --- 3連単1組の最適口数（Python: optimal_units_ev）---
+  // パリミュチュエルなので自分が k口 入れるとその組の取り分が薄まる。
+  // 連続解 k_raw の floor だけを見ると EV を取りこぼすので floor+1 と比べる。
+  function optimalUnitsEv(p, od, pTot, stakeUnit, maxUnits) {
+    if (p <= 0 || p >= 1 || !od || !Number.isFinite(od) || od <= 1) return [0, 0.0, od];
+    if (p <= 1.0 / od) return [0, 0.0, od];
+    if (pTot <= 0) return [1, (p * od - 1) * stakeUnit, od];
+    const pc = pTot / od;
+    const inner = p * (od - 1) / (1.0 - p);
+    const kRaw = (pTot / (od * stakeUnit)) * (Math.sqrt(inner) - 1);
+    if (kRaw <= 0) return [0, 0.0, od];
+    let k;
+    if (kRaw < 1) {
+      const eff1 = (pTot + stakeUnit) / (pc + stakeUnit);
+      if (p * eff1 > 1) k = 1;
+      else return [0, 0.0, od];
+    } else {
+      const ev = kk => {
+        if (kk <= 0) return -1.0;
+        const e = (pTot + kk * stakeUnit) / (pc + kk * stakeUnit);
+        return (p * e - 1) * stakeUnit * kk;
+      };
+      const kLo = Math.min(maxUnits, Math.trunc(kRaw));   // Python の int() は 0 方向に切る
+      const kHi = Math.min(maxUnits, kLo + 1);
+      k = ev(kHi) > ev(kLo) ? kHi : kLo;
+    }
+    const effOd = (pTot + k * stakeUnit) / (pc + k * stakeUnit);
+    return [k, (p * effOd - 1) * stakeUnit * k, effOd];
+  }
+
+  // --- 3連単の安定運用配分（Python: allocate_units_stable）---
+  // cands = [{key, p, od}]（key は結果 Map のキーになる任意の文字列）。
+  // opts = {budget, stakeUnit, maxPerCombo}。戻り値は key → [k, ev, eff] の Map。
+  // 他の組に置いた口数もプールに入って**全組の**払戻を押し上げるので、1口足すかは
+  // ポートフォリオ全体の EV で判断する（組ごとの EV で見ると払戻を過小評価する）。
+  function allocateUnitsStable(cands, pTotal, bankroll, kellyFrac, maxRiskFrac, edgeMin, opts) {
+    const o = opts || {};
+    const stakeUnit = +o.stakeUnit;
+    const budget = +o.budget;
+    const maxPerCombo = (o.maxPerCombo == null ? budget : +o.maxPerCombo);
+    const res = new Map();
+    if (pTotal <= 0 || bankroll <= 0) return res;
+    const riskUnits = Math.max(1, Math.floor(maxRiskFrac * bankroll / stakeUnit));
+    const totalCap = Math.min(budget, riskUnits);
+
+    const items = [];
+    for (const c of cands) {
+      const p = +c.p, od = +c.od;
+      // inf/nan のオッズが通ると口数計算が NaN になって画面が落ちる
+      if (!od || !Number.isFinite(od) || od <= 1 || !(p > 0 && p < 1)) continue;
+      const pc = pTotal / od;
+      const eff1 = (pTotal + stakeUnit) / (pc + stakeUnit);
+      const edge = p * eff1 - 1;
+      if (edge < edgeMin) continue;
+      const f = edge / (eff1 - 1);
+      const kKelly = Math.floor(kellyFrac * f * bankroll / stakeUnit);
+      const kEvmax = optimalUnitsEv(p, od, pTotal, stakeUnit, maxPerCombo)[0];
+      let cap = Math.min(kEvmax > 0 ? kEvmax : 0, maxPerCombo);
+      cap = Math.min(cap, Math.max(1, kKelly));
+      if (cap >= 1) items.push({ key: c.key, p: p, od: od, cap: cap });
+    }
+    if (!items.length) return res;
+
+    // alloc は key ごと（同じ key が2件あれば Python の dict と同じく共有される）
+    const alloc = new Map();
+    for (const it of items) alloc.set(it.key, 0);
+    const totalEv = () => {
+      let totU = 0;
+      for (const v of alloc.values()) totU += v;
+      let s = 0.0;
+      for (const it of items) {
+        const k = alloc.get(it.key);
+        if (k <= 0) continue;
+        const pc = pTotal / it.od;
+        const eff = (pTotal + totU * stakeUnit) / (pc + k * stakeUnit);
+        s += (it.p * eff - 1) * stakeUnit * k;
+      }
+      return s;
+    };
+
+    // 限界EVが一番大きい組へ1口ずつ。同点は先に出てきた組が勝つ（> で比較）ので、
+    // items の順序＝Python の dict の挿入順を崩すと結果がズレる。
+    let used = 0, baseEv = 0.0;
+    while (used < totalCap) {
+      let best = null, bestM = 1e-9;
+      for (const it of items) {
+        if (alloc.get(it.key) >= it.cap) continue;
+        alloc.set(it.key, alloc.get(it.key) + 1);
+        const m = totalEv() - baseEv;
+        alloc.set(it.key, alloc.get(it.key) - 1);
+        if (m > bestM) { bestM = m; best = it.key; }
+      }
+      if (best === null) break;
+      alloc.set(best, alloc.get(best) + 1);
+      used += 1;
+      baseEv += bestM;
+    }
+
+    for (const it of items) {
+      const k = alloc.get(it.key);
+      if (k > 0) {
+        const pc = pTotal / it.od;
+        const eff = (pTotal + used * stakeUnit) / (pc + k * stakeUnit);
+        res.set(it.key, [k, (it.p * eff - 1) * stakeUnit * k, eff]);
+      }
+    }
+    return res;
+  }
+
+  // --- 未成立の組に各1口だけ置く（Python: unformed_sleeve_picks）---
+  // 的中時は全プール総取りなので実効オッズ = (プール総額 + 1口) / 1口。
+  // ⚠ 高EVだが**全部外れる確率も高い**。既定は OFF。
+  // comboProb = [[馬indexの配列, p], ...]（Map でも可。Python の dict と同じ順序で渡すこと）。
+  // opts = {pMin, edgeMin, maxUnits, remainingBudget, stakeUnit, pScale}。
+  function unformedSleevePicks(comboProb, disp, odOf, pTotal, opts) {
+    const o = opts || {};
+    const stakeUnit = +o.stakeUnit;
+    const pMin = (o.pMin == null ? 0.05 : +o.pMin);
+    const edgeMin = (o.edgeMin == null ? 0.30 : +o.edgeMin);
+    const maxUnits = (o.maxUnits == null ? 5 : +o.maxUnits);
+    const remainingBudget = +o.remainingBudget;
+    const pScale = (o.pScale == null ? 1.0 : +o.pScale);
+    if (pTotal <= 0 || maxUnits <= 0 || remainingBudget <= 0) return [];
+    const eff = (pTotal + stakeUnit) / stakeUnit;
+    const cand = [];
+    for (const e of comboProb) {
+      const p = e[1] * pScale;           // 市場情報が無い組は λ でモデル確率を割り引く
+      const names = e[0].map(i => disp[i]);
+      if (odOf(names) != null) continue;
+      if (p < pMin || (p * eff - 1) < edgeMin) continue;
+      cand.push({ names: names, p: p, i: cand.length });
+    }
+    // Python の sort は安定。同確率の組の順番が入れ替わると採用される組が変わる。
+    cand.sort((a, b) => (b.p - a.p) || (a.i - b.i));
+    const cap = Math.min(Math.trunc(maxUnits), Math.trunc(remainingBudget));
+    return cand.slice(0, cap).map(c => [c.names, c.p, eff, 1]);
+  }
+
   return { effectiveStats, sigmaMultiplier, rowFeatures, predictBase,
            sameSpeciesFlags, simulateTrifecta, horseSigmas, makeRng,
            pctMults, itemMult, applyItems,
-           marketWinProb, diagnoseOddsFloor, winBetPicksPool };
+           marketWinProb, diagnoseOddsFloor, winBetPicksPool,
+           optimalUnitsEv, allocateUnitsStable, unformedSleevePicks };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = OasisModel;

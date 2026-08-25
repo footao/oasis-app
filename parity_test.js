@@ -84,6 +84,54 @@ for (let ci = 0; ci < wins.length; ci++) {
 console.log(`単勝配分 一致検証: ${wins.length}件  最大誤差 ${wworst.toExponential(2)}`);
 if (wbad) { console.log(`❌ 単勝配分 不一致 ${wbad}件 — model.js の単勝ロジックが oasis_core に追随していません`); process.exit(1); }
 
+// --- 3連単（1組の最適口数・成立組の配分・未成立組の1口買い）---
+const tris = _all.tri || [];
+const _od = v => (v === null ? NaN : (v === 'inf' ? Infinity : v));
+let tbad = 0, tworst = 0;
+const tchk = (a, b, what) => {              // NaN 同士は一致、片方だけ NaN は不一致
+  const d = (Number.isNaN(a) || Number.isNaN(b))
+    ? ((Number.isNaN(a) && Number.isNaN(b)) ? 0 : Infinity) : Math.abs(a - b);
+  if (d > tworst) tworst = d;
+  if (d > 1e-9) { tbad++; console.log(`  ❌ ${what}: JS=${a} / PY=${b}`); }
+};
+const teq = (a, b, what) => {
+  if (a !== b) { tbad++; console.log(`  ❌ ${what}: JS=${JSON.stringify(a)} / PY=${JSON.stringify(b)}`); }
+};
+for (let ci = 0; ci < tris.length; ci++) {
+  const c = tris[ci], tag = `tri[${ci}]`;
+  const cands = c.cands.map(x => ({ key: x.key, p: x.p, od: _od(x.od) }));
+  for (let i = 0; i < cands.length; i++) {
+    const js = OM.optimalUnitsEv(cands[i].p, cands[i].od, c.pool, M.stake_unit, M.max_units);
+    const py = c.opt[i];
+    for (let k = 0; k < 3; k++) tchk(js[k], _od(py[k]), `${tag}.opt[${i}][${k}]`);
+  }
+
+  const alloc = OM.allocateUnitsStable(cands, c.pool, c.bankroll, c.kelly,
+    c.max_risk_frac, c.edge_min,
+    { budget: c.budget, stakeUnit: M.stake_unit, maxPerCombo: c.max_per_combo });
+  // Python の dict は挿入順を保つ。並びが違えば貪欲法の同点処理がズレている。
+  teq(Array.from(alloc.keys()).join(','), Object.keys(c.alloc).join(','), `${tag}.alloc 並び`);
+  for (const k of Object.keys(c.alloc)) {
+    const a = alloc.get(k);
+    if (!a) { tbad++; console.log(`  ❌ ${tag}.alloc[${k}]: JS に無い`); continue; }
+    for (let j = 0; j < 3; j++) tchk(a[j], c.alloc[k][j], `${tag}.alloc[${k}][${j}]`);
+  }
+
+  const odMap = new Map(c.od_map);
+  const o = c.sleeve_opts;
+  const sleeve = OM.unformedSleevePicks(c.combo_prob, c.disp,
+    nm => (odMap.has(nm.join('|')) ? odMap.get(nm.join('|')) : null), c.pool,
+    { pMin: o.pMin, edgeMin: o.edgeMin, maxUnits: o.maxUnits,
+      remainingBudget: o.remainingBudget, stakeUnit: M.stake_unit, pScale: o.pScale });
+  teq(sleeve.length, c.sleeve.length, `${tag}.sleeve 件数`);
+  for (let i = 0; i < Math.min(sleeve.length, c.sleeve.length); i++) {
+    teq(sleeve[i][0].join('|'), c.sleeve[i][0].join('|'), `${tag}.sleeve[${i}].names`);
+    for (let j = 1; j < 4; j++) tchk(sleeve[i][j], c.sleeve[i][j], `${tag}.sleeve[${i}][${j}]`);
+  }
+}
+console.log(`3連単配分 一致検証: ${tris.length}件  最大誤差 ${tworst.toExponential(2)}`);
+if (tbad) { console.log(`❌ 3連単配分 不一致 ${tbad}件 — model.js の3連単ロジックが oasis_core に追随していません`); process.exit(1); }
+
 const n = cases.reduce((s, c) => s + c.base.length, 0);
 console.log(`Python↔JS 一致検証: ${n}頭  最大誤差 ${worst.toExponential(2)}`);
 if (bad) { console.log(`❌ 不一致 ${bad}件 — model.js が oasis_core に追随していません`); process.exit(1); }

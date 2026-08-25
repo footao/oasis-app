@@ -28,8 +28,10 @@ const CFG = {
   RACE_MINUTE: 0,
   LEAD_SEC: 60,             // 締切の何秒前を狙って解析・購入するか
   WINDOW_SEC: 900,          // 発走何秒前から準備を始めるか
-  MAX_UNITS_PER_RACE: 3,    // 3連単の1レース上限口数（分散のため20口上限より絞る）
-  UNITS_PER_COMBO: 1,
+  // 口数は「EVが最大になる配分」を貪欲法で決める（Python の allocate_units_stable と同じ）。
+  // 上限はゲームの上限そのまま（3連単20口・単勝100口）。下限は置かない。
+  // 実際に何口入るかは分数ケリー・EDGE_MIN・希薄化が決める。
+  TRI_MAX_UNITS: null,      // null = model.json の max_total_units（20口）
   EDGE_MIN: 0.10,
   MODEL_WEIGHT: 1.0,        // λ。model.json の defaults から上書きされる
   MIN_PROB: 0.02,
@@ -46,7 +48,11 @@ const CFG = {
   API_BASES: ['https://api.oasis.red', null],   // null = レースページと同じオリジン
   IMMEDIATE: true,          // 開いた時に受付中のレースがあれば即座に解析する（iOS向け）
   N_SIM: 200000,
-  DAILY_BUDGET: 200000,     // 1日の上限（rrc）
+  // 1レースでゲーム上限まで買うと 3連単20口(200,000) + 単勝100口(100,000) = 300,000 rrc。
+  // レース単位の上限をそこに置き、1日の上限は別に持つ（既定は6レース分）。
+  // 1日の上限をレース1回分にすると、最初のレースで使い切って残りが全部見送りになる。
+  RACE_BUDGET: 300000,      // 1レースの上限（rrc）
+  DAILY_BUDGET: 1800000,    // 1日の上限（rrc）
   MAX_SANE_EDGE: 3.0,       // +300%超のエッジは計算がおかしいとみなして中止
   MAX_SANE_ODDS: 5000,
   // 3連単プールがこれ未満なら3連単は見送る。既定は model.json の初期プール金
@@ -54,7 +60,7 @@ const CFG = {
   // オッズは1件も取りに行かず「未成立スリーブ」として扱う（下の unformed）。
   MIN_POOL: null,           // null = model.json の trifecta_pool_seed を使う
   UNFORMED_ON: true,        // 未成立組（誰も賭けていない組）にも置くか
-  UNFORMED_MAX_UNITS: 10,
+  UNFORMED_MAX_UNITS: null, // null = model.json の unformed_max_units
   MIN_TRAIN_RACES: 20,      // 学習レースがこれ未満のモデルでは賭けない（雛形のまま等）
   MODEL_URL: 'https://raw.githubusercontent.com/footao/oasis-app/main/model.json',
   MODEL_JSON: null,
@@ -187,6 +193,7 @@ function render() {
     `次のレース <b>${next.toLocaleTimeString('ja-JP', {hour:'2-digit', minute:'2-digit'})}</b>`
     + `（あと <span id=_cd>${Math.floor(left/60)}分${String(left%60).padStart(2,'0')}秒</span>）<br>`
     + `本日 <b>${ST.spent.toLocaleString()}</b>/${CFG.DAILY_BUDGET.toLocaleString()} rrc`
+    + `（1レース ${CFG.RACE_BUDGET.toLocaleString()} まで）`
     + `　解析済み ${Object.keys(ST.done).length} レース`;
   const ab = $('_arm');
   if (ab) ab.checked = isArmed();
@@ -247,7 +254,8 @@ async function loadModel() {
   if (D.model_weight != null) CFG.MODEL_WEIGHT = +D.model_weight;
   if (D.edge_min != null) CFG.EDGE_MIN = +D.edge_min;
   if (D.min_prob != null) CFG.MIN_PROB = Math.max(+D.min_prob, 0.02);
-  if (D.unformed_max_units != null) CFG.UNFORMED_MAX_UNITS = +D.unformed_max_units;
+  if (CFG.UNFORMED_MAX_UNITS == null) CFG.UNFORMED_MAX_UNITS = +(D.unformed_max_units || 10);
+  if (CFG.TRI_MAX_UNITS == null) CFG.TRI_MAX_UNITS = +(M.max_total_units || 20);
   if (CFG.MIN_POOL == null) CFG.MIN_POOL = M.trifecta_pool_seed || 200000;
   log(`モデル読込 v${M.core_version} / 学習${M.n_races}レース`
       + ` / σ3連単 ${Number(M.tri_sigma).toFixed(4)} / σ単勝 ${Number(M.race_sigma).toFixed(4)}`,
@@ -314,8 +322,12 @@ async function analyseRace(sid, info, canBuy) {
   const winOn = CFG.WIN_ON || !triOk;
 
   const U_ = M.stake_unit || 10000;
-  const triPicks = triOk ? await analyseTrifecta(sid, pets, combo, U_)
-                         : { picks: [], cost: 0 };
+  // 使える金額 = min(1レースの上限, 1日の残り)。3連単はそこから口数に直して渡す。
+  const raceLeft = Math.max(0, Math.min(CFG.RACE_BUDGET, CFG.DAILY_BUDGET - ST.spent));
+  if (raceLeft <= 0) { log(`R${sid}: 本日の予算を使い切りました`, '#ffb74d'); return null; }
+  const triPicks = triOk
+    ? await analyseTrifecta(sid, pets, combo, U_, Math.floor(raceLeft / U_))
+    : { picks: [], cost: 0 };
   if (!triOk) log(`R${sid}: ${n}頭 → 3連単なし（8頭未満）。単勝だけ出します`, '#888');
   // 単勝プールの実測はここで。試し買いでオッズが動くので、
   // **実測後の pets** をそのまま単勝の計算に使う（プールと同じ時点に揃える）。
@@ -324,57 +336,50 @@ async function analyseRace(sid, info, canBuy) {
     const pr = canBuy ? await probeWinPool(sid, pets, winP) : null;
     if (pr) { wpets = pr.pets; wpool = pr.pool; }
   }
-  const winPicks = winOn ? analyseWin(sid, wpets, winP, wpool) : { picks: [], cost: 0 };
+  const winPicks = winOn
+    ? analyseWin(sid, wpets, winP, wpool, raceLeft - (triPicks.cost || 0))
+    : { picks: [], cost: 0 };
   const cost = (triPicks.cost || 0) + (winPicks.cost || 0);
   if (!cost) return null;
-  if (ST.spent + cost > CFG.DAILY_BUDGET) { log(`R${sid}: 本日の予算上限 → 見送り`, '#ffb74d'); return null; }
+  // 念のための最後の関門。上の口数上限で既に収まっているはずだが、
+  // 計算のどこかを間違えたときに黙って上限を超えないようにしておく。
+  if (cost > raceLeft) { log(`R${sid}: 予算 ${raceLeft.toLocaleString()} rrc を超えるため見送り`, '#ffb74d'); return null; }
   return { sid, pets: wpets, picks: triPicks.picks, win: winPicks.picks, cost,
            unit: U_, winUnit: M.win_stake_unit || 1000, canBuy: !!canBuy };
 }
 
 // ---- 3連単 ----
-async function analyseTrifecta(sid, pets, combo, U_) {
+// 口数は Python の analyze と同じ手順で決める:
+//   ① 成立組（オッズが付いている組）を allocate_units_stable で貪欲配分
+//   ② 余った口数を未成立組（誰も賭けていない組）へ unformed_sleeve_picks で回す
+// どちらも model.js が Python と同じ式を持ち、parity_test で数値一致を検証している。
+// 1口ずつ均等に置く旧実装は「EV最大の配分」ではなかったので捨てた。
+async function analyseTrifecta(sid, pets, combo, U_, unitsLeft) {
   const none = { picks: [], cost: 0 };
   const n = pets.length;
   if (n < (M.min_field_trifecta || 8)) { log(`R${sid}: ${n}頭 → 3連単なし`, '#888'); return none; }
-  const pool = ((await jget(`${API}/api/trifecta/pool?guild=${AUTH.guild}&schedule_id=${sid}`)) || {}).pool || 0;
+  if (unitsLeft < 1) { log(`R${sid}: 予算が残っておらず3連単は見送り`, '#ffb74d'); return none; }
+  const pool0 = ((await jget(`${API}/api/trifecta/pool?guild=${AUTH.guild}&schedule_id=${sid}`)) || {}).pool || 0;
   const SEED = (M.trifecta_pool_seed == null ? 200000 : M.trifecta_pool_seed);
-  const BASE = Math.max(pool - SEED, 0);
+  const BASE = Math.max(pool0 - SEED, 0);
+  // 表示が 0 でも初期プール金は実在する（1口入った瞬間に SEED+1口 に飛ぶ）。
+  // 0 のまま計算すると未成立の実効オッズが 1.0 になり、一番おいしい場面を捨てる。
+  const P = pool0 > 0 ? pool0 : SEED;
 
-  // プールが初期プール金のまま ＝ 賭け0件 ＝ **全組が未成立**。
-  // 賭け金は必ず1口の倍数なので BASE < 1口 なら誰も賭けていない。
-  // オッズを取りに行っても全部 null が返るだけなので1リクエストも投げない。
-  if (BASE < U_) {
-    if (!CFG.UNFORMED_ON) { log(`R${sid}: 賭け0件（プール ${pool.toLocaleString()}）→ 見送り`, '#888'); return none; }
-    const eff = (pool + U_) / U_;
-    const pmin = (M.defaults || {}).unformed_p_min || 0.05;
-    const emin = (M.defaults || {}).unformed_edge_min || 0.30;
-    const picks = [];
-    for (const c of combo) {
-      if (c.p < pmin) continue;
-      const edge = c.p * eff - 1;
-      if (edge < emin) continue;
-      picks.push({ c, od: eff, eff, edge, p: c.p, unformed: true,
-                   names: [pets[c.i], pets[c.j], pets[c.k]].map(h => h.display_name || h.name) });
-      if (picks.length >= CFG.UNFORMED_MAX_UNITS) break;
-    }
-    if (!picks.length) { log(`R${sid}: 賭け0件だが+EVの組なし → 見送り`, '#888'); return none; }
-    log(`R${sid}: 賭け0件（プール ${pool.toLocaleString()}）→ 全組未成立・実効od ${eff.toFixed(1)}倍`, '#e2b96f');
-    const chosen = picks.slice(0, Math.min(CFG.UNFORMED_MAX_UNITS, CFG.MAX_UNITS_PER_RACE * 3));
-    return { picks: chosen, cost: chosen.length * CFG.UNITS_PER_COMBO * U_ };
-  }
-  if (pool < CFG.MIN_POOL) { log(`R${sid}: プール ${pool.toLocaleString()} rrc は小さすぎ → 見送り`, '#888'); return none; }
+  // プールが初期金のまま ＝ 賭け0件 ＝ 全組が未成立。賭け金は必ず1口の倍数なので
+  // BASE < 1口 なら誰も賭けていない。オッズは全部 null が返るだけなので取りに行かない。
+  let oddsRaw = new Map();
+  if (BASE >= U_) oddsRaw = await fetchOdds(sid, pets, combo);
+  else log(`R${sid}: 賭け0件（プール ${pool0.toLocaleString()}）→ オッズ取得を省略`, '#888');
 
-  const oddsRaw = await fetchOdds(sid, pets, combo);
-  if (!oddsRaw.size) { log(`R${sid}: オッズ取得失敗 → 3連単は見送り`, '#ffb74d'); return none; }
   let odds = oddsRaw;
   // かつてサイト側に「表示オッズが (プール総額 − 初期プール金) 基準」というバグがあり、
   // 払戻はプール総額から出るので x pool/(pool−SEED) の補正を掛けていた。
   // 2026/08/24 のアプデで修正されたことを race 2097 で確認済み（Σ(1/od)=(P−S)/P）。
   // **補正を掛けたままだとEVを 1.5倍ほど過大評価する**ので、Python の
   // TRIFECTA_SEED_BUG_ACTIVE を model.json 経由で見て、生きているときだけ掛ける。
-  if (M.trifecta_seed_bug_active && pool > SEED) {
-    const f = pool / (pool - SEED);
+  if (M.trifecta_seed_bug_active && pool0 > SEED) {
+    const f = pool0 / (pool0 - SEED);
     const fixed = new Map();
     for (const [k, v] of odds) fixed.set(k, v * f);
     odds = fixed;
@@ -386,28 +391,72 @@ async function analyseTrifecta(sid, pets, combo, U_) {
   // エッジ +0.06 過大 = EDGE_MIN と同じ大きさ）。オッズ取得が落ちるほど悪化する。
   let inv = 0; for (const od of oddsRaw.values()) inv += 1 / od;
   const norm = Math.max(inv, 1.0);
+  const lam = CFG.MODEL_WEIGHT, D = M.defaults || {};
+  const key3 = c => `${c.i}-${c.j}-${c.k}`;
+  const nameOf = i => pets[i].display_name || pets[i].name;
 
-  const picks = [];
+  // --- ① 成立組 ---
+  const byKey = new Map(), pOf = new Map(), cands = [];
   for (const c of combo.slice(0, CFG.ODDS_TOP_N)) {
-    const od = odds.get(`${c.i}-${c.j}-${c.k}`);
+    const k = key3(c), od = odds.get(k);
     if (!od || od <= 1 || c.p < CFG.MIN_PROB) continue;
-    const odRaw = oddsRaw.get(`${c.i}-${c.j}-${c.k}`) || od;
-    const pBet = CFG.MODEL_WEIGHT * c.p + (1 - CFG.MODEL_WEIGHT) * ((1 / odRaw) / norm);
-    const eff = (pool + U_) / (pool / od + U_);
-    const edge = pBet * eff - 1;
-    if (eff > CFG.MAX_SANE_ODDS) continue;
-    if (edge > CFG.MAX_SANE_EDGE) {      // 異常値は「大当たり」ではなく「バグ」
-      log(`R${sid}: エッジ +${(edge*100).toFixed(0)}% は異常 → このレースは中止`, '#ef5350');
+    const odRaw = oddsRaw.get(k) || od;
+    const pBet = lam * c.p + (1 - lam) * ((1 / odRaw) / norm);
+    const eff1 = (P + U_) / (P / od + U_);
+    if (eff1 > CFG.MAX_SANE_ODDS) continue;
+    const edge1 = pBet * eff1 - 1;
+    if (edge1 > CFG.MAX_SANE_EDGE) {     // 異常値は「大当たり」ではなく「バグ」
+      log(`R${sid}: エッジ +${(edge1 * 100).toFixed(0)}% は異常 → このレースは中止`, '#ef5350');
       return none;
     }
-    if (edge < CFG.EDGE_MIN) continue;
-    picks.push({ c, od, eff, edge, p: c.p,
-                 names: [pets[c.i], pets[c.j], pets[c.k]].map(h => h.display_name || h.name) });
+    byKey.set(k, c); pOf.set(k, pBet);
+    cands.push({ key: k, p: pBet, od: od });
   }
-  if (!picks.length) { log(`R${sid}: エッジ${(CFG.EDGE_MIN*100)|0}%以上の点なし → 3連単は見送り`, '#888'); return none; }
+  const budgetU = Math.min(CFG.TRI_MAX_UNITS, unitsLeft);
+  const alloc = OasisModel.allocateUnitsStable(
+    cands, P, D.bankroll || 1200000, D.kelly_fraction || 0.25,
+    D.max_risk_frac || 0.10, CFG.EDGE_MIN,
+    { budget: budgetU, stakeUnit: U_, maxPerCombo: M.max_units || 20 });
+  const picks = [];
+  let used = 0;
+  for (const [k, v] of alloc) {
+    const c = byKey.get(k);
+    if (!c || !v[0]) continue;
+    picks.push({ c: c, k: v[0], eff: v[2], edge: pOf.get(k) * v[2] - 1, p: c.p,
+                 names: [c.i, c.j, c.k].map(nameOf) });
+    used += v[0];
+  }
+
+  // --- ② 未成立組（誰も賭けていない組）に余りを回す ---
+  if (CFG.UNFORMED_ON && budgetU - used >= 1) {
+    const disp = pets.map((h, i) => nameOf(i));
+    const odByName = new Map();
+    for (const c of combo) {
+      const od = odds.get(key3(c));
+      if (od) odByName.set([c.i, c.j, c.k].map(nameOf).join(' / '), od);
+    }
+    const odOf = names => odByName.get(names.join(' / ')) || null;
+    const sleeve = OasisModel.unformedSleevePicks(
+      combo.map(c => [[c.i, c.j, c.k], c.p]), disp, odOf, P,
+      { pMin: D.unformed_p_min || 0.05, edgeMin: D.unformed_edge_min || 0.30,
+        maxUnits: CFG.UNFORMED_MAX_UNITS, remainingBudget: budgetU - used,
+        stakeUnit: U_, pScale: lam });
+    const idxOf = new Map(disp.map((x, i) => [x, i]));
+    for (const row of sleeve) {
+      const names = row[0], p = row[1], effOd = row[2], k = row[3];
+      const ids = names.map(x => idxOf.get(x));
+      if (ids.some(x => x == null)) continue;
+      picks.push({ c: { i: ids[0], j: ids[1], k: ids[2], p: p }, k: k, eff: effOd,
+                   edge: p * effOd - 1, p: p, unformed: true, names: names });
+      used += k;
+    }
+  }
+  if (!picks.length) {
+    log(`R${sid}: エッジ${(CFG.EDGE_MIN * 100) | 0}%以上の点なし → 3連単は見送り`, '#888');
+    return none;
+  }
   picks.sort((a, b) => b.edge - a.edge);
-  const chosen = picks.slice(0, CFG.MAX_UNITS_PER_RACE);
-  return { picks: chosen, cost: chosen.length * CFG.UNITS_PER_COMBO * U_ };
+  return { picks: picks, cost: used * U_ };
 }
 
 // ---- 単勝プールの実測（試し買い）----
@@ -506,7 +555,7 @@ async function probeWinPool(sid, pets, winP) {
 }
 
 // ---- 単勝（Python: analyze の単勝ブロックと同じ手順）----
-function analyseWin(sid, pets, winP, measuredPool) {
+function analyseWin(sid, pets, winP, measuredPool, budgetLeft) {
   const none = { picks: [], cost: 0 };
   const WU = M.win_stake_unit || 1000;
   const odds = pets.map(h => (typeof h.odds === 'number' ? h.odds : NaN));
@@ -543,7 +592,9 @@ function analyseWin(sid, pets, winP, measuredPool) {
   const [picks] = OasisModel.winBetPicksPool(
     key, pBet, fl.odds_eff, pool,
     D.bankroll || 1200000, D.kelly_fraction || 0.25, D.win_edge_min || 0.15,
-    { stakeUnit: WU, totalUnits: Math.min(left, M.win_max_total_units || 100),
+    { stakeUnit: WU,
+      totalUnits: Math.min(left, M.win_max_total_units || 100,
+                           Math.floor(Math.max(budgetLeft, 0) / WU)),
       maxUnits: M.win_max_units || 100, riskCapFrac: D.max_risk_frac || 0.10,
       myUnits: mine.map(a => Math.floor(a / WU)), unbet: fl.unbet });
   if (!picks || !picks.length) { log(`R${sid}: 単勝に+EVの馬なし`, '#888'); return none; }
@@ -563,7 +614,7 @@ function showPending(pl) {
   const WU = pl.winUnit;
   const rows = [];
   for (const p of pl.picks) {
-    rows.push(`　3連単 ${esc(p.names.join(' → '))}　実効od ${fx(p.eff, 1)}`
+    rows.push(`　3連単 ${esc(p.names.join(' → '))} ${p.k || 1}口　実効od ${fx(p.eff, 1)}`
       + (p.unformed ? '（未成立）' : '')
       + `　<span style="color:#81c784">+${fx(p.edge * 100, 0)}%</span>`);
   }
@@ -630,12 +681,17 @@ async function doBuy() {
     await sleep(400);
   };
   for (const pk of pl.picks) {
-    const amount = CFG.UNITS_PER_COMBO * pl.unit;
-    await post(`${API}/api/trifecta/buy`,
-      { user: AUTH.user, guild: AUTH.guild, race: pl.sid,
-        first: pl.pets[pk.c.i].pet_id, second: pl.pets[pk.c.j].pet_id,
-        third: pl.pets[pk.c.k].pet_id, amount, token: AUTH.token },
-      `3連単 ${pk.names.join('→')} +${fx(pk.edge * 100, 0)}%`, amount);
+    let leftU = pk.k || 1;
+    while (leftU > 0) {
+      const u = Math.min(leftU, 10);        // 3連単は1リクエスト10口まで（buy.js と同じ）
+      const amount = u * pl.unit;
+      await post(`${API}/api/trifecta/buy`,
+        { user: AUTH.user, guild: AUTH.guild, race: pl.sid,
+          first: pl.pets[pk.c.i].pet_id, second: pl.pets[pk.c.j].pet_id,
+          third: pl.pets[pk.c.k].pet_id, amount: amount, token: AUTH.token },
+        `3連単 ${pk.names.join('→')} ${u}口 +${fx(pk.edge * 100, 0)}%`, amount);
+      leftU -= u;
+    }
   }
   for (const w of (pl.win || [])) {
     let leftU = w.units;
@@ -685,7 +741,7 @@ async function tick(force) {
     const r = await findRace();
     if (!r) { if (force) log('受付中のレースが見つかりません（締切済みかもしれません）', '#888'); }
     // force（今すぐ解析）でも「購入済み」は上書きしない。ここを抜けると
-    // 1レース MAX_UNITS_PER_RACE 口の上限を何度でも回避できてしまう。
+    // 1レースの口数上限を何度でも回避できてしまう。
     else if (ST.done[r.sid] && ST.done[r.sid].n > 0) {
       if (force) log(`R${r.sid}: 購入済みです（1レースの上限を超えないため再解析しません）`, '#888');
     }
