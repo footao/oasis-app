@@ -662,6 +662,10 @@ def regression_tests():
           and '購入済みです' in _bp)
     check('P16 締切済みのレースでは購入させない',
           "phase==='betting'" in _bp.replace(' ', '') and 'open' in _bp)
+    check('P16 3連単の購入済み口数を買い目ごとに照会する（APIは全部必須）',
+          'trifecta/user-units' in _bp and 'first=' in _bp and 'second=' in _bp
+          and 'third=' in _bp and 'triOwn' in _bp,
+          '/api/trifecta/user-units は first/second/third が必須（実機で確認）')
     check('P16 トークンは購入APIにだけ使い、画面には出さない',
           _bp.count('token:T') == 2 and 'token' not in _bp.split('drawHorses')[1][:2000])
 
@@ -841,6 +845,26 @@ def regression_tests():
         except Exception:
             _ok12 = False
     check('P12 図鑑30種すべてが例外なく処理できる', _ok12)
+
+    # --- P17: 貼り付けCSVの装備効果は**ラベルを削らずに**カタログへ渡すこと ---
+    # race 2109 の実バグ。`v.split('：',1)[-1]` でラベルを落としていたため
+    # ITEM_EFFECT_CATALOG が引けず、図鑑30種のうち11種が「常時・duty 1.0」に
+    # 化けていた（首位の呪い 0.49% → 6.2%、12倍）。
+    # 結果、でゅんでゅんが2着予想に浮上して にこるん→でゅんでゅん→メビウス が41%になった。
+    _cols17 = ['装備', '装備効果', '装備効果キー', 'お守り', 'お守り効果', 'お守り効果キー']
+    _row17 = {'装備': '雷鳥の兜',
+              '装備効果': '首位の呪い：先頭の間、スピードが6.2%上昇するがスタミナ消費も増加',
+              '装備効果キー': 'gear_leader_curse'}
+    _m17, _ = oc.item_mults_from_row(_row17, _cols17, _sp12)
+    check('P17 条件付き装備は duty で割り引く（首位の呪い 6.2%×0.079）',
+          abs(_m17.get('speed', 1.0) - (1 + 0.062 * 0.079)) < 1e-6,
+          f"speed={_m17.get('speed')}")
+    # 馬場限定はこの場では判定できないので**乗せない**（ラベルを削ると常時5%になる）
+    _row17b = {'装備': '草食みの蹄鉄', '装備効果': '芝啜り：芝でスピードが5%上昇',
+               '装備効果キー': 'gear_turf_gnaw'}
+    _m17b, _sk17b = oc.item_mults_from_row(_row17b, _cols17, _sp12)
+    check('P17 馬場限定の装備は倍率に乗せず skipped に回す',
+          not _m17b and len(_sk17b) == 1, f'{_m17b} / {_sk17b}')
 
     # 推奨購入（3連単＋単勝）が1本のリストにまとまること
     _r11 = oc.analyze(_t7, _b7, {'dist': 'マイル', 'track': '芝',

@@ -2,7 +2,7 @@
 // 手打ち専用の一括購入ブックマークレット（予測ツールを持っていない人向け）。
 // buy.js との違いは**入力方法だけ**で、購入処理・上限チェック・二重購入防止は同じ。
 // 貼り付け欄をやめて、出走馬をタップして買い目を組み立てる形にしている。
-const BM_VER='1.0.0';
+const BM_VER='1.1.0';
 const B='https://api.oasis.red';
 const q=new URLSearchParams(location.search);
 const G=q.get('guild'),S=q.get('race')||q.get('schedule_id'),U=q.get('user'),T=q.get('token');
@@ -69,6 +69,24 @@ const ownWin=pets.reduce((a,h)=>a+(Number(h.my_amount)||0),0)/WIN_UNIT;
 const DICT=(typeof PASSIVE_INFO!=='undefined'&&PASSIVE_INFO)||(window.PASSIVE_INFO)||{};
 const plabel=c=>(c&&c!=='none')?((DICT[c]&&DICT[c].label)||c):'';
 
+// 3連単の「このレースで自分が何口買ったか」は**買い目単位でしか引けない**。
+// /api/trifecta/user-units は first/second/third が全部必須で、省くと 422 が返る
+// （2026/08/24 に実機で確認）。全体の口数を知るには全組（16頭なら3,360通り）を
+// 舐めるしかないので現実的ではない。よってカートに入れた買い目だけ照会して、
+// 「同じ買い目を二度買う」という一番ありがちな取り違えだけ潰す。
+const triOwn=new Map();                     // 'a-b-c' → 購入済み口数（未取得は undefined）
+const triKey=ids=>ids.join('-');
+async function fetchTriOwn(ids){
+ const k=triKey(ids);
+ if(triOwn.has(k))return triOwn.get(k);
+ try{
+  const r=await fetch(B+'/api/trifecta/user-units?guild='+G+'&schedule_id='+S+'&user='+U
+    +'&first='+ids[0]+'&second='+ids[1]+'&third='+ids[2]);
+  const d=await r.json();
+  const u=Number(d.units); triOwn.set(k, isFinite(u)?u:null);
+ }catch(e){ triOwn.set(k,null); }
+ return triOwn.get(k);
+}
 let mode='tri', units=1, slots=[null,null,null], cart=[], sortBy='odds', executed=false;
 
 const capLeft=()=>{
@@ -137,18 +155,31 @@ function pick(id){
 }
 function drawCart(){
  if(!cart.length){ $('_cart').innerHTML='<span style="color:#666">まだ何も入っていません</span>'; }
- else $('_cart').innerHTML=cart.map((x,i)=>
-  '<div style="display:flex;justify-content:space-between;align-items:center;padding:.25rem .35rem;border-bottom:1px solid #333">'
-  +'<span>'+(x.type==='3連単'?'🎯':'🥇')+' '+esc(x.label)+'</span>'
+ else $('_cart').innerHTML=cart.map((x,i)=>{
+  const own=x.type==='3連単'?triOwn.get(triKey(x.ids))
+    :Math.round((Number((pets.find(h=>h.pet_id===x.ids[0])||{}).my_amount)||0)/WIN_UNIT);
+  const note=own?'<span style="color:#81c784;font-size:.7rem"> 購入済'+own+'口</span>'
+    :(x.type==='3連単'&&own===undefined?'<span style="color:#666;font-size:.7rem"> 照会中…</span>':'');
+  return '<div style="display:flex;justify-content:space-between;align-items:center;padding:.25rem .35rem;border-bottom:1px solid #333">'
+  +'<span>'+(x.type==='3連単'?'🎯':'🥇')+' '+esc(x.label)+note+'</span>'
   +'<span><b style="color:#e2b96f">'+x.units+'口</b> '
-  +'<span data-del="'+i+'" style="color:#ef5350;cursor:pointer;padding:0 .3rem">✕</span></span></div>').join('');
+  +'<span data-del="'+i+'" style="color:#ef5350;cursor:pointer;padding:0 .3rem">✕</span></span></div>';}).join('');
  $('_cart').querySelectorAll('[data-del]').forEach(el=>el.onclick=()=>{
   cart.splice(+el.dataset.del,1); drawCart(); drawUnits(); });
  const c=capLeft();
  const total=c.triU*TRI_UNIT+c.winU*WIN_UNIT;
+ // カートに入れた買い目ぶんだけは購入済み口数が分かる。それ以外は引く手段が無い。
+ let triKnown=0; cart.forEach(x=>{ if(x.type==='3連単'){const o=triOwn.get(triKey(x.ids)); if(o)triKnown+=o;} });
  $('_sum').innerHTML='<b style="color:#e2b96f">合計 '+yen(total)+' rrc</b>'
-  +'<br>3連単 '+c.triU+'口 / '+TRI_MAX_UNITS+'口　単勝 '+c.winU+'口'
-  +(ownWin?'（購入済 '+Math.round(ownWin)+'口）':'')+' / '+WIN_MAX_UNITS+'口';
+  +'<br>3連単 '+c.triU+'口 / '+TRI_MAX_UNITS+'口'
+  +(triKnown?'（同じ買い目で購入済 '+triKnown+'口）':'')
+  +'　単勝 '+c.winU+'口'
+  +(ownWin?'（購入済 '+Math.round(ownWin)+'口）':'')+' / '+WIN_MAX_UNITS+'口'
+  +'<br><span style="color:#9a9aa8;font-size:.7rem">※ 3連単は買い目ごとにしか購入履歴を引けないため、'
+  +'カートに入れていない買い目ぶんは数えられません。上限20口の判定はカートの中身だけで行っています。</span>';
+ if(triKnown&&c.triU+triKnown>TRI_MAX_UNITS)
+  $('_sum').innerHTML+='<br><span style="color:#ffb74d">⚠ 購入済みと合わせると '
+   +(c.triU+triKnown)+'口 で上限 '+TRI_MAX_UNITS+'口 を超えます。ゲーム側で弾かれる可能性があります。</span>';
  const bad=(c.tri<0)||(c.win<0)||!open||!cart.length;
  if(c.tri<0)$('_sum').innerHTML+='<br><span style="color:#ef5350">⛔ 3連単が上限を超えています</span>';
  if(c.win<0)$('_sum').innerHTML+='<br><span style="color:#ef5350">⛔ 単勝が上限を超えています</span>';
@@ -177,6 +208,9 @@ $('_add').onclick=()=>{
   slots=[null,null,null];
  }
  units=1; drawSlots(); drawHorses(); drawCart(); drawUnits();
+ // 3連単は追加した買い目の購入済み口数を裏で引いて、返ってきたら表示を更新する
+ const last=cart[cart.length-1];
+ if(last&&last.type==='3連単') fetchTriOwn(last.ids).then(()=>{drawCart();});
 };
 $('_ok').onchange=e=>{
  const c=capLeft();

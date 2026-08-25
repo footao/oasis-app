@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.15.0'
+CORE_VERSION = '3.15.1'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -2019,7 +2019,10 @@ def item_mults_from_row(r, cols, spec=None):
         if not v or v in ('nan', 'None'):
             continue
         kv = str(r.get(keycol, '') or '').strip() if keycol in cols else ''
-        m = item_effect_spec(v.split('：', 1)[-1], kv, spec)
+        # ⚠ ラベル（『首位の呪い：』）を落とすと ITEM_EFFECT_CATALOG が引けず、
+        #    説明文からの推測（＝常時・duty 1.0）に落ちる。図鑑30種のうち11種が
+        #    そのまま過大評価になる（首位の呪い 0.49% → 6.2%、12倍）。丸ごと渡す。
+        m = item_effect_spec(v, kv, spec)
         if m:
             for k, x in m.items():
                 mult[k] = mult.get(k, 1.0) * float(x)
