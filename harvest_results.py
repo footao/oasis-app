@@ -231,6 +231,15 @@ def merge_horse(h, r):
     コンディションだけは result に無いので by-id の「今」の値しか入らない。
     """
     at = {k: _at_race(r, k) for k in ('speed', 'power', 'stamina')}
+    # ⚠ result API の base_* + train_* には**装備・お守りの加算ぶんが入っていない**。
+    #    by-id の speed は base+train+item_bonus（実測: おいら 155+2=157 と一致）で、
+    #    購入ページの表示値もそちら。加算せずに保存すると、装備持ちだけ
+    #    ステータスが低いレースとして races.jsonl に入る（にこるんの SP+25 など）。
+    _ib = h.get('item_bonus') or {}
+    if isinstance(_ib, dict):
+        for _k in at:
+            if at[_k] is not None:
+                at[_k] += float(_ib.get(_k) or 0)
     fresh = all(v is not None for v in at.values())
     ps = r.get('passive_skills')
     prev = [x for x in (h.get('passive_skill'), h.get('passive_skill_2')) if x]
