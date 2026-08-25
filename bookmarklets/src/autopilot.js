@@ -21,6 +21,7 @@ try {
   const prev = document.getElementById('oasis-autopilot-panel');
   if (prev) prev.remove();
   if (window.__oasisAutopilotTimer) clearInterval(window.__oasisAutopilotTimer);
+  if (window.__oasisAutopilotClock) clearInterval(window.__oasisAutopilotClock);
 } catch (e) {}
 const CFG = {
   RACE_HOURS: [9, 12, 15, 18, 21, 23],   // 開催時刻（時）
@@ -159,6 +160,14 @@ function log(m, c) {
   ST.log.unshift({ m: `[${new Date().toLocaleTimeString('ja-JP')}] ${m}`, c: c || '' });
   ST.log = ST.log.slice(0, 300); saveState(ST); render();
 }
+// 残り時間だけを毎秒書き換える。render() ごと1秒で回すとログのHTMLも作り直して
+// しまい、テキスト選択が切れるうえ無駄なので、カウントダウンだけ別にする。
+function renderClock() {
+  const el = document.getElementById('_cd');
+  if (!el) return;
+  const left = Math.max(0, Math.round((nextRaceTime() - Date.now()) / 1000));
+  el.textContent = `${Math.floor(left / 60)}分${String(left % 60).padStart(2, '0')}秒`;
+}
 function render() {
   const next = nextRaceTime();
   const left = Math.max(0, Math.round((next - Date.now()) / 1000));
@@ -167,7 +176,7 @@ function render() {
     : '<span style="color:#ef5350">🔑 未設定</span>';
   $('_stat').innerHTML =
     `次のレース <b>${next.toLocaleTimeString('ja-JP', {hour:'2-digit', minute:'2-digit'})}</b>`
-    + `（あと ${Math.floor(left/60)}分${String(left%60).padStart(2,'0')}秒）<br>`
+    + `（あと <span id=_cd>${Math.floor(left/60)}分${String(left%60).padStart(2,'0')}秒</span>）<br>`
     + `本日 <b>${ST.spent.toLocaleString()}</b>/${CFG.DAILY_BUDGET.toLocaleString()} rrc`
     + `　解析済み ${Object.keys(ST.done).length} レース`;
   const ab = $('_arm');
@@ -680,7 +689,12 @@ $('_save').onclick = () => {
   arm();               // 貼った＝そのレースぶんの購入を人が許可した、とみなす
 };
 $('_arm').onchange = () => { if ($('_arm').checked) arm(); else disarm('自動購入を解除しました'); };
-$('_x').onclick = () => { stopped = true; log('停止しました', '#ffb74d'); };
+$('_x').onclick = () => {
+  stopped = true;
+  if (window.__oasisAutopilotTimer) clearInterval(window.__oasisAutopilotTimer);
+  if (window.__oasisAutopilotClock) clearInterval(window.__oasisAutopilotClock);
+  log('停止しました（監視・カウントダウンとも止めました）', '#ffb74d');
+};
 $('_clr').onclick = () => { ST.log = []; saveState(ST); render(); };
 $('_now').onclick = () => { log('手動で解析します', '#e2b96f'); tick(true); };
 
@@ -693,6 +707,7 @@ try {
   }
   await resolveApi();
   render();
+  window.__oasisAutopilotClock = setInterval(renderClock, 1000);
   // iOS はタブが背面に回るとタイマーが止まるので、定期監視には頼れない。
   // 「開いた時点で受付中のレースがあれば即解析」を基本動作にする。
   if (CFG.IMMEDIATE) {

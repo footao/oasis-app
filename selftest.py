@@ -728,6 +728,12 @@ def regression_tests():
           "const fx = (v, d) => (Number.isFinite(+v)" in _ap
           and '.eff.toFixed' not in _ap and '.edge*100).toFixed' not in _ap)
 
+    # カウントダウンは毎秒動くこと（render() は20秒に1回しか回らないので別立て）
+    check('P19 autopilot のカウントダウンは毎秒更新する',
+          'function renderClock()' in _ap
+          and 'setInterval(renderClock, 1000)' in _ap
+          and "id=_cd>" in _ap)
+
     # 7頭以下は3連単が存在しない。オートパイロットも組を作らず、単勝だけ買うこと
     # （WIN_ON を切っていても、そのレースで買えるのは単勝だけなので出す）。
     check('P19 autopilot も7頭以下では3連単を作らない',
