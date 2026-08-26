@@ -770,8 +770,18 @@ def regression_tests():
           and 'Math.min(CFG.TRI_MAX_UNITS, unitsLeft)' in _ap,
           f'model.json の max_total_units = {oc.MAX_TOTAL_UNITS}')
     # 配分された口数ぶん買うこと（1組1口で送ると配分が意味を持たない）
-    check('P19 autopilot は配分口数ぶん買う（3連単は1リクエスト10口まで）',
-          'let leftU = pk.k || 1;' in _ap and 'Math.min(leftU, 10)' in _ap)
+    # 分けて買うと払戻も購入履歴もその数だけ分かれて読みにくい。まず一括で送り、
+    # APIに**拒否されたときだけ**割る。通信エラーでは割らない（二重購入になる）。
+    check('P19 autopilot はまず全口数を1リクエストで送る',
+          'const buyUnits = async (url, mkBody, label, units, unit, chunk) => {' in _ap
+          and 'if (await post(url, mkBody(units), `${label} ${units}口`, units * unit, true)) return;' in _ap,
+          '拒否されたら chunk 口ずつに割り直す')
+    check('P19 autopilot は通信エラーでは再送しない',
+          'return true; } };' in _ap.replace('\n', ' ').replace('  ', ' ')
+          or '送信済みか不明' in _ap,
+          '二重購入を避ける')
+    check('P19 autopilot の分割単位は CFG に出ている',
+          'TRI_PER_REQ: 10' in _ap and 'WIN_PER_REQ: 20' in _ap)
 
     # エッジが大きいことは異常ではない（プールが薄いほど初期プール金の比率が上がる）。
     # 2026/08/26 まで +300%超でレースごと中止しており、R2120 で一番おいしい組を捨てた。

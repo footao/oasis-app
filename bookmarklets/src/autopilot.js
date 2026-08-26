@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.2.0';
+const AP_VER = '1.3.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -63,6 +63,11 @@ const CFG = {
   // 2026/08/26 まで「+300%超は計算ミスとみなしてレースごと中止」していたが、
   // それは**一番おいしい場面だけを捨てる**設定だった（R2120 で実際に捨てた）。
   // 今は止めずに黄色でログに出すだけ。バグは1レースごとの目視で拾う方針。
+  // 1リクエストあたりの口数。**まず全口数を1回で送り、拒否されたときだけ**この値で
+  // 割り直す。分けて買うと払戻も購入履歴もその数だけ分かれて読みにくい。
+  // 元は buy.js から写した値で、単勝の20に根拠は無い（3連単の10は購入画面の上限）。
+  TRI_PER_REQ: 10,
+  WIN_PER_REQ: 20,
   WARN_EDGE: 3.0,           // これを超えたらログで知らせる（購入は止めない）
   MAX_SANE_ODDS: 5000,      // 実効オッズの上限。プール20万なら21倍が天井なので実質無効
   // 3連単プールがこれ未満なら3連単は見送る。既定は model.json の初期プール金
@@ -674,7 +679,9 @@ async function doBuy() {
   const btn = $('_buy'); if (btn) { btn.disabled = true; btn.style.opacity = .5; btn.textContent = '購入中…'; }
   const pl = PENDING;
   let bought = 0;
-  const post = async (url, body, label, amount) => {
+  // 戻り値: true = これ以上送らない（成功、または送信済みか不明）
+  //         false = APIに**拒否された**（金は動いていないので割って送り直してよい）
+  const post = async (url, body, label, amount, quiet) => {
     try {
       const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                    body: JSON.stringify(body) });
@@ -682,46 +689,61 @@ async function doBuy() {
       if (r.ok && d.status !== 'error') {
         ST.spent += amount; bought++;
         log(`R${pl.sid} ✅ ${label}`, '#81c784');
-      } else {
-        const msg = String(d.detail || d.message || ('HTTP ' + r.status));
+        await sleep(400);
+        return true;
+      }
+      const msg = String(d.detail || d.message || ('HTTP ' + r.status));
+      if (!quiet) {
         log(`R${pl.sid} ❌ ${label} ${esc(msg)}`, '#ef5350');
         if (/token|auth|unauthor|expire/i.test(msg)) {
           log('→ token が無効です。新しい購入リンクを貼り直してください。', '#ffb74d');
         }
       }
+      await sleep(400);
+      return false;
     } catch (e) {
       // 届いているかもしれないので**予算は減らす**。減らさないと、実際には
       // 買えているのに残額が過大なまま1日分ずっとズレ続ける（安全側に倒す）。
+      // 同じ理由で**再送もしない**（二重購入になりうる）。
       ST.spent += amount;
       log(`R${pl.sid} ⚠ ${label} 通信エラー（送信済みか不明・予算からは引きました）: `
           + esc(e.message), '#ffb74d');
+      await sleep(400);
+      return true;
     }
-    await sleep(400);
   };
-  for (const pk of pl.picks) {
-    let leftU = pk.k || 1;
+
+  // まず全口数を1リクエストで送る。通れば払戻も購入履歴も1本にまとまって読みやすい。
+  // APIが1回あたりの口数を制限していた場合だけ chunk 口ずつに割り直す。
+  // ⚠ 通信エラーのときは割り直さない（送信済みかもしれず、二重購入になる）。
+  const buyUnits = async (url, mkBody, label, units, unit, chunk) => {
+    if (units > chunk) {
+      if (await post(url, mkBody(units), `${label} ${units}口`, units * unit, true)) return;
+      log(`R${pl.sid}: ${label} ${units}口の一括購入が通らないので `
+          + `${chunk}口ずつに分けます`, '#888');
+    }
+    let leftU = units;
     while (leftU > 0) {
-      const u = Math.min(leftU, 10);        // 3連単は1リクエスト10口まで（buy.js と同じ）
-      const amount = u * pl.unit;
-      await post(`${API}/api/trifecta/buy`,
-        { user: AUTH.user, guild: AUTH.guild, race: pl.sid,
-          first: pl.pets[pk.c.i].pet_id, second: pl.pets[pk.c.j].pet_id,
-          third: pl.pets[pk.c.k].pet_id, amount: amount, token: AUTH.token },
-        `3連単 ${pk.names.join('→')} ${u}口 +${fx(pk.edge * 100, 0)}%`, amount);
+      const u = Math.min(leftU, chunk);
+      await post(url, mkBody(u), `${label} ${u}口`, u * unit);
       leftU -= u;
     }
+  };
+
+  for (const pk of pl.picks) {
+    await buyUnits(`${API}/api/trifecta/buy`,
+      u => ({ user: AUTH.user, guild: AUTH.guild, race: pl.sid,
+              first: pl.pets[pk.c.i].pet_id, second: pl.pets[pk.c.j].pet_id,
+              third: pl.pets[pk.c.k].pet_id, amount: u * pl.unit, token: AUTH.token }),
+      `3連単 ${pk.names.join('→')} +${fx(pk.edge * 100, 0)}%`,
+      pk.k || 1, pl.unit, CFG.TRI_PER_REQ);
   }
   for (const w of (pl.win || [])) {
-    let leftU = w.units;
-    while (leftU > 0) {
-      const u = Math.min(leftU, 20);          // 単勝は1リクエスト20口まで
-      const amount = u * pl.winUnit;
-      await post(`${API}/api/bet`,
-        { user: AUTH.user, guild: AUTH.guild, race: pl.sid,
-          pet_id: pl.pets[w.i].pet_id, amount, token: AUTH.token },
-        `単勝 ${w.name} ${u}口 +${fx(w.edge * 100, 0)}%`, amount);
-      leftU -= u;
-    }
+    await buyUnits(`${API}/api/bet`,
+      u => ({ user: AUTH.user, guild: AUTH.guild, race: pl.sid,
+              pet_id: pl.pets[w.i].pet_id, amount: u * pl.winUnit, token: AUTH.token }),
+      `単勝 ${w.name} +${fx(w.edge * 100, 0)}%`,
+      w.units, pl.winUnit, CFG.WIN_PER_REQ);
   }
   ST.done[pl.sid] = { t: Date.now(), n: bought };
   disarm(`R${pl.sid} の購入が終わったのでアームを解除しました`);
