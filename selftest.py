@@ -781,6 +781,13 @@ def regression_tests():
           and 'は異常 → このレースは中止' not in _ap,
           'ログで知らせるだけ')
 
+    # 「更新されたか分からない」を潰す。挙動の版とビルド時刻の両方をパネルに出すこと。
+    check('P19 autopilot は版とビルド時刻を表示する',
+          "const AP_VER = " in _ap
+          and "🛩 オートパイロット v' + AP_VER" in _ap
+          and 'M.trained_at' in _ap,
+          'AP_VER は手で上げる / trained_at は build_autopilot.py が自動で入れる')
+
     # カウントダウンは毎秒動くこと（render() は20秒に1回しか回らないので別立て）
     check('P19 autopilot のカウントダウンは毎秒更新する',
           'function renderClock()' in _ap

@@ -14,6 +14,10 @@
 //
 // 計算は Python の oasis_core と同じ（model.js が同じ式を持ち、
 // parity_test.py で数値一致を検証している）。装備・お守りの倍率も同じ表を使う。
+// 挙動のバージョン。autopilot.js を直したら上げること。
+// **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
+// 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
+const AP_VER = '1.1.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -153,7 +157,8 @@ ov.style.cssText = 'position:fixed;z-index:99999;right:8px;left:auto;width:470px
 if (window.matchMedia && window.matchMedia('(max-width:640px)').matches) {
   ov.style.left = '8px'; ov.style.width = 'auto';    // スマホは全幅にする
 }
-ov.innerHTML = '<b style="color:#e2b96f">🛩 オートパイロット（3連単＋単勝）</b>'
+ov.innerHTML = '<b style="color:#e2b96f">🛩 オートパイロット v' + AP_VER + '</b>'
+  + '<span id=_build style="color:#666;font-size:.68rem"></span>'
   + '<span id=_auth style="float:right;font-size:.72rem"></span>'
   + '<div id=_stat style="margin:.45rem 0;font-size:.76rem;line-height:1.6"></div>'
   + '<label style="display:block;margin:.35rem 0;font-size:.76rem;cursor:pointer">'
@@ -263,7 +268,13 @@ async function loadModel() {
   if (CFG.UNFORMED_MAX_UNITS == null) CFG.UNFORMED_MAX_UNITS = +(D.unformed_max_units || 10);
   if (CFG.TRI_MAX_UNITS == null) CFG.TRI_MAX_UNITS = +(M.max_total_units || 20);
   if (CFG.MIN_POOL == null) CFG.MIN_POOL = M.trifecta_pool_seed || 200000;
-  log(`モデル読込 v${M.core_version} / 学習${M.n_races}レース`
+  // 「更新されたか分からない」を潰す。trained_at は build_autopilot.py を回した時刻
+  // ＝ このバンドルが焼かれた時刻なので、押すたびにここが変われば新しいものを掴んでいる。
+  const bt = String(M.trained_at || '').replace('T', ' ').slice(5, 16);
+  const be = $('_build');
+  if (be) be.textContent = ` core ${M.core_version} / build ${bt}`;
+  log(`オートパイロット v${AP_VER} / core v${M.core_version} / build ${bt}`, '#e2b96f');
+  log(`モデル読込 学習${M.n_races}レース`
       + ` / σ3連単 ${Number(M.tri_sigma).toFixed(4)} / σ単勝 ${Number(M.race_sigma).toFixed(4)}`,
       '#81c784');
 }
