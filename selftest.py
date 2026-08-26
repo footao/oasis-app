@@ -782,6 +782,9 @@ def regression_tests():
           'ログで知らせるだけ')
 
     # 「更新されたか分からない」を潰す。挙動の版とビルド時刻の両方をパネルに出すこと。
+    check('P19 autopilot は馬場を装備の判定に渡す',
+          'M, fxSkipped, { dist: dist, track: track }' in _ap,
+          '芝啜り／泥啜りを馬場で判定できるようにする')
     check('P19 autopilot は版とビルド時刻を表示する',
           "const AP_VER = " in _ap
           and "🛩 オートパイロット v' + AP_VER" in _ap
@@ -1013,8 +1016,18 @@ def regression_tests():
     _row17b = {'装備': '草食みの蹄鉄', '装備効果': '芝啜り：芝でスピードが5%上昇',
                '装備効果キー': 'gear_turf_gnaw'}
     _m17b, _sk17b = oc.item_mults_from_row(_row17b, _cols17, _sp12)
-    check('P17 馬場限定の装備は倍率に乗せず skipped に回す',
+    check('P17 馬場が分からないときは馬場限定の装備を乗せず skipped に回す',
           not _m17b and len(_sk17b) == 1, f'{_m17b} / {_sk17b}')
+    # 馬場が分かっていれば乗せる。ここを捨てると芝啜りのレジェンドが丸ごと消える
+    # （実測 +5.2% ＝ 残差σの 0.63倍。着順が入れ替わる大きさ）。
+    _m17c, _ = oc.item_mults_from_row(_row17b, _cols17, _sp12,
+                                      {'dist': '短距離', 'track': '芝'})
+    _m17d, _sk17d = oc.item_mults_from_row(_row17b, _cols17, _sp12,
+                                           {'dist': '短距離', 'track': 'ダート'})
+    check('P17 芝のレースでは芝啜りを倍率に乗せる',
+          abs(_m17c.get('speed', 1.0) - 1.05) < 1e-9, f"speed={_m17c.get('speed')}")
+    check('P17 ダートのレースでは芝啜りを乗せない',
+          not _m17d and len(_sk17d) == 1, f'{_m17d} / {_sk17d}')
 
     # 推奨購入（3連単＋単勝）が1本のリストにまとまること
     _r11 = oc.analyze(_t7, _b7, {'dist': 'マイル', 'track': '芝',

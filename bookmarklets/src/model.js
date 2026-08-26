@@ -55,7 +55,7 @@ const OasisModel = (() => {
 
   // item = APIの equipment / charm。戻り値 {speed,power,stamina,_sigma} か null。
   // 反映できなかったものは skipped 配列に効果名を積む（黙って落とさない）。
-  function itemMult(item, M, skipped) {
+  function itemMult(item, M, skipped, ctx) {
     if (!item) return null;
     const label = String(item.effect_label || '').trim();
     const desc  = String(item.effect_description || '');
@@ -70,10 +70,19 @@ const OasisModel = (() => {
       if (m && m[1] !== '半分') sg = 1 - parseFloat(m[1]) / 100;
       return { _sigma: Math.max(0.05, sg) };
     }
-    if (c.scope === 'learned' || c.scope === 'aptitude' || c.scope === 'same_species') return push();
+    if (c.scope === 'learned' || c.scope === 'same_species') return push();
+    // 馬場限定（芝啜り／泥啜り）は、そのレースの馬場が分かっていれば判定できる。
+    // ctx を渡さない呼び出しでは従来どおり採用しない。
+    let aptDuty = null;
+    if (c.scope === 'aptitude') {
+      const arg = c.scope_arg;
+      if (!ctx || !arg || (arg !== ctx.dist && arg !== ctx.track)) return push();
+      aptDuty = 1;                 // 条件が合っている間はずっと効く
+    }
     const mult = pctMults(desc);
     if (!Object.keys(mult).length) return push();
-    const duty = Math.min(Math.max(c.duty == null ? 1 : c.duty, 0), 1);
+    const duty = aptDuty != null ? aptDuty
+      : Math.min(Math.max(c.duty == null ? 1 : c.duty, 0), 1);
     const out = {};
     for (const k of Object.keys(mult)) out[k] = 1 + (mult[k] - 1) * duty;
     return out;
@@ -82,10 +91,10 @@ const OasisModel = (() => {
   // 1頭ぶんの装備＋お守りを畳み込んで {speed,power,stamina} に掛ける。
   // ⚠ ステータスの**加算**ぶん（SP+25 など）は API の speed に既に入っている。
   //    ここで掛けるのは**倍率**だけ（Python: parse_unified と同じ切り分け）。
-  function applyItems(h, M, skipped) {
+  function applyItems(h, M, skipped, ctx) {
     let sig = 1;
     for (const it of [h.equipment, h.charm]) {
-      const m = itemMult(it, M, skipped);
+      const m = itemMult(it, M, skipped, ctx);
       if (!m) continue;
       if (m._sigma != null) { sig *= m._sigma; continue; }
       for (const k of ['speed','power','stamina']) if (m[k]) h[k] = h[k] * m[k];

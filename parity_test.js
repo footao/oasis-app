@@ -19,7 +19,7 @@ for (const c of cases) {
 // --- 装備・お守りの効果（図鑑30種）---
 let ibad = 0, iworst = 0;
 for (const c of items) {
-  const js = OM.itemMult({ effect_label: c.label, effect_description: c.desc, effect_key: c.key }, M, []);
+  const js = OM.itemMult({ effect_label: c.label, effect_description: c.desc, effect_key: c.key }, M, [], c.ctx || null);
   const py = c.py;
   if ((js == null) !== (py == null)) { ibad++; console.log(`  ❌ ${c.label}: JS=${JSON.stringify(js)} / PY=${JSON.stringify(py)}`); continue; }
   if (js == null) continue;
@@ -30,7 +30,7 @@ for (const c of items) {
     if (d > 1e-9) { ibad++; console.log(`  ❌ ${c.label}.${k}: JS=${js[k]} / PY=${py[k]}`); }
   }
 }
-console.log(`装備効果 一致検証: ${items.length}種  最大誤差 ${iworst.toExponential(2)}`);
+console.log(`装備効果 一致検証: ${items.length}件  最大誤差 ${iworst.toExponential(2)}`);
 if (ibad) { console.log(`❌ 装備効果 不一致 ${ibad}件 — model.js の itemMult が oasis_core に追随していません`); process.exit(1); }
 
 // --- 単勝（下限オッズの判定・希薄化を織り込んだ配分）---

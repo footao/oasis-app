@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.1.0';
+const AP_VER = '1.2.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -322,7 +322,7 @@ async function analyseRace(sid, info, canBuy) {
     passives: [h.passive_skill, h.passive_skill_2]
       .map(c => (c && c !== 'none') ? (M.code_map[c] || null) : null).filter(Boolean),
     equipment: h.equipment, charm: h.charm,
-  }, M, fxSkipped));
+  }, M, fxSkipped, { dist: dist, track: track }));
   if (fxSkipped.length) {
     log(`R${sid}: 反映しなかった効果 ${esc([...new Set(fxSkipped)].join(' / '))}`, '#ffb74d');
   }

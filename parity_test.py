@@ -100,14 +100,17 @@ def main():
     # ⚠ カタログに無い効果名は Python が説明文から推測するのに対し、JS は**乗せない**。
     #    意図的な差（推測は race 2097 で15倍の誤りを出した実績がある）なので、
     #    検証はカタログにある30種だけを対象にする。
+    # 馬場限定（芝啜り／泥啜り）は ctx の有無で答えが変わるので3通りとも回す。
+    CTXS = [None, {'dist': '短距離', 'track': '芝'}, {'dist': 'マイル', 'track': 'ダート'}]
     item_cases = []
     for i, (label, desc, key) in enumerate(ITEM_DESCS):
         pct = round(1.0 + (i % 9) * 0.9, 1)
         d = desc.replace('@', str(pct))
-        got = oc.item_effect_spec(f'{label}：{d}', key, spec)
-        item_cases.append({'label': label, 'desc': d, 'key': key,
-                           'py': (None if got is None else
-                                  {k: float(v) for k, v in got.items()})})
+        for ctx in CTXS:
+            got = oc.item_effect_spec(f'{label}：{d}', key, spec, ctx)
+            item_cases.append({'label': label, 'desc': d, 'key': key, 'ctx': ctx,
+                               'py': (None if got is None else
+                                      {k: float(v) for k, v in got.items()})})
     # --- 単勝（下限オッズの判定 → 希薄化を織り込んだ配分）---
     # ランダムなだけでは踏まない枝（未投票馬・取得漏れ NaN・下限に張り付いた大本命・
     # 自分がプールの大半を持っている状態）を、モードを回して必ず通す。

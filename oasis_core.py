@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.16.0'
+CORE_VERSION = '3.17.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -737,14 +737,17 @@ def _stat_in(blk, label):
 _ITEM_FX_RE = re.compile(r'✨\s*([^：:\n\r]{2,14})[：:]\s*([^\n\r]+)')
 
 
-def _item_mults_from_block(blk, spec=None):
-    """馬ブロックの装備・お守りの効果 → {'speed':倍率,...}。σ系は '_sigma'。"""
+def _item_mults_from_block(blk, spec=None, ctx=None):
+    """馬ブロックの装備・お守りの効果 → {'speed':倍率,...}。σ系は '_sigma'。
+
+    ctx: {'dist':…, 'track':…}。馬場限定（芝啜り／泥啜り）の判定に使う。
+    """
     out = {}
     for label, desc in _ITEM_FX_RE.findall(blk or ''):
         label = label.strip()
         if label in ('パッシブ', 'パッシブスキル'):
             continue
-        fx = item_effect_spec(f'{label}：{desc}', None, spec)
+        fx = item_effect_spec(f'{label}：{desc}', None, spec, ctx)
         if not fx:
             continue
         for k, v in fx.items():
@@ -809,7 +812,7 @@ def parse_entries(text, spec=None):
             c_m = re.search(r'コンディション\s*[:：]\s*([^\s\r\n😄😐😞🙁😰]+)', blk)
             pa_m = re.search(r'✨\s*パッシブ\s*[:：]\s*([^\n\r]+)', blk)
             if n_m and s_m is not None and st_m is not None and p_m is not None:
-                _im = _item_mults_from_block(blk, spec)
+                _im = _item_mults_from_block(blk, spec, {'dist': dist, 'track': track})
                 horses.append({
                     'name': n_m.group(1).strip(),
                     'owner': _owner(o_m.group(1) if o_m else None),
@@ -851,7 +854,7 @@ def parse_results(text, spec=None):
             # 結果ブロックに直接コンディションが書かれている場合（API採取ログ等）はそれを使う。
             cd_m = re.search(r'コンディション\s*[:：]\s*([^\s\r\n😄😐😞🙁😰]+)', block)
             if s_m is not None and st_m is not None and p_m is not None and sc_m:
-                _im = _item_mults_from_block(block, spec)
+                _im = _item_mults_from_block(block, spec, {'dist': dist, 'track': track})
                 rows.append({
                     'race_key': r_key, 'race_no': race_no,
                     'rank': RANK_MAP.get(hm.group(1)) or int(hm.group(2)),
@@ -1971,7 +1974,7 @@ def item_effect_label(desc):
     return m.group(1).strip() if m else None
 
 
-def item_effect_spec(desc, effect_key=None, spec=None):
+def item_effect_spec(desc, effect_key=None, spec=None, ctx=None):
     """装備・お守りの効果 → 発動率まで織り込んだ倍率。読めなければ None。
 
     倍率の**大きさ**は説明文から、**発動する範囲（scope / duty）は effect_key から**取る。
@@ -2015,9 +2018,17 @@ def item_effect_spec(desc, effect_key=None, spec=None):
         duty = float(base.get('duty', duty))
     if scope == 'learned':          # 倍率に落とせない（粘り腰＝苦痛慣れ）
         return None
-    # 出走メンバーや馬場に依存する範囲は、この場では判定できないので採用しない
+    # 馬場・距離限定（芝啜り／泥啜り）は、そのレースの馬場が分かっていれば判定できる。
+    # ctx を渡さない呼び出し（図鑑の一覧など）では従来どおり採用しない。
+    # ⚠ ctx 無しで捨てると**レジェンドの芝啜りが丸ごと消える**（実測 +5.2%、残差σの0.6倍）。
+    if scope == 'aptitude':
+        arg = (cat or {}).get('scope_arg') or sp.get('scope_arg') or (base or {}).get('scope_arg')
+        if not ctx or not arg or arg not in (ctx.get('dist'), ctx.get('track')):
+            return None
+        duty = 1.0                  # 条件が合っている間はずっと効く
+    # 出走メンバーに依存する範囲は、この場では判定できないので採用しない
     # （呼び出し側が「反映しなかった効果」として警告に回す）
-    if scope in ('aptitude', 'same_species', 'variance'):
+    elif scope in ('same_species', 'variance'):
         return None
     return {k: 1.0 + (float(m) - 1.0) * duty for k, m in sp['mult'].items()}
 
@@ -2045,7 +2056,7 @@ def item_scope_table(spec=None):
     return out
 
 
-def item_mults_from_row(r, cols, spec=None):
+def item_mults_from_row(r, cols, spec=None, ctx=None):
     """貼り付け1行の装備・お守り → (倍率, 反映できなかった説明)。
 
     購入ページが「表示値＝個体値＋特訓＋装備品。**倍率・条件スキルはレース中に適用**」と
@@ -2065,7 +2076,7 @@ def item_mults_from_row(r, cols, spec=None):
         # ⚠ ラベル（『首位の呪い：』）を落とすと ITEM_EFFECT_CATALOG が引けず、
         #    説明文からの推測（＝常時・duty 1.0）に落ちる。図鑑30種のうち11種が
         #    そのまま過大評価になる（首位の呪い 0.49% → 6.2%、12倍）。丸ごと渡す。
-        m = item_effect_spec(v, kv, spec)
+        m = item_effect_spec(v, kv, spec, ctx)
         if m:
             for k, x in m.items():
                 mult[k] = mult.get(k, 1.0) * float(x)
@@ -2182,7 +2193,8 @@ def parse_unified(text, spec=None):
             win_odds = pd.to_numeric(str(r.get('単勝オッズ', '')).strip(), errors='coerce')
             spc = str(r.get('成体種', '') or '').strip()
             mine = pd.to_numeric(r.get('自分の購入額', np.nan), errors='coerce')
-            _im, _isk = item_mults_from_row(r, cols, spec)
+            _im, _isk = item_mults_from_row(r, cols, spec,
+                                            {'dist': dist, 'track': track})
             item_skipped += _isk
             horses.append({
                 'my_amount': (float(mine) if pd.notna(mine) else None),
