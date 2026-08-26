@@ -773,6 +773,14 @@ def regression_tests():
     check('P19 autopilot は配分口数ぶん買う（3連単は1リクエスト10口まで）',
           'let leftU = pk.k || 1;' in _ap and 'Math.min(leftU, 10)' in _ap)
 
+    # エッジが大きいことは異常ではない（プールが薄いほど初期プール金の比率が上がる）。
+    # 2026/08/26 まで +300%超でレースごと中止しており、R2120 で一番おいしい組を捨てた。
+    # 知らせるだけにして、購入は止めないこと。
+    check('P19 autopilot はエッジの大きさで購入を止めない',
+          'WARN_EDGE' in _ap and 'MAX_SANE_EDGE' not in _ap
+          and 'は異常 → このレースは中止' not in _ap,
+          'ログで知らせるだけ')
+
     # カウントダウンは毎秒動くこと（render() は20秒に1回しか回らないので別立て）
     check('P19 autopilot のカウントダウンは毎秒更新する',
           'function renderClock()' in _ap
