@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.6.0';
+const AP_VER = '1.7.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -310,6 +310,17 @@ async function loadBalance() {
       + `（${((M.defaults || {}).bankroll || 1200000).toLocaleString()} rrc）`, '#ffb74d');
 }
 const bankroll = () => BANKROLL || (M.defaults || {}).bankroll || 1200000;
+// ---- キャリーオーバー（誰も3連単を当てずに繰り越された金）----
+// 繰越金は**プールには入っているが誰も賭けていない金**。実際に賭けられた総額
+// BASE = プール − 初期金 − CO で、ここを引かないとオッズ取得の打ち切りが
+// 永久に効かず、全2,730組を舐めてしまう（締切30秒前には間に合わない）。
+// キーは bm.js と同じ。購入ページは同一オリジンなので、どちらで測っても共有される。
+const coKey = () => 'oasis_co_' + AUTH.guild;
+const getCO = () => Math.max(0, Math.round(Number(localStorage.getItem(coKey())) || 0));
+function setCO(v) {
+  const n = Math.max(0, Math.round(v || 0));
+  if (n) localStorage.setItem(coKey(), String(n)); else localStorage.removeItem(coKey());
+}
 // 1レースのリスク上限。Streamlit は「資金の10%」だが、オートパイロットは
 // **所持金に関係なく RACE_BUDGET まで**（ゲーム上限の 3連単20口＋単勝100口 ＝ 30万）。
 // 配分関数は max_risk_frac × bankroll でしか上限を受け取らないので、
@@ -335,10 +346,11 @@ async function findRace() {
 //   未取得の組には1口も入っていない ＝ 残りは全部未成立。
 // 賭け金は必ず1口の倍数なので、残りが1口未満になった時点で打ち切ってよい。
 // PAR=20 は bm.js の実測（api.oasis.red のスループット上限）。上げても速くならない。
-async function fetchOdds(sid, pets, combo, pool, unit) {
+async function fetchOdds(sid, pets, combo, pool, unit, maxReq) {
   const out = new Map();
   const SEED = (M.trifecta_pool_seed == null ? 200000 : M.trifecta_pool_seed);
-  const BASE = Math.max(pool - SEED, 0);
+  const CO = getCO();
+  const BASE = Math.max(pool - SEED - CO, 0);
   const PAR = 20;
   const queue = combo.slice();
   let seenAmt = 0, cut = 0;
@@ -356,10 +368,20 @@ async function fetchOdds(sid, pets, combo, pool, unit) {
     seenAmt = 0;
     for (const od of out.values()) seenAmt += Math.round(pool / od / unit) * unit;
     if (BASE > 0 && BASE - seenAmt < unit) break;
-    if (cut >= CFG.ODDS_MAX_REQ) {
+    if (cut >= maxReq) {
       log(`R${sid}: オッズ ${cut}組で打ち切りました（残 ${Math.max(BASE - seenAmt, 0).toLocaleString()} rrc）`,
           '#ffb74d');
       break;
+    }
+  }
+  // 全組を舐め切ったのに残額がある ＝ その残りは賭け金ではない ＝ キャリーオーバー。
+  // 覚えておけば次からは打ち切りが効く。下見の回は時間があるのでここまで来られる。
+  if (!queue.length) {
+    const found = Math.max(Math.round((pool - SEED - seenAmt) / unit) * unit, 0);
+    if (found !== CO) {
+      setCO(found);
+      log(`R${sid}: 🎯 キャリーオーバーを ${found.toLocaleString()} rrc と確定しました`
+          + `（全${cut}組を確認）。次からはここを引いて早く打ち切ります`, '#e2b96f');
     }
   }
   return out;
@@ -402,7 +424,7 @@ async function analyseRace(sid, info, canBuy) {
   const raceLeft = Math.max(0, Math.min(CFG.RACE_BUDGET, CFG.DAILY_BUDGET - ST.spent));
   if (raceLeft <= 0) { log(`R${sid}: 本日の予算を使い切りました`, '#ffb74d'); return null; }
   const triPicks = triOk
-    ? await analyseTrifecta(sid, pets, combo, U_, Math.floor(raceLeft / U_))
+    ? await analyseTrifecta(sid, pets, combo, U_, Math.floor(raceLeft / U_), canBuy)
     : { picks: [], cost: 0 };
   if (!triOk) log(`R${sid}: ${n}頭 → 3連単なし（8頭未満）。単勝だけ出します`, '#888');
   // 単勝プールの実測はここで。試し買いでオッズが動くので、
@@ -430,14 +452,16 @@ async function analyseRace(sid, info, canBuy) {
 //   ② 余った口数を未成立組（誰も賭けていない組）へ unformed_sleeve_picks で回す
 // どちらも model.js が Python と同じ式を持ち、parity_test で数値一致を検証している。
 // 1口ずつ均等に置く旧実装は「EV最大の配分」ではなかったので捨てた。
-async function analyseTrifecta(sid, pets, combo, U_, unitsLeft) {
+async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
   const none = { picks: [], cost: 0 };
   const n = pets.length;
   if (n < (M.min_field_trifecta || 8)) { log(`R${sid}: ${n}頭 → 3連単なし`, '#888'); return none; }
   if (unitsLeft < 1) { log(`R${sid}: 予算が残っておらず3連単は見送り`, '#ffb74d'); return none; }
   const pool0 = ((await jget(`${API}/api/trifecta/pool?guild=${AUTH.guild}&schedule_id=${sid}`)) || {}).pool || 0;
   const SEED = (M.trifecta_pool_seed == null ? 200000 : M.trifecta_pool_seed);
-  const BASE = Math.max(pool0 - SEED, 0);
+  const CO = getCO();
+  const BASE = Math.max(pool0 - SEED - CO, 0);
+  if (CO) log(`R${sid}: キャリーオーバー ${CO.toLocaleString()} rrc を差し引いて計算します`, '#888');
   // 表示が 0 でも初期プール金は実在する（1口入った瞬間に SEED+1口 に飛ぶ）。
   // 0 のまま計算すると未成立の実効オッズが 1.0 になり、一番おいしい場面を捨てる。
   const P = pool0 > 0 ? pool0 : SEED;
@@ -445,7 +469,12 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft) {
   // プールが初期金のまま ＝ 賭け0件 ＝ 全組が未成立。賭け金は必ず1口の倍数なので
   // BASE < 1口 なら誰も賭けていない。オッズは全部 null が返るだけなので取りに行かない。
   let oddsRaw = new Map();
-  if (BASE >= U_) oddsRaw = await fetchOdds(sid, pets, combo, P, U_);
+  // 下見（締切まで時間がある回）は上限を外して全組舐める。そこで CO を確定させ、
+  // 締切30秒前の本番では引いた BASE で早く打ち切れるようにする。
+  if (BASE >= U_) {
+    oddsRaw = await fetchOdds(sid, pets, combo, P, U_,
+                              canBuy ? CFG.ODDS_MAX_REQ : combo.length);
+  }
   else log(`R${sid}: 賭け0件（プール ${pool0.toLocaleString()}）→ オッズ取得を省略`, '#888');
 
   let odds = oddsRaw;

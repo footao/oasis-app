@@ -837,6 +837,19 @@ def regression_tests():
           and '締切まで残り' in _ap,
           'LEAD_SEC を詰めすぎていないか実測で分かるようにする')
 
+    # キャリーオーバー中は BASE に届かず打ち切りが効かない。下見（時間のある回）で
+    # 全組舐めて CO を確定し、締切30秒前の本番ではそれを引いて早く打ち切る。
+    check('P20 autopilot は CO を引いて BASE を出す',
+          'const BASE = Math.max(pool - SEED - CO, 0);' in _ap
+          and 'const BASE = Math.max(pool0 - SEED - CO, 0);' in _ap)
+    check('P20 autopilot は下見で全組舐めて CO を確定する',
+          'canBuy ? CFG.ODDS_MAX_REQ : combo.length' in _ap
+          and 'if (!queue.length) {' in _ap and 'setCO(found);' in _ap,
+          '本番は上限つき、下見は上限なし')
+    check('P20 autopilot と bm.js は CO の保存先を共有する',
+          "'oasis_co_' + AUTH.guild" in _ap and "COKEY='oasis_co_'+G" in _bm15,
+          '購入ページは同一オリジンなのでどちらで測っても効く')
+
     # カウントダウンは毎秒動くこと（render() は20秒に1回しか回らないので別立て）
     check('P19 autopilot のカウントダウンは毎秒更新する',
           'function renderClock()' in _ap
