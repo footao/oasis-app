@@ -827,6 +827,16 @@ def regression_tests():
           and 'D.max_risk_frac' not in _ap,
           '3連単20口＋単勝100口 ＝ 30万 に届く')
 
+    # LEAD_SEC を詰めるなら監視間隔も詰めないと、窓に入ってから待たされて
+    # 解析に使える時間が LEAD_SEC より短くなる（20秒間隔 + LEAD_SEC=30 で最短10秒）。
+    check('P19 autopilot の監視間隔は LEAD_SEC より十分短い',
+          'LEAD_SEC: 30,' in _ap and 'setInterval(() => tick(false), 5000)' in _ap,
+          '窓の外はリクエストを投げないので短くしても負荷は増えない')
+    check('P19 autopilot は解析にかかった秒数と締切までの残りを出す',
+          'const took = (Date.now() - t0) / 1000;' in _ap
+          and '締切まで残り' in _ap,
+          'LEAD_SEC を詰めすぎていないか実測で分かるようにする')
+
     # カウントダウンは毎秒動くこと（render() は20秒に1回しか回らないので別立て）
     check('P19 autopilot のカウントダウンは毎秒更新する',
           'function renderClock()' in _ap
@@ -861,6 +871,35 @@ def regression_tests():
           set(['item_scope', 'item_key_alias', 'trifecta_seed_bug_active', 'defaults',
                'win_pool_seed', 'win_max_total_units'])
           <= set(oc.export_model_json(_b7).keys()))
+
+    # --- P20: キャリーオーバー（誰も3連単を当てずに繰り越された金）---
+    # 繰越金は**賭け金ではないがプールには入っている**。BASE から引かないと
+    # seenAmt が永久に BASE に届かず、打ち切りが効かず全2,730組を舐める。
+    check('P20 bm.js は BASE からキャリーオーバーを引く',
+          'const BASE=Math.max(pool0-SEED-CO,0);' in _bm15
+          and "localStorage.getItem(COKEY)" in _bm15,
+          '引かないと打ち切りが永久に効かない')
+    check('P20 bm.js は全組舐めたら残りをキャリーオーバーとして確定する',
+          'coFound=Math.max(Math.round((pool0-SEED-seenAmt)/UNIT)*UNIT,0);' in _bm15
+          and 'if(!queue.length&&!regimeBad){' in _bm15,
+          '途中で打ち切れた回は queue が残るので確定しない')
+    check('P20 bm.js は co= を出力し、手で入れ直せる',
+          '`co=${CO}`' in _bm15 and 'const editCO=' in _bm15 and 'coBtn.onclick=editCO;' in _bm15)
+    # Σ(1/od) の判定も CO を引かないとどちらの式にも合わず unknown に落ちる
+    _P20, _S20, _CO20 = 1_400_000, oc.TRIFECTA_POOL_SEED, 500_000
+    _bets20 = [(_P20 - _S20 - _CO20) * f for f in (0.5, 1 / 3, 1 / 6)]
+    _fix20 = [_P20 / x for x in _bets20]
+    check('P20 キャリーオーバーを渡さないとレジームを判定できない',
+          oc.check_seed_regime(_P20, _fix20)[0] == 'unknown')
+    check('P20 キャリーオーバーを渡せば修正済みと判定できる',
+          oc.check_seed_regime(_P20, _fix20, carryover=_CO20)[0] == 'fixed',
+          f'Σ={oc.check_seed_regime(_P20, _fix20, carryover=_CO20)[1]:.4f}')
+    # 貼り付けの co= を読めること
+    _t20 = _t7.replace('pool=0', 'pool=1400000\nco=500000')
+    _r20 = oc.analyze(_t20, _b7, {'dist': 'マイル', 'track': '芝'})
+    check('P20 貼り付けの co= を読む',
+          any('キャリーオーバー' in m for m in _r20['messages']),
+          [m for m in _r20['messages'] if 'キャリーオーバー' in m][:1])
 
     check('P17 bm.js はプールが初期金のままなら1リクエストも投げない',
           'const noBets = !(pool0 > 0) || BASE < UNIT;' in _bm15,

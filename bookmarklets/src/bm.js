@@ -1,7 +1,7 @@
 (async () => {
 // このファイルの版。ローダー経由で本当に最新が読めているかを目視で確かめるため、
 // 完了バッジの末尾に出す。古い版が読まれていたらここの数字が古いまま出る。
-const BM_VER='3.15.3';
+const BM_VER='3.16.0';
 const B='https://api.oasis.red';
 const q=new URLSearchParams(location.search);
 const G=q.get('guild'), S=q.get('race')||q.get('schedule_id'), U=q.get('user');
@@ -205,7 +205,14 @@ try{
  // 賭け金の見積もりだけ P 基準に変える。もし前提が外れていると seen が過大になり
  // **早く止まりすぎて「金が乗っている組」を未成立と誤判定する**ので、
  // 最後に Σ(P/od) > BASE になっていないか検算して、超えていたら赤で警告する。
- const SEED=200000, UNIT=10000, BASE=Math.max(pool0-SEED,0);   // 2026/08/25 30万→20万
+ const SEED=200000, UNIT=10000;   // 2026/08/25 初期プール金 30万→20万
+ // キャリーオーバー。誰も3連単を当てなかった回のプールが次に繰り越される。
+ // **繰越金は誰も賭けていない金**なので、BASE（＝実際に賭けられた総額）から引く。
+ // 引かないと seenAmt が BASE に永久に届かず、打ち切りが効かずに全2,730組を舐める。
+ // 値は「前回の全組取得で余った額」を自動で覚える。ボタンを押せば手で直せる。
+ const COKEY='oasis_co_'+G;
+ let CO=Math.max(0,Math.round(Number(localStorage.getItem(COKEY))||0));
+ const BASE=Math.max(pool0-SEED-CO,0);
  // 賭け金は必ず1口(10,000rrc)の倍数。表示オッズは小数2桁に丸められているので
  // P/od をそのまま足すと端数が出て「残 238,806rrc」のような有り得ない表示になる。
  // 口数に丸め直すと**端数が消えるうえに打ち切りも正確になる**（誤差の積み上げが要らない）。
@@ -282,6 +289,15 @@ try{
    btn.textContent=`🏇 3連単 ${cut}/${combos.length} 取得中`
      +(BASE>0?`（残 ${left.toLocaleString()}rrc = ${left/UNIT}口）`:'');
  }
+ // 全組を舐め切ったのに残額がある ＝ その残りは賭け金ではない ＝ キャリーオーバー。
+ // 次回からこれを BASE から引くので、打ち切りがまた効くようになる。
+ // （途中で打ち切れた回は queue が残るので、この判定には入らない）
+ let coFound=0;
+ if(!queue.length&&!regimeBad){
+   coFound=Math.max(Math.round((pool0-SEED-seenAmt)/UNIT)*UNIT,0);
+   if(coFound!==CO){localStorage.setItem(COKEY,String(coFound));}
+   CO=coFound;
+ }
  // 残った分は上の判定で「1口も入っていない」ことが確定しているので未成立として出す。
  // 出力の書式は今までと同じ（「未取得」という状態は作らない）。
  const rest=queue.map(([a,b,x])=>
@@ -304,6 +320,9 @@ try{
    // 単勝は【1レース合計100口】が上限。試し買いの有無に関わらず、いま自分が
    // 何口入れているかを必ず出す（予想側で残り枠を計算するのに要る）。
    `win_own=${Math.round(ownWin)}`,
+   // キャリーオーバーは**賭け金ではないがプールには入っている**ので、
+   // 払戻プールの計算に要る。0 のときも出して「測って0だった」と区別できるようにする。
+   ...(CO>0||coFound>0?[`co=${CO}`]:[]),
    ...(failed.length?[`取得失敗=${failed.length}`]:[]),'',
    '=== 出走馬一覧 ===',horseHeader,...horseRows,'',
    '=== パッシブ効果 ===','パッシブ,コード,説明',...effRows,'',
@@ -316,6 +335,29 @@ try{
  // その場合は消えないボタンにして、**新しいタップの中で**コピーし直す。
  let copied=true;
  try{await navigator.clipboard.writeText(clip);}catch(e){copied=false;}
+ // キャリーオーバーを手で入れ直す口。自動で覚えた値がズレていたらここで直す。
+ // 次に取得したときから反映される（この回のオッズは取得済みなので変わらない）。
+ const editCO=()=>{
+   const v=prompt('キャリーオーバー額(rrc)。誰も3連単を当てずに繰り越された金額です。\n'
+     +'0 か空欄で解除。次回の取得から反映します。',String(CO));
+   if(v===null)return;
+   const n2=Math.max(0,Math.round(Number(v)||0));
+   if(n2)localStorage.setItem(COKEY,String(n2)); else localStorage.removeItem(COKEY);
+   alert(n2?`キャリーオーバーを ${n2.toLocaleString()}rrc にしました。`
+     :'キャリーオーバーを解除しました。');
+   CO=n2;
+ };
+ // バッジ本体は「タップでコピー」の受け皿に使うので、CO の編集は別ボタンにする。
+ const coBtn=document.createElement('div');
+ Object.assign(coBtn.style,{position:'fixed',top:'12px',right:'12px',zIndex:'100000',
+   background:'#1a1a2e',color:'#9a9aa8',padding:'10px 12px',borderRadius:'8px',
+   fontFamily:'sans-serif',fontSize:'13px',fontWeight:'600',cursor:'pointer',
+   border:'1px solid #555',boxShadow:'0 4px 12px rgba(0,0,0,.4)'});
+ coBtn.textContent='CO\u270e';
+ coBtn.title='キャリーオーバー額を手で入れ直す';
+ coBtn.onclick=editCO;
+ document.body.appendChild(coBtn);
+ btn.style.top='58px';   // バッジを下にずらして重ならないようにする
  let warn=unknown.size?` ⚠未知コード:${[...unknown].join('/')}`:'';
  if(failed.length){warn+=` ⚠取得失敗${failed.length}件 → 貼らずに再実行してください`;
    console.warn('Oasis: オッズ取得に失敗した組',failed);}
@@ -337,6 +379,7 @@ try{
  const stat=`v${BM_VER} | ${n}頭(2枠${n2}) | スキル${effRows.length}種 | 3連単${withOdds.length}件`
    +(noBets?`(プール0のため取得省略)`:`(${cut}/${total}点取得)`)
    +` | プール${poolAmt.toLocaleString()}rrc`
+   +(CO>0?` | CO${CO.toLocaleString()}rrc${coFound?'(実測)':'(前回値)'}`:'')
    +(wp?` | 単勝プール${Math.round(wp.pool).toLocaleString()}rrc(試買${wp.delta.toLocaleString()})`:'')
    +(ownWin?` | 単勝購入済${Math.round(ownWin/1000)}口/100`:'')
    +(bal==null?'':` | 残高${bal.toLocaleString()}rrc`);
@@ -344,7 +387,7 @@ try{
  btn.style.background=(failed.length||regimeBad)?'#b71c1c':(unknown.size?'#e65100':'#1b5e20');btn.style.color='#fff';
  btn.style.borderColor=failed.length?'#ef5350':(unknown.size?'#ff9800':'#4caf50');
  const done=()=>{btn.textContent=`✅ ${stat} | コピー完了${warn}`;
-   setTimeout(()=>btn.remove(),bad?12000:7000);};
+   setTimeout(()=>{btn.remove();coBtn.remove();},bad?12000:7000);};
  if(copied){done();}
  else{
    Object.assign(btn.style,{cursor:'pointer',maxWidth:'92vw',whiteSpace:'normal',lineHeight:'1.5'});

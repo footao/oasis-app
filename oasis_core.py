@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.17.0'
+CORE_VERSION = '3.18.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -2152,9 +2152,11 @@ def parse_unified(text, spec=None):
     pm = re.search(r'^pool=(\d+)', text, re.M)
     if pm:
         pool = int(pm.group(1))
+    # `co` はキャリーオーバー。bm.js が「全組のオッズを舐めても残った額」として実測する。
+    # 賭け金ではないがプールには入っているので、払戻プールの計算に要る。
     for key in ('balance', 'win_pool', 'win_pool_before', 'win_pool_delta', 'win_pool_n',
                 'win_pool_spread', 'win_pool_err', 'win_own', 'win_pool_min',
-                'win_pool_exact'):
+                'win_pool_exact', 'co'):
         m = re.search(rf'^{key}=([0-9.]+)', text, re.M)
         if m:
             meta[key] = float(m.group(1))
@@ -2263,22 +2265,29 @@ ASSUME_POOL_IS_PAYOUT = False
 TRIFECTA_SEED_BUG_ACTIVE = False
 
 
-def check_seed_regime(pool, odds_iter, seed=TRIFECTA_POOL_SEED):
+def check_seed_regime(pool, odds_iter, seed=TRIFECTA_POOL_SEED, carryover=0):
     """Σ(1/od) から「初期金がオッズに入っているか」を判定する。
 
     バグ時   : od = (P − S)/bet  → Σ(1/od) = Σbet/(P−S) = 1.00
     修正後   : od = P/bet        → Σ(1/od) = Σbet/P     = (P−S)/P
     全組そろっている時だけ意味がある（早期打ち切りの部分和では判定できない）。
+
+    carryover: 誰も当てずに繰り越された金額。**賭け金ではないがプールには入っている**
+      ので、実際の Σbet は P − S − CO になる。渡さないと Σ(1/od) がどちらの式にも
+      一致せず 'unknown' に落ちる（キャリーオーバー中は必ずそうなる）。
     -> (regime, inv_sum, expected_fixed) / regime は 'buggy' / 'fixed' / 'unknown'
     """
     vals = [float(o) for o in odds_iter if o and float(o) > 0 and math.isfinite(float(o))]
     if pool <= 0 or not vals:
         return 'unknown', None, None
     inv = sum(1.0 / o for o in vals)
-    exp_fixed = (pool - seed) / pool if pool > seed else None
+    co = max(float(carryover or 0), 0.0)
+    bets = pool - seed - co
+    exp_fixed = bets / pool if bets > 0 else None
+    exp_buggy = bets / (pool - seed) if pool > seed and bets > 0 else 1.0
     if exp_fixed is None or exp_fixed > 0.95:
         return 'unknown', inv, exp_fixed          # 初期金がプールに対して小さすぎて区別不能
-    if abs(inv - 1.0) < 0.03:
+    if abs(inv - exp_buggy) < 0.03:
         return 'buggy', inv, exp_fixed
     if abs(inv - exp_fixed) < 0.03:
         return 'fixed', inv, exp_fixed
@@ -2888,6 +2897,11 @@ def analyze(raw_text, bundle, settings=None):
 
     n = len(horses)
     res['n_field'] = n
+    _meta_co = ((horses[0].get('_meta') or {}).get('co') if horses else None)
+    if _meta_co:
+        res['messages'].append(
+            f'🎯 キャリーオーバー {float(_meta_co):,.0f} rrc を貼り付けデータから取り込みました'
+            '（全組のオッズを舐めても残った額＝誰も賭けていない繰越金）。')
     _bal = ((horses[0].get('_meta') or {}).get('balance') if horses else None)
     if _bal:
         res['balance'] = float(_bal)
@@ -3281,7 +3295,8 @@ def analyze(raw_text, bundle, settings=None):
             # 崩れたまま補正なしで計算すると払戻を P/(P−S) 倍**過小**評価する＝買い控えるので
             # 損はしないが、美味しい場面を見逃す。逆向きの間違い（過大評価）より安全だが警告は出す。
             if co_trust:
-                _rg, _inv, _exp = check_seed_regime(P_total, csv_odds_raw.values())
+                _rg, _inv, _exp = check_seed_regime(P_total, csv_odds_raw.values(),
+                                                  carryover=(_meta_co or 0))
                 if _rg == 'buggy' and not TRIFECTA_SEED_BUG_ACTIVE:
                     res['messages'].append(
                         f'⚠ Σ(1/od)={_inv:.3f} は「初期金がオッズに入っていない」旧仕様の値です'
@@ -3295,7 +3310,9 @@ def analyze(raw_text, bundle, settings=None):
                         '今のままだと払戻を**過大**評価して、エッジの無い買い目に張ります。')
             payout_pool, cinfo = resolve_payout_pool(
                 P_total, csv_odds_raw.values(),      # ← 補正前。補正後だとCOを二重に足す
-                manual_co=s.get('carryover_rrc'), trust=co_trust,
+                # 手で入れた値が最優先。無ければ貼り付けの実測値（bm.js の co=）。
+                manual_co=(s.get('carryover_rrc') or _meta_co or None),
+                trust=co_trust,
                 seed=TRIFECTA_POOL_SEED)
             inv, reg = cinfo['inv_sum'], cinfo['regime']
             if reg == 'seeded':

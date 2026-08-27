@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.5.0';
+const AP_VER = '1.6.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -30,7 +30,9 @@ try {
 const CFG = {
   RACE_HOURS: [9, 12, 15, 18, 21, 23],   // 開催時刻（時）
   RACE_MINUTE: 0,
-  LEAD_SEC: 60,             // 締切の何秒前を狙って解析・購入するか
+  // 締切の何秒前から解析・購入するか。遅いほど直前のオッズで買えるが、
+  // 解析が締切をまたぐと買い逃す。実測の所要時間はログの「解析 N.Ns」で見られる。
+  LEAD_SEC: 30,
   WINDOW_SEC: 900,          // 発走何秒前から準備を始めるか
   // 口数は「EVが最大になる配分」を貪欲法で決める（Python の allocate_units_stable と同じ）。
   // 上限はゲームの上限そのまま（3連単20口・単勝100口）。下限は置かない。
@@ -843,7 +845,14 @@ async function tick(force) {
       // 購入していいのは「締切 LEAD_SEC 前の窓の中」だけ。
       // 窓の外は下見（買い目を出すだけ・試し買いもしない）。
       const canBuy = inBuyWindow();
+      const t0 = Date.now();
       const pl = await analyseRace(r.sid, r.info, canBuy);
+      const took = (Date.now() - t0) / 1000;
+      const leftNow = (nextRaceTime() - Date.now()) / 1000;
+      if (canBuy) {
+        log(`R${r.sid}: 解析 ${took.toFixed(1)}s / 締切まで残り ${leftNow.toFixed(1)}s`,
+            leftNow < 5 ? '#ffb74d' : '#888');
+      }
       // 下見で見送っても done にはしない（窓の中で取り直す機会を残す）。
       if (pl) showPending(pl); else if (canBuy) ST.done[r.sid] = { t: Date.now(), n: 0 };
       saveState(ST);
@@ -905,7 +914,10 @@ try {
       + 'レースごとにリンクを開いて実行してください。', '#ffb74d');
   } else {
     log(`監視開始。${CFG.RACE_HOURS.join('/')}時の発走${CFG.LEAD_SEC}秒前に解析します。`, '#e2b96f');
-    window.__oasisAutopilotTimer = setInterval(() => tick(false), 20000);
+    // 窓の外では時計を見て return するだけでリクエストは投げないので、
+    // 間隔を詰めても負荷は増えない。20秒だと窓に入ってから最大20秒待たされ、
+    // LEAD_SEC=30 では解析に使える時間が10秒まで縮む。
+    window.__oasisAutopilotTimer = setInterval(() => tick(false), 5000);
   }
 } catch (e) { log('起動できません: ' + esc(e.message), '#ef5350'); }
 })();
