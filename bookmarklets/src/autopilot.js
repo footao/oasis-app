@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.3.0';
+const AP_VER = '1.5.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -38,7 +38,7 @@ const CFG = {
   TRI_MAX_UNITS: null,      // null = model.json の max_total_units（20口）
   EDGE_MIN: 0.10,
   MODEL_WEIGHT: 1.0,        // λ。model.json の defaults から上書きされる
-  MIN_PROB: 0.02,
+  MIN_PROB: 0.003,        // model.json の defaults から上書きされる
   WIN_ON: true,             // 単勝も買う（NPCの初期金があるのでプールが常にある）
   // 単勝プールの実測（試し買い）。1口ずつ買って前後のオッズの動きから逆算する。
   // **これは実際の購入**なので、アーム中（＝人が購入を許可したレース）でしか走らせない。
@@ -46,7 +46,10 @@ const CFG = {
   WIN_PROBE: true,
   WIN_PROBE_MAX_UNITS: 5,   // 0 にすると実測しない（初期金を下限として使う）
   WIN_PROBE_TARGET_ERR: 0.04,
-  ODDS_TOP_N: 40,           // オッズを取る上位点数（全点だと最大3360リクエストになる）
+  // オッズ取得の上限リクエスト数。通常は「金が乗っている組を取り切った」時点で
+  // 打ち切るのでここまで行かない（bm.js の実測で平均300件前後）。
+  // 締切60秒前に走るので、最悪でも往復が終わる数に抑えておく。
+  ODDS_MAX_REQ: 1200,
   // レースサイトとAPIのドメインが違うことがあるので候補を順に試す。
   // 先に成功したものを使い、以降はそれを覚える。
   API_BASES: ['https://api.oasis.red', null],   // null = レースページと同じオリジン
@@ -269,7 +272,9 @@ async function loadModel() {
   const D = M.defaults || {};
   if (D.model_weight != null) CFG.MODEL_WEIGHT = +D.model_weight;
   if (D.edge_min != null) CFG.EDGE_MIN = +D.edge_min;
-  if (D.min_prob != null) CFG.MIN_PROB = Math.max(+D.min_prob, 0.02);
+  // Streamlit と同じ値をそのまま使う。0.02 に切り上げていたので、
+  // 小さい確率の組だけオートパイロットが取りこぼしていた。
+  if (D.min_prob != null) CFG.MIN_PROB = +D.min_prob;
   if (CFG.UNFORMED_MAX_UNITS == null) CFG.UNFORMED_MAX_UNITS = +(D.unformed_max_units || 10);
   if (CFG.TRI_MAX_UNITS == null) CFG.TRI_MAX_UNITS = +(M.max_total_units || 20);
   if (CFG.MIN_POOL == null) CFG.MIN_POOL = M.trifecta_pool_seed || 200000;
@@ -284,6 +289,31 @@ async function loadModel() {
       '#81c784');
 }
 
+// ---- 手元資金 ----
+// Streamlit 側は貼り付けの `balance=` を BANKROLL に自動反映している。
+// ここを固定値のままにすると**分数ケリーの上限だけが両者でズレる**。
+let BANKROLL = null;
+async function loadBalance() {
+  try {
+    const d = await jget(`${API}/api/balance?user=${AUTH.user}&guild=${AUTH.guild}`
+      + `&race=${AUTH.sid || 0}&token=${encodeURIComponent(AUTH.token)}`);
+    const v = d && (typeof d.balance === 'number' ? d.balance : Number(d.balance));
+    if (Number.isFinite(v) && v > 0) {
+      BANKROLL = v;
+      log(`手元資金 ${v.toLocaleString()} rrc を反映しました`, '#888');
+      return;
+    }
+  } catch (e) {}
+  log('残高を取れないので既定の手元資金で計算します'
+      + `（${((M.defaults || {}).bankroll || 1200000).toLocaleString()} rrc）`, '#ffb74d');
+}
+const bankroll = () => BANKROLL || (M.defaults || {}).bankroll || 1200000;
+// 1レースのリスク上限。Streamlit は「資金の10%」だが、オートパイロットは
+// **所持金に関係なく RACE_BUDGET まで**（ゲーム上限の 3連単20口＋単勝100口 ＝ 30万）。
+// 配分関数は max_risk_frac × bankroll でしか上限を受け取らないので、
+// RACE_BUDGET / bankroll を渡して等価にする。資金が増えても賭け額は増えない。
+const riskFrac = () => CFG.RACE_BUDGET / bankroll();
+
 // ---- 受付中のレースを探す ----
 async function findRace() {
   const from = AUTH.sid || 0;
@@ -297,16 +327,38 @@ async function findRace() {
 }
 
 // ---- 上位N点のオッズだけ取得 ----
-async function fetchOdds(sid, pets, combo) {
-  const out = new Map(), want = combo.slice(0, CFG.ODDS_TOP_N);
-  for (let i = 0; i < want.length; i += 10) {
-    const got = await Promise.all(want.slice(i, i + 10).map(async c => {
+// bm.js と同じ打ち切り規則。上位N組で止めると、Streamlit（貼り付けは全組そろう）と
+// **候補集合も市場の正規化も変わってしまう**ので、金が乗っている組は取り切る。
+//   取得済みの Σ(プール/オッズ) が実際の投票総額 BASE に届いたら、
+//   未取得の組には1口も入っていない ＝ 残りは全部未成立。
+// 賭け金は必ず1口の倍数なので、残りが1口未満になった時点で打ち切ってよい。
+// PAR=20 は bm.js の実測（api.oasis.red のスループット上限）。上げても速くならない。
+async function fetchOdds(sid, pets, combo, pool, unit) {
+  const out = new Map();
+  const SEED = (M.trifecta_pool_seed == null ? 200000 : M.trifecta_pool_seed);
+  const BASE = Math.max(pool - SEED, 0);
+  const PAR = 20;
+  const queue = combo.slice();
+  let seenAmt = 0, cut = 0;
+  while (queue.length) {
+    const batch = queue.splice(0, PAR);
+    const got = await Promise.all(batch.map(async c => {
       const d = await jget(`${API}/api/trifecta/odds?guild=${AUTH.guild}&schedule_id=${sid}`
         + `&first=${pets[c.i].pet_id}&second=${pets[c.j].pet_id}&third=${pets[c.k].pet_id}`);
       return { c, od: (d && typeof d.odds === 'number') ? d.odds : null };
     }));
+    cut += batch.length;
     got.forEach(g => { if (g.od) out.set(`${g.c.i}-${g.c.j}-${g.c.k}`, g.od); });
-    await sleep(120);
+    // 表示オッズは小数2桁に丸められているので、プール/オッズをそのまま足すと端数が出る。
+    // 口数に丸め直すと端数が消えて打ち切りも正確になる（bm.js と同じ）。
+    seenAmt = 0;
+    for (const od of out.values()) seenAmt += Math.round(pool / od / unit) * unit;
+    if (BASE > 0 && BASE - seenAmt < unit) break;
+    if (cut >= CFG.ODDS_MAX_REQ) {
+      log(`R${sid}: オッズ ${cut}組で打ち切りました（残 ${Math.max(BASE - seenAmt, 0).toLocaleString()} rrc）`,
+          '#ffb74d');
+      break;
+    }
   }
   return out;
 }
@@ -391,7 +443,7 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft) {
   // プールが初期金のまま ＝ 賭け0件 ＝ 全組が未成立。賭け金は必ず1口の倍数なので
   // BASE < 1口 なら誰も賭けていない。オッズは全部 null が返るだけなので取りに行かない。
   let oddsRaw = new Map();
-  if (BASE >= U_) oddsRaw = await fetchOdds(sid, pets, combo);
+  if (BASE >= U_) oddsRaw = await fetchOdds(sid, pets, combo, P, U_);
   else log(`R${sid}: 賭け0件（プール ${pool0.toLocaleString()}）→ オッズ取得を省略`, '#888');
 
   let odds = oddsRaw;
@@ -408,9 +460,10 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft) {
     log(`R${sid}: オッズを x${f.toFixed(3)} 補正（初期プール金 ${SEED.toLocaleString()} rrc）`, '#888');
   }
   // 市場の暗黙確率は**補正前**オッズで出し、Python と同じく 1.0 でクランプする。
-  // 取得できた ODDS_TOP_N 組だけで正規化すると、その40組の確率が強制的に合計1になり、
+  // 一部の組だけで正規化すると、その組の確率が強制的に合計1になり、
   // 実際には市場の一部しか持っていないのに q が膨らむ（12頭立てで約1.8倍、
-  // エッジ +0.06 過大 = EDGE_MIN と同じ大きさ）。オッズ取得が落ちるほど悪化する。
+  // エッジ +0.06 過大 = EDGE_MIN と同じ大きさ）。上の打ち切りで金の乗った組は
+  // 取り切っているので、ここは Streamlit（全組そろい）と同じ値になる。
   let inv = 0; for (const od of oddsRaw.values()) inv += 1 / od;
   const norm = Math.max(inv, 1.0);
   const lam = CFG.MODEL_WEIGHT, D = M.defaults || {};
@@ -419,7 +472,7 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft) {
 
   // --- ① 成立組 ---
   const byKey = new Map(), pOf = new Map(), cands = [];
-  for (const c of combo.slice(0, CFG.ODDS_TOP_N)) {
+  for (const c of combo) {
     const k = key3(c), od = odds.get(k);
     if (!od || od <= 1 || c.p < CFG.MIN_PROB) continue;
     const odRaw = oddsRaw.get(k) || od;
@@ -437,8 +490,8 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft) {
   }
   const budgetU = Math.min(CFG.TRI_MAX_UNITS, unitsLeft);
   const alloc = OasisModel.allocateUnitsStable(
-    cands, P, D.bankroll || 1200000, D.kelly_fraction || 0.25,
-    D.max_risk_frac || 0.10, CFG.EDGE_MIN,
+    cands, P, bankroll(), D.kelly_fraction || 0.25,
+    riskFrac(), CFG.EDGE_MIN,
     { budget: budgetU, stakeUnit: U_, maxPerCombo: M.max_units || 20 });
   const picks = [];
   let used = 0;
@@ -614,11 +667,11 @@ function analyseWin(sid, pets, winP, measuredPool, budgetLeft) {
   const key = pets.map((h, i) => `${i}:${h.display_name || h.name}`);
   const [picks] = OasisModel.winBetPicksPool(
     key, pBet, fl.odds_eff, pool,
-    D.bankroll || 1200000, D.kelly_fraction || 0.25, D.win_edge_min || 0.15,
+    bankroll(), D.kelly_fraction || 0.25, D.win_edge_min || 0.15,
     { stakeUnit: WU,
       totalUnits: Math.min(left, M.win_max_total_units || 100,
                            Math.floor(Math.max(budgetLeft, 0) / WU)),
-      maxUnits: M.win_max_units || 100, riskCapFrac: D.max_risk_frac || 0.10,
+      maxUnits: M.win_max_units || 100, riskCapFrac: riskFrac(),
       myUnits: mine.map(a => Math.floor(a / WU)), unbet: fl.unbet });
   if (!picks || !picks.length) { log(`R${sid}: 単勝に+EVの馬なし`, '#888'); return none; }
   const out = picks.map(r => {
@@ -837,6 +890,7 @@ try {
         + '新しいリンクを開き直すか、下の欄に貼り直してください。', '#ffb74d');
   }
   await resolveApi();
+  await loadBalance();
   render();
   window.__oasisAutopilotClock = setInterval(renderClock, 1000);
   // iOS はタブが背面に回るとタイマーが止まるので、定期監視には頼れない。

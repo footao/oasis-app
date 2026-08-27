@@ -801,6 +801,32 @@ def regression_tests():
           and 'M.trained_at' in _ap,
           'AP_VER は手で上げる / trained_at は build_autopilot.py が自動で入れる')
 
+    # Streamlit と同じ推奨を出すための3点。ここがズレると同じレースで別の買い目が出る。
+    check('P19 autopilot は金の乗った組を取り切る（上位N打ち切りをしない）',
+          'ODDS_TOP_N' not in _ap and 'if (BASE > 0 && BASE - seenAmt < unit) break;' in _ap,
+          'Streamlit は貼り付けで全組そろうので、候補集合と市場の正規化を合わせる')
+    check('P19 autopilot は実残高を手元資金に使う',
+          'async function loadBalance()' in _ap and 'cands, P, bankroll(),' in _ap
+          and 'bankroll(), D.kelly_fraction' in _ap,
+          'Streamlit は貼り付けの balance= を BANKROLL に自動反映している')
+    check('P19 autopilot は min_prob を切り上げない',
+          'CFG.MIN_PROB = +D.min_prob;' in _ap and 'Math.max(+D.min_prob' not in _ap,
+          '0.02 に切り上げていたので小さい確率の組を取りこぼしていた')
+    # トークンは購入と残高照会にだけ使い、ログには出さないこと
+    check('P19 autopilot はトークンをログに出さない',
+          'AUTH.token' in _ap
+          and not any(f'{x}' in _ap for x in ('log(`' + '${AUTH.token}',
+                                              'esc(AUTH.token)')),
+          'token は fetch の中だけ')
+
+    # 1レースのリスク上限は資金比ではなく RACE_BUDGET 固定（資金が増えても賭け額は増えない）
+    check('P19 autopilot の1レース上限は所持金に依らず RACE_BUDGET',
+          'const riskFrac = () => CFG.RACE_BUDGET / bankroll();' in _ap
+          and 'riskFrac(), CFG.EDGE_MIN,' in _ap
+          and 'riskCapFrac: riskFrac(),' in _ap
+          and 'D.max_risk_frac' not in _ap,
+          '3連単20口＋単勝100口 ＝ 30万 に届く')
+
     # カウントダウンは毎秒動くこと（render() は20秒に1回しか回らないので別立て）
     check('P19 autopilot のカウントダウンは毎秒更新する',
           'function renderClock()' in _ap
