@@ -144,7 +144,10 @@ const OasisModel = (() => {
     }
     const bud = staminaBudget(e, dist, M);
     f['スタミナ余り'] = bud[2] / 10;
-    f['スタミナ不足'] = bud[1] / 10;
+    // 不足は**必要量に対する割合**。同じ「不足5」でも短距離ではレースの2割を
+    // 空っぽで走ることになり、長距離では6%で済む。×5 は列の桁を合わせるため。
+    // （Python: _row_features と同じ式。timeline 2,159頭の実測に基づく）
+    f['スタミナ不足'] = 5 * bud[1] / Math.max(bud[0], 1);
     const cond = h.condition || '普通';
     f['好調'] = cond === '好調' ? 1 : 0;
     f['不調'] = cond === '不調' ? 1 : 0;

@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.18.0'
+CORE_VERSION = '3.19.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -1070,8 +1070,15 @@ def _row_features(speed, power, stamina, condition, passives, dist, track, spec,
     for d in DIST_LIST:
         m = 1.0 if dist == d else 0.0
         f += [m, m * sp, m * pw, m * st, m * lsp, m * lpw, m * lst]
-    _, _short, _sur = stamina_budget(e, dist)
-    f += [_sur / 10.0, _short / 10.0]           # 他の線形項と桁を揃える
+    _need, _short, _sur = stamina_budget(e, dist)
+    # 不足は**必要量に対する割合**で入れる。同じ「不足5」でも、必要量28の短距離では
+    # レースの2割を空っぽで走ることになり、必要量85の長距離では6%で済む。
+    # timeline 2,159頭の実測: 枯渇割合 = 0.859×(不足/必要)（相関0.945）、
+    # 枯渇中の区間速度は −35%。よって log スコアへの影響は約 −0.46×(不足/必要)。
+    # 「不足/10」の固定尺度だと短距離で罰が約3分の1になっていた。
+    # ×5 は列の桁を『不足/10』時代と揃えるため。リッジは尺度に依存するので、
+    # ここを変えると同じ alpha でも正則化の強さが変わってしまう。
+    f += [_sur / 10.0, 5.0 * _short / max(_need, 1.0)]
     f += [1.0 if condition == '好調' else 0.0, 1.0 if condition == '不調' else 0.0]
     pset = set(passives or ())
     for p in unspecced_passives(spec):
@@ -1936,7 +1943,17 @@ ITEM_EFFECT_CATALOG = {
     '苦痛慣れ':       dict(alias='粘り腰'),             # 倍率に落ちない → 学習
     '魂継ぎ':         dict(alias='緊急回復'),           # 残20%以下で一度だけ回復
     '黄昏の護り':     dict(alias='末脚'),               # 終盤のパワー
-    '夜明けの護り':   dict(alias='ロケットスタート'),   # 序盤（スタミナ評価）
+    # 『序盤のスタミナ評価が N% 上昇』。2026/08/27 に実データ5頭レース（20区間）で
+    # 検証したが、timeline のどの項目にも差が出なかった:
+    #   開始スタミナ/ST は passive だけで決まる（DG有無で同一 0.894 vs 0.891）
+    #   序盤の stamina_cost 同一（ういえれ中距離 3.287 → 3.296）
+    #   序盤 rating の残差は +2.0/+2.0/-1.2/-2.3/+3.5% と符号がばらつく
+    # 『スタミナ評価』は timeline に出ない内部量らしい。
+    # なお現状この効果は**倍率に落ちていない**（説明文が『スタミナが』ではなく
+    # 『スタミナ評価が』なので _PCT_RE に掛からず、mult 空 → None を返す）。
+    # 結果として「反映しなかった効果」に回るが、上の実測どおり差が出ないので
+    # そのままにしてある。効果が判明したら alias ではなく実測 duty を入れること。
+    '夜明けの護り':   dict(alias='ロケットスタート'),   # 序盤（スタミナ評価・未実証）
     '先導祈願':       dict(scope='conditional', duty=0.079),  # 先頭の間
     '逆境祈願':       dict(scope='conditional', duty=0.527),  # 下位半分の間
     '禍福転倒':       dict(scope='conditional', duty=0.183),  # 残スタミナ25%以下

@@ -885,6 +885,54 @@ def regression_tests():
                'win_pool_seed', 'win_max_total_units'])
           <= set(oc.export_model_json(_b7).keys()))
 
+    # --- P21: スタミナ不足は「必要量に対する割合」で効かせる ---
+    # 同じ不足5でも、必要量29の短距離ではレースの17%を空っぽで走ることになり、
+    # 必要量85の長距離では6%で済む。「不足/10」の固定尺度では短距離の罰が約1/3だった。
+    # timeline 2,159頭の実測: 枯渇割合 = 0.859×(不足/必要)（相関0.945）、
+    # 枯渇中の区間速度は −35% → log スコアへの影響は約 −0.46×(不足/必要)。
+    _sp21 = oc.load_passive_spec(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'passive_spec.json'))
+    def _feat21(dist, sp, pw, st, ps):
+        rows = pd.DataFrame([dict(name='x', species='x', speed=sp, power=pw, stamina=st,
+                                  condition='普通', passives=ps, dist=dist, track='芝',
+                                  same_species=False)])
+        X = oc.build_features(rows, _sp21)
+        return dict(zip(oc.feature_names(_sp21), X[0]))
+    # 特徴量が「5×不足÷必要」そのものであること（尺度合わせの×5込み）
+    def _budget21(dist, sp, pw, st, ps):
+        e = oc.effective_stats(sp, pw, st, ps, dist, '芝', _sp21)
+        return oc.stamina_budget(e, dist)
+    _need_s, _sh_s, _ = _budget21('短距離', 160, 50, 20, ())
+    _f_s = _feat21('短距離', 160, 50, 20, ())
+    check('P21 特徴量は 5×不足÷必要',
+          abs(_f_s['スタミナ不足'] - 5 * _sh_s / _need_s) < 1e-9,
+          f'不足{_sh_s:.2f} / 必要{_need_s:.2f} → {_f_s["スタミナ不足"]:.4f}')
+    # **同じ不足量**なら、必要量が小さい短距離のほうが強く効くこと。
+    # 不足5になる実効STを距離ごとに逆算して比べる。
+    def _feat_at_short21(dist, target=5.0):
+        lo, hi = 1.0, 400.0
+        for _ in range(60):
+            mid = (lo + hi) / 2
+            n, sh, _x = _budget21(dist, 100, 100, mid, ())
+            if sh > target: lo = mid
+            else: hi = mid
+        n, sh, _x = _budget21(dist, 100, 100, lo, ())
+        return 5 * sh / n, n, sh
+    _v_s, _n_s, _q_s = _feat_at_short21('短距離')
+    _v_l, _n_l, _q_l = _feat_at_short21('長距離')
+    check('P21 同じ不足量なら短距離のほうが強く効く',
+          _v_s > _v_l * 1.5,
+          f'短距離 必要{_n_s:.0f} 不足{_q_s:.1f} → {_v_s:.3f} / '
+          f'長距離 必要{_n_l:.0f} 不足{_q_l:.1f} → {_v_l:.3f}')
+    # 足りている馬は 0
+    _f_ok = _feat21('短距離', 160, 50, 90, ('パワー大アップ',))
+    check('P21 スタミナが足りていれば不足は0', _f_ok['スタミナ不足'] == 0.0)
+    # 学習した係数が機構ベースの推定（-0.46/割合、×5 列なので -0.092）に近いこと
+    _c21 = dict(zip(_b7['feature_names'], _b7['model'].coef_))['スタミナ不足']
+    check('P21 学習係数が実測の機構ベース推定と整合する',
+          -0.20 < _c21 < -0.03,
+          f'係数 {_c21:+.4f}（÷5 で {_c21/5:+.4f}/割合。機構ベースの推定 -0.092/-0.462）')
+
     # --- P20: キャリーオーバー（誰も3連単を当てずに繰り越された金）---
     # 繰越金は**賭け金ではないがプールには入っている**。BASE から引かないと
     # seenAmt が永久に BASE に届かず、打ち切りが効かず全2,730組を舐める。
