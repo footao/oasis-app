@@ -850,6 +850,15 @@ def regression_tests():
           "'oasis_co_' + AUTH.guild" in _ap and "COKEY='oasis_co_'+G" in _bm15,
           '購入ページは同一オリジンなのでどちらで測っても効く')
 
+    # 買い目には 的中率 / 買う前のオッズ / 買ったあとの実効オッズ を並べる。
+    # 実効odだけだと「自分の金でどれだけ薄まったか」が見えない。
+    check('P19 autopilot の買い目に的中率と前後のオッズを出す',
+          '的中 ${fx(p.p * 100, 1)}%' in _ap and '的中 ${fx(w.p * 100, 1)}%' in _ap
+          and 'od ${fx(od, d)} → 実効' in _ap,
+          '未成立の組は買う前のオッズが存在しないので「（未成立）」表記')
+    check('P19 autopilot は買う前のオッズを pick に持たせる',
+          'od: odds.get(k) || null' in _ap and 'od: r.unbet ? null : r.odds' in _ap)
+
     # カウントダウンは毎秒動くこと（render() は20秒に1回しか回らないので別立て）
     check('P19 autopilot のカウントダウンは毎秒更新する',
           'function renderClock()' in _ap

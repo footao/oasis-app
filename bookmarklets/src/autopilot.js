@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.7.0';
+const AP_VER = '1.8.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -530,6 +530,7 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
     const c = byKey.get(k);
     if (!c || !v[0]) continue;
     picks.push({ c: c, k: v[0], eff: v[2], edge: pOf.get(k) * v[2] - 1, p: c.p,
+                 od: odds.get(k) || null,       // 買う前の表示オッズ
                  names: [c.i, c.j, c.k].map(nameOf) });
     used += v[0];
   }
@@ -554,7 +555,7 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
       const ids = names.map(x => idxOf.get(x));
       if (ids.some(x => x == null)) continue;
       picks.push({ c: { i: ids[0], j: ids[1], k: ids[2], p: p }, k: k, eff: effOd,
-                   edge: p * effOd - 1, p: p, unformed: true, names: names });
+                   edge: p * effOd - 1, p: p, unformed: true, od: null, names: names });
       used += k;
     }
   }
@@ -710,7 +711,8 @@ function analyseWin(sid, pets, winP, measuredPool, budgetLeft) {
     return { i, name: pets[i].display_name || pets[i].name,
              // ⚠ winBetPicksPool が返すキーは Python と同じ `eff_od`。
              //   `eff` にすると undefined になって .toFixed() で落ちる（実際に落とした）。
-             units: r.units, eff: r.eff_od, edge: r.edge, p: r.p };
+             units: r.units, eff: r.eff_od, edge: r.edge, p: r.p,
+             od: r.unbet ? null : r.odds };   // 買う前の表示オッズ（未投票は null）
   }).filter(x => x.i >= 0 && pets[x.i]);
   return { picks: out, cost: out.reduce((a, x) => a + x.units * WU, 0) };
 }
@@ -720,13 +722,20 @@ function showPending(pl) {
   PENDING = pl;
   const WU = pl.winUnit;
   const rows = [];
+  // od は「買う前の表示オッズ」、実効odは「自分の口数を入れて薄まったあと」。
+  // パリミュチュエルなので必ず 実効od ≤ od になる。ここが縮むほど自分の金が
+  // プールを押し上げている＝入れすぎ、の目安になる。
+  const odCell = (od, eff, d) => (od == null
+    ? `実効od <b>${fx(eff, d)}</b>（未成立）`
+    : `od ${fx(od, d)} → 実効 <b>${fx(eff, d)}</b>`);
   for (const p of pl.picks) {
-    rows.push(`　3連単 ${esc(p.names.join(' → '))} ${p.k || 1}口　実効od ${fx(p.eff, 1)}`
-      + (p.unformed ? '（未成立）' : '')
+    rows.push(`　3連単 ${esc(p.names.join(' → '))} ${p.k || 1}口`
+      + `　的中 ${fx(p.p * 100, 1)}%　${odCell(p.od, p.eff, 1)}`
       + `　<span style="color:#81c784">+${fx(p.edge * 100, 0)}%</span>`);
   }
   for (const w of (pl.win || [])) {
-    rows.push(`　単勝 ${esc(w.name)} ${w.units}口　実効od ${fx(w.eff, 2)}`
+    rows.push(`　単勝 ${esc(w.name)} ${w.units}口`
+      + `　的中 ${fx(w.p * 100, 1)}%　${odCell(w.od, w.eff, 2)}`
       + `　<span style="color:#81c784">+${fx(w.edge * 100, 0)}%</span>`);
   }
   const armed = isArmed() && pl.canBuy;
@@ -819,14 +828,16 @@ async function doBuy() {
       u => ({ user: AUTH.user, guild: AUTH.guild, race: pl.sid,
               first: pl.pets[pk.c.i].pet_id, second: pl.pets[pk.c.j].pet_id,
               third: pl.pets[pk.c.k].pet_id, amount: u * pl.unit, token: AUTH.token }),
-      `3連単 ${pk.names.join('→')} +${fx(pk.edge * 100, 0)}%`,
+      `3連単 ${pk.names.join('→')} 的中${fx(pk.p * 100, 1)}% `
+      + `od${fx(pk.od, 1)}→${fx(pk.eff, 1)} +${fx(pk.edge * 100, 0)}%`,
       pk.k || 1, pl.unit, CFG.TRI_PER_REQ);
   }
   for (const w of (pl.win || [])) {
     await buyUnits(`${API}/api/bet`,
       u => ({ user: AUTH.user, guild: AUTH.guild, race: pl.sid,
               pet_id: pl.pets[w.i].pet_id, amount: u * pl.winUnit, token: AUTH.token }),
-      `単勝 ${w.name} +${fx(w.edge * 100, 0)}%`,
+      `単勝 ${w.name} 的中${fx(w.p * 100, 1)}% `
+      + `od${fx(w.od, 2)}→${fx(w.eff, 2)} +${fx(w.edge * 100, 0)}%`,
       w.units, pl.winUnit, CFG.WIN_PER_REQ);
   }
   ST.done[pl.sid] = { t: Date.now(), n: bought };
