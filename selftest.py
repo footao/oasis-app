@@ -828,10 +828,29 @@ def regression_tests():
           '3連単20口＋単勝100口 ＝ 30万 に届く')
 
     # LEAD_SEC を詰めるなら監視間隔も詰めないと、窓に入ってから待たされて
-    # 解析に使える時間が LEAD_SEC より短くなる（20秒間隔 + LEAD_SEC=30 で最短10秒）。
+    # 解析に使える時間が LEAD_SEC より短くなる。値をベタ書きせず、
+    # 「間隔 ≤ LEAD_SEC の1/5」という関係で見る（手で詰めても壊れないように）。
+    _lead = int(re.search(r'LEAD_SEC:\s*(\d+)', _ap).group(1))
+    _poll = int(re.search(r'setInterval\(\(\) => tick\(false\), (\d+)\)', _ap).group(1))
     check('P19 autopilot の監視間隔は LEAD_SEC より十分短い',
-          'LEAD_SEC: 30,' in _ap and 'setInterval(() => tick(false), 5000)' in _ap,
+          _poll / 1000.0 <= _lead / 5.0,
+          f'LEAD_SEC={_lead}s / 監視間隔={_poll}ms。'
           '窓の外はリクエストを投げないので短くしても負荷は増えない')
+    # 起動したら自動でアームする（チェックを手で入れなくても買う）。
+    # アームは次の1レースぶんだけ有効なので、放置で走り続けることはない。
+    # 単勝の合計上限は100口。試し買いで先に何口か入っていても、合計が100に届くこと。
+    # totalUnits に「残り枠」を渡すと winBetPicksPool 内の -購入済み と二重になり、
+    # 100 - 購入済み 口で止まる（試し買い1口 → 99口）。
+    check('P19 autopilot は単勝の合計上限に残り枠ではなく上限そのものを渡す',
+          'ownUnits + Math.floor(Math.max(budgetLeft, 0) / WU)' in _ap
+          and 'totalUnits: Math.min(left,' not in _ap,
+          'winBetPicksPool が中で購入済みを引くので、ここで引くと二重になる')
+
+    check('P19 autopilot は起動時に自動でアームする',
+          'if (!isArmed()) { arm(); }' in _ap
+          and '自動購入をオンに設定しました。' in _ap,
+          'token がレースごとに失効するので効くのは次の1レースだけ')
+
     check('P19 autopilot は解析にかかった秒数と締切までの残りを出す',
           'const took = (Date.now() - t0) / 1000;' in _ap
           and '締切まで残り' in _ap,

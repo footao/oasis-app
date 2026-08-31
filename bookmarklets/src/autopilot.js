@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.8.0';
+const AP_VER = '1.9.1';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -32,7 +32,8 @@ const CFG = {
   RACE_MINUTE: 0,
   // 締切の何秒前から解析・購入するか。遅いほど直前のオッズで買えるが、
   // 解析が締切をまたぐと買い逃す。実測の所要時間はログの「解析 N.Ns」で見られる。
-  LEAD_SEC: 30,
+  // 2026/08/29 実運用で 30→13 に短縮（実測の解析時間に対して余裕があったため）。
+  LEAD_SEC: 13,
   WINDOW_SEC: 900,          // 発走何秒前から準備を始めるか
   // 口数は「EVが最大になる配分」を貪欲法で決める（Python の allocate_units_stable と同じ）。
   // 上限はゲームの上限そのまま（3連単20口・単勝100口）。下限は置かない。
@@ -701,8 +702,14 @@ function analyseWin(sid, pets, winP, measuredPool, budgetLeft) {
     key, pBet, fl.odds_eff, pool,
     bankroll(), D.kelly_fraction || 0.25, D.win_edge_min || 0.15,
     { stakeUnit: WU,
-      totalUnits: Math.min(left, M.win_max_total_units || 100,
-                           Math.floor(Math.max(budgetLeft, 0) / WU)),
+      // ⚠ totalUnits は「このレースの**合計**上限」であって残り枠ではない。
+      //   winBetPicksPool は中で budget = min(totalUnits, riskUnits) - 購入済み を
+      //   やるので、ここに残り枠（left）を渡すと購入済みを二重に引いてしまう。
+      //   試し買いで1口入れると 100 → 99口 で止まっていたのはこれ（Python 側は
+      //   WIN_MAX_TOTAL_UNITS をそのまま渡していて正しい）。
+      //   金額の上限も同じ理由で購入済みぶんを足し戻してから渡す。
+      totalUnits: Math.min(M.win_max_total_units || 100,
+                           ownUnits + Math.floor(Math.max(budgetLeft, 0) / WU)),
       maxUnits: M.win_max_units || 100, riskCapFrac: riskFrac(),
       myUnits: mine.map(a => Math.floor(a / WU)), unbet: fl.unbet });
   if (!picks || !picks.length) { log(`R${sid}: 単勝に+EVの馬なし`, '#888'); return none; }
@@ -933,13 +940,17 @@ try {
   // 貼り付けは要らない。**アームだけ**が人の意思表示として残る。
   if (AUTH_FROM_URL) {
     log(`購入ページのリンクから認証を取り込みました（R${AUTH.sid || '?'}）。`
-        + '自動で買うなら上のチェックを入れてください。', '#81c784');
+        + '自動購入をオンに設定しました。', '#81c784');
   } else {
     log('保存済みのリンクを使います。トークンが失効していたら'
         + '新しいリンクを開き直すか、下の欄に貼り直してください。', '#ffb74d');
   }
   await resolveApi();
   await loadBalance();
+  // 起動＝人がこのレースのために開いた、とみなして自動でアームする。
+  // token はレースごとに失効するので、アームが効くのは次の1レースぶんだけ。
+  // 解除したいときは上のチェックを外す（disarm）。
+  if (!isArmed()) { arm(); }
   render();
   window.__oasisAutopilotClock = setInterval(renderClock, 1000);
   // iOS はタブが背面に回るとタイマーが止まるので、定期監視には頼れない。
@@ -955,9 +966,9 @@ try {
   } else {
     log(`監視開始。${CFG.RACE_HOURS.join('/')}時の発走${CFG.LEAD_SEC}秒前に解析します。`, '#e2b96f');
     // 窓の外では時計を見て return するだけでリクエストは投げないので、
-    // 間隔を詰めても負荷は増えない。20秒だと窓に入ってから最大20秒待たされ、
-    // LEAD_SEC=30 では解析に使える時間が10秒まで縮む。
-    window.__oasisAutopilotTimer = setInterval(() => tick(false), 5000);
+    // 間隔を詰めても負荷は増えない。窓に入ってから最初の tick までの待ちが
+    // そのまま解析時間の目減りになるので、LEAD_SEC=13 なら1秒間隔で見る。
+    window.__oasisAutopilotTimer = setInterval(() => tick(false), 1000);
   }
 } catch (e) { log('起動できません: ' + esc(e.message), '#ef5350'); }
 })();
