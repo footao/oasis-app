@@ -712,6 +712,8 @@ def regression_tests():
                               'bookmarklets', 'src', 'bm.js'), encoding='utf-8').read()
     _ap = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             'bookmarklets', 'src', 'autopilot.js'), encoding='utf-8').read()
+    _model_js = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'bookmarklets', 'src', 'model.js'), encoding='utf-8').read()
     # 折り返しの位置が変わるたびに落ちるので、空白を潰してから探す。
     _ap = re.sub(r'\s+', ' ', _ap)
     # オッズのバグ補正を無条件に掛けると EV を 1.5倍ほど過大評価する（race 2097 で修正済みを確認）
@@ -863,6 +865,24 @@ def regression_tests():
           '時${String(t.getMinutes()).padStart(2' in _ap
           and "toLocaleString('ja-JP')}" not in _ap,
           '14:59:49 が <:59:1482…> に化ける')
+
+    # 先頭でだけ効く装備（首位の呪い）は、発動割合が馬によって桁違いに違う。
+    # timeline 2,369頭の実測: 1着馬 72% / 2着 9.7% / 8着以下 1%未満。
+    _lead = '首位の呪い：先頭の間、スピードが6.5%上昇するがスタミナ消費も増加'
+    _m0 = oc.item_effect_spec(_lead, 'gear_leader_curse', oc.default_spec(), None)
+    _m1 = oc.item_effect_spec(_lead, 'gear_leader_curse', oc.default_spec(),
+                              {'p_win': 0.85, 'n_field': 13})
+    _m2 = oc.item_effect_spec(_lead, 'gear_leader_curse', oc.default_spec(),
+                              {'p_win': 0.02, 'n_field': 13})
+    check('P22 首位の呪いは1着確率で duty が変わる',
+          _m1['speed'] > _m0['speed'] * 1.02 and abs(_m2['speed'] - _m0['speed']) < 0.01,
+          f"本命 ×{_m1['speed']:.4f} / 一律 ×{_m0['speed']:.4f} / 人気薄 ×{_m2['speed']:.4f}")
+    check('P22 素の倍率と1パス目の duty を持ち帰る（2パス目で割り戻す）',
+          _m0.get('_lead_speed') == 1.065 and _m0.get('_lead_duty0') == 0.079)
+    check('P22 lead_adjusted_base が model.js と両方にある',
+          'def lead_adjusted_base(' in inspect.getsource(oc)
+          and 'function leadAdjustedBase(' in _model_js
+          and 'OasisModel.leadAdjustedBase(' in _ap)
 
     check('P19 autopilot は購入まとめに解析秒数を出す',
           'if (pl) pl.took = took;' in _ap and '解析 ${fx(pl.took, 1)}s' in _ap)

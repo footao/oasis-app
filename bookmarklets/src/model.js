@@ -81,9 +81,22 @@ const OasisModel = (() => {
     }
     const mult = pctMults(desc);
     if (!Object.keys(mult).length) return push();
-    const duty = aptDuty != null ? aptDuty
+    let duty = aptDuty != null ? aptDuty
       : Math.min(Math.max(c.duty == null ? 1 : c.duty, 0), 1);
     const out = {};
+    // 先頭の間だけ効く装備（首位の呪い）。発動割合は馬によって桁違いに違うので、
+    // 1着確率が分かっていればそこから引き直す（Python: LEAD_DUTY_A/B と同じ式）。
+    // 分からない1パス目は c.duty のまま。素の倍率と使った duty を持ち帰り、
+    // 2パス目（leadAdjustedBase）で割り戻す。
+    if (c.scope === 'lead') {
+      if (ctx && ctx.p_win != null && ctx.n_field) {
+        const a = M.lead_duty_a == null ? 0.655 : M.lead_duty_a;
+        const b = M.lead_duty_b == null ? 0.345 : M.lead_duty_b;
+        duty = Math.min(1, a * ctx.p_win + b / ctx.n_field);
+      }
+      for (const k of Object.keys(mult)) out['_lead_' + k] = mult[k];
+      out._lead_duty0 = duty;
+    }
     for (const k of Object.keys(mult)) out[k] = 1 + (mult[k] - 1) * duty;
     return out;
   }
@@ -91,12 +104,47 @@ const OasisModel = (() => {
   // 1頭ぶんの装備＋お守りを畳み込んで {speed,power,stamina} に掛ける。
   // ⚠ ステータスの**加算**ぶん（SP+25 など）は API の speed に既に入っている。
   //    ここで掛けるのは**倍率**だけ（Python: parse_unified と同じ切り分け）。
+  // 「先頭の間だけ効く」装備の duty を1着確率から引き直して、もう一度予測する。
+  // Python: lead_adjusted_base と同じ。1パス目で (1+(m-1)*duty0) を掛けてあるので、
+  // それで割ってから新しい duty を掛け直す。戻り値 [新しいbase, 引き直した馬の記録]。
+  function leadAdjustedBase(horses, base, dist, track, M, sigma, nSim) {
+    const idx = [];
+    for (let i = 0; i < horses.length; i++) if (horses[i].item_lead) idx.push(i);
+    if (!idx.length) return [base, null];
+    const win = simulateTrifecta(base, horseSigmas(horses, sigma, M),
+                                 nSim || 20000, 42, false).win;
+    let tot = 0; for (const w of win) tot += w;
+    if (!(tot > 0)) return [base, null];
+    const n = horses.length;
+    const a = M.lead_duty_a == null ? 0.655 : M.lead_duty_a;
+    const b = M.lead_duty_b == null ? 0.345 : M.lead_duty_b;
+    const hs2 = horses.map(h => Object.assign({}, h));
+    const notes = [];
+    for (const i of idx) {
+      const L = horses[i].item_lead, p = win[i] / tot;
+      const d0 = +L.duty0 || 0, d1 = Math.min(1, a * p + b / n);
+      for (const k of ['speed', 'power', 'stamina']) {
+        const m = +L[k] || 1;
+        if (m === 1) continue;
+        hs2[i][k] = horses[i][k] * (1 + (m - 1) * d1) / (1 + (m - 1) * d0);
+      }
+      notes.push({ name: horses[i].name, p: p, d0: d0, d1: d1 });
+    }
+    return [predictBase(hs2, dist, track, M), notes];
+  }
+
   function applyItems(h, M, skipped, ctx) {
     let sig = 1;
     for (const it of [h.equipment, h.charm]) {
       const m = itemMult(it, M, skipped, ctx);
       if (!m) continue;
       if (m._sigma != null) { sig *= m._sigma; continue; }
+      if (m._lead_duty0 != null) {
+        h.item_lead = { duty0: m._lead_duty0 };
+        for (const k of ['speed','power','stamina']) {
+          if (m['_lead_' + k]) h.item_lead[k] = m['_lead_' + k];
+        }
+      }
       for (const k of ['speed','power','stamina']) if (m[k]) h[k] = h[k] * m[k];
     }
     h.item_sigma_mult = sig;
@@ -217,7 +265,10 @@ const OasisModel = (() => {
 
   // --- モンテカルロ（Python: simulate_trifecta）---
   // 上位3頭だけ分かればよいので全体ソートはしない（16頭でも軽い）。
-  function simulateTrifecta(base, sigmas, nSim, seed) {
+  // needCombo=false で組の集計（Map への出し入れ）を省く。単勝の勝率しか要らない
+  // 呼び出しではここが処理時間の大半（Python の need_combo と同じ）。
+  function simulateTrifecta(base, sigmas, nSim, seed, needCombo) {
+    const wantCombo = needCombo !== false;
     const n = base.length;
     const randn = makeRng(seed == null ? 42 : seed);
     const win = new Float64Array(n);
@@ -234,7 +285,7 @@ const OasisModel = (() => {
         else if (c < 0 || x > val[c]) { c = i; }
       }
       win[a]++;
-      if (n >= 3) {
+      if (wantCombo && n >= 3) {
         const k = (a * n + b) * n + c;
         combo.set(k, (combo.get(k) || 0) + 1);
       }
@@ -585,7 +636,7 @@ const OasisModel = (() => {
 
   return { effectiveStats, sigmaMultiplier, rowFeatures, predictBase,
            sameSpeciesFlags, simulateTrifecta, horseSigmas, makeRng,
-           pctMults, itemMult, applyItems,
+           pctMults, itemMult, applyItems, leadAdjustedBase,
            marketWinProb, diagnoseOddsFloor, winBetPicksPool,
            optimalUnitsEv, allocateUnitsStable, unformedSleevePicks };
 })();

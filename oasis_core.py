@@ -900,6 +900,18 @@ EXCLUDED_RACES = {
 # σ 0.0254→0.0217（σは真値 0.019 前後に近づく）。11レースが該当。
 ITEM_LOG_GAP = ('2026-08-17 17:25', '2026-08-19 18:10')
 
+# 「先頭の間だけ効く」装備（首位の呪い）の duty ＝ 先頭にいる区間の割合。
+# timeline 2,369頭の実測: 1着馬 72.0% / 2着 9.7% / 3着 3.7% / 8着以下 1%未満。
+# 全馬平均は 8.7% で、これはちょうど 1/頭数（4頭なら25%、16頭なら6.25%）。
+# つまりカタログの一律 duty=0.079 は「誰がつけているか分からない馬」の期待値であって、
+# **実際に先頭を走る馬に対しては9倍の過小評価**になる。
+# レース前に分かるのは1着確率なので、そこから引き直す:
+#     先頭割合 = LEAD_DUTY_A × P(1着) + LEAD_DUTY_B × (1/頭数)     （相関 0.62）
+# 第2項は「まだ誰も抜けていない序盤は全員に等しくチャンスがある」ぶん。
+# 脚質（逃げ・差し）のパッシブを足しても改善しなかった（該当22頭・12頭、係数 -0.03）。
+LEAD_DUTY_A = 0.655
+LEAD_DUTY_B = 0.345
+
 
 def _race_time_key(date, time):
     """'2026/08/19' + '12:00' → '2026-08-19 12:00'。片方でも無ければ None。"""
@@ -1635,6 +1647,7 @@ def export_model_json(bundle, path=None):
         'phase_early': list(INTERNAL_PHASE_WEIGHTS['序盤']),
         'dist_balance': {d: list(v) for d, v in INTERNAL_DIST_BALANCE.items()},
         'odds_floor': ODDS_FLOOR, 'stake_unit': STAKE_UNIT,
+        'lead_duty_a': LEAD_DUTY_A, 'lead_duty_b': LEAD_DUTY_B,
         'trifecta_pool_seed': TRIFECTA_POOL_SEED,
         'max_total_units': MAX_TOTAL_UNITS, 'max_units': MAX_UNITS,
         'min_field_trifecta': MIN_FIELD_TRIFECTA,
@@ -1702,6 +1715,42 @@ def predict_base(bundle, horses, dist, track):
     X = build_features(rows, spec)
     p = bundle['model'].predict(X)
     return p - p.mean()
+
+
+def lead_adjusted_base(bundle, horses, base, dist, track, sigma, n_sim=20000):
+    """「先頭の間だけ効く」装備の duty を1着確率から引き直して、もう一度予測する。
+
+    duty は馬によって桁違いに違う（実測で1着馬 72% / 8着以下 1%未満）ので、
+    一律の値で計算すると本命だけ大きく過小評価になる。レース前に分かるのは
+    1着確率だけなので、まず一律 duty で1回予測 → 確率を出す → duty を引き直す。
+    装備が動かすのはスピード最大6.5%なので、1回回せばほぼ収束する（3回目はほぼ動かない）。
+
+    戻り値: (新しい base, [(馬名, P(1着), 前のduty, 後のduty), ...] または None)
+    """
+    idx = [i for i, h in enumerate(horses) if h.get('item_lead')]
+    if not idx:
+        return base, None
+    win, _ = simulate_trifecta(base, horse_sigmas(bundle, horses, sigma),
+                               n_sim=n_sim, need_combo=False)
+    tot = float(win.sum())
+    if tot <= 0:
+        return base, None
+    win = win / tot
+    n = len(horses)
+    hs2 = [dict(h) for h in horses]
+    notes = []
+    for i in idx:
+        lead = horses[i]['item_lead']
+        d0 = float(lead.get('duty0', 0.0))
+        d1 = min(1.0, LEAD_DUTY_A * float(win[i]) + LEAD_DUTY_B / n)
+        for k in ('speed', 'power', 'stamina'):
+            m = float(lead.get(k, 1.0))
+            if m == 1.0:
+                continue
+            # 1パス目で (1+(m-1)*d0) を掛けてあるので、それで割ってから d1 を掛ける
+            hs2[i][k] = horses[i][k] * (1.0 + (m - 1.0) * d1) / (1.0 + (m - 1.0) * d0)
+        notes.append((horses[i].get('name', ''), float(win[i]), d0, d1))
+    return predict_base(bundle, hs2, dist, track), notes
 
 
 def horse_sigmas(bundle, horses, sigma):
@@ -1946,7 +1995,10 @@ ITEM_EFFECT_CATALOG = {
     '血走り':         dict(scope='conditional', duty=0.183),  # 残スタミナ25%以下でスピード
     '骨砕き':         dict(scope='conditional', duty=0.183),  # 残スタミナ25%以下でパワー
     '王殺し':         dict(scope='conditional', duty=0.175),  # 先頭から20m以内の2位以下
-    '首位の呪い':     dict(scope='conditional', duty=0.079),  # 先頭の間（スタミナ消費も増）
+    # 先頭の間だけ。duty は1着確率から引き直す（LEAD_DUTY_A/B 参照）。
+    # ここの 0.079 は確率が分からないとき（図鑑の一覧など）のフォールバック。
+    # ※ スタミナ消費増（実測 発動中の区間消費 ×1.049）はまだ入れていない。
+    '首位の呪い':     dict(scope='lead', duty=0.079),
     '終焉加速':       dict(scope='conditional', duty=0.200),  # 残り300m（下の注記）
     '芝啜り':         dict(scope='aptitude', scope_arg='芝'),
     '泥啜り':         dict(scope='aptitude', scope_arg='ダート'),
@@ -2065,6 +2117,18 @@ def item_effect_spec(desc, effect_key=None, spec=None, ctx=None):
     # （呼び出し側が「反映しなかった効果」として警告に回す）
     elif scope in ('same_species', 'variance'):
         return None
+    elif scope == 'lead':
+        # 1着確率が分かっていればそこから duty を引き直す。分からない呼び出し
+        # （1パス目・図鑑の一覧）はカタログの duty をそのまま使い、素の倍率と
+        # 使った duty を `_lead_*` として持ち帰る。2パス目はこれで割り戻す。
+        pw = (ctx or {}).get('p_win')
+        nf = (ctx or {}).get('n_field')
+        if pw is not None and nf:
+            duty = min(1.0, LEAD_DUTY_A * float(pw) + LEAD_DUTY_B / float(nf))
+        out = {k: 1.0 + (float(m) - 1.0) * duty for k, m in sp['mult'].items()}
+        out.update({'_lead_' + k: float(m) for k, m in sp['mult'].items()})
+        out['_lead_duty0'] = duty
+        return out
     return {k: 1.0 + (float(m) - 1.0) * duty for k, m in sp['mult'].items()}
 
 
@@ -2242,7 +2306,14 @@ def parse_unified(text, spec=None):
                 'power': int(pw) * _im.get('power', 1.0),
                 'stamina': int(st) * _im.get('stamina', 1.0),
                 'item_sigma_mult': _im.get('_sigma', 1.0),
-                'item_mult': ({k: v for k, v in _im.items() if k != '_sigma'} or None),
+                # 先頭でだけ効く装備の**素の倍率**と1パス目で使った duty。
+                # 2パス目（lead_adjusted_base）で割り戻して引き直すのに要る。
+                'item_lead': ({k[6:]: v for k, v in _im.items()
+                               if k.startswith('_lead_') and k != '_lead_duty0'}
+                              | {'duty0': _im['_lead_duty0']}
+                              if '_lead_duty0' in _im else None),
+                'item_mult': ({k: v for k, v in _im.items()
+                               if not k.startswith('_')} or None),
                 'condition': str(r.get('コンディション', '普通')).strip(),
                 'passives': _passives_from_row(r, cols),
                 'odds': float(win_odds) if pd.notna(win_odds) else float('nan'),
@@ -3017,6 +3088,13 @@ def analyze(raw_text, bundle, settings=None):
     # 別々にシミュレーションする。1着は頑健で小さめσが合い、3連単は順番のブレが大きいため。
     base = predict_base(bundle, horses, s['dist'], s['track'])
     sigma = bundle['race_sigma']
+    # 先頭でだけ効く装備は、1パス目の1着確率から duty を引き直してもう一度予測する。
+    base, _lead_notes = lead_adjusted_base(bundle, horses, base, s['dist'], s['track'], sigma)
+    for _nm, _pw, _d0, _d1 in (_lead_notes or []):
+        res['messages'].append(
+            f'🏁 {_nm} の「先頭の間だけ」効く装備を、1着確率 {_pw*100:.0f}% から'
+            f'発動割合 {_d0*100:.1f}% → **{_d1*100:.0f}%** に引き直しました'
+            '（実測: 1着馬は72%の区間を先頭で走る）。')
     tri_sigma = float(bundle.get('tri_sigma') or sigma)
     n_sim = int(s.get('n_sim') or N_SIM)
     sig_vec = horse_sigmas(bundle, horses, sigma)

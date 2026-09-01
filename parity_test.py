@@ -101,7 +101,10 @@ def main():
     #    意図的な差（推測は race 2097 で15倍の誤りを出した実績がある）なので、
     #    検証はカタログにある30種だけを対象にする。
     # 馬場限定（芝啜り／泥啜り）は ctx の有無で答えが変わるので3通りとも回す。
-    CTXS = [None, {'dist': '短距離', 'track': '芝'}, {'dist': 'マイル', 'track': 'ダート'}]
+    # 先頭でだけ効く装備は ctx の 1着確率で duty が変わるので、強い馬・弱い馬の両方を回す。
+    CTXS = [None, {'dist': '短距離', 'track': '芝'}, {'dist': 'マイル', 'track': 'ダート'},
+            {'dist': '長距離', 'track': '芝', 'p_win': 0.85, 'n_field': 13},
+            {'dist': '短距離', 'track': 'ダート', 'p_win': 0.02, 'n_field': 16}]
     item_cases = []
     for i, (label, desc, key) in enumerate(ITEM_DESCS):
         pct = round(1.0 + (i % 9) * 0.9, 1)

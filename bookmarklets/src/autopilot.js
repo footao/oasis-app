@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.12.0';
+const AP_VER = '1.13.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -411,7 +411,18 @@ async function analyseRace(sid, info, canBuy) {
   if (fxSkipped.length) {
     log(`R${sid}: 反映しなかった効果 ${esc([...new Set(fxSkipped)].join(' / '))}`, '#ffb74d');
   }
-  const base = OasisModel.predictBase(horses, dist, track, M);
+  let base = OasisModel.predictBase(horses, dist, track, M);
+  // 先頭でだけ効く装備（首位の呪い）は、発動割合が馬によって桁違いに違う
+  // （実測: 1着馬は72%の区間を先頭、8着以下は1%未満）。1パス目の1着確率から
+  // duty を引き直してもう一度予測する。Python: lead_adjusted_base と同じ。
+  const [base2, leadNotes] = OasisModel.leadAdjustedBase(
+    horses, base, dist, track, M, M.race_sigma, 20000);
+  base = base2;
+  for (const nt of (leadNotes || [])) {
+    log(`R${sid}: 🏁 ${esc(nt.name)} の「先頭の間だけ」効く装備を、`
+      + `1着確率 ${fx(nt.p * 100, 0)}% から発動割合 ${fx(nt.d0 * 100, 1)}% → `
+      + `${fx(nt.d1 * 100, 0)}% に引き直しました`, '#e2b96f');
+  }
   // 単勝は race_sigma、3連単は tri_sigma。Python と同じ使い分け。
   const winP = OasisModel.simulateTrifecta(
     base, OasisModel.horseSigmas(horses, M.race_sigma, M), CFG.N_SIM, 42).win;
