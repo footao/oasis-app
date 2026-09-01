@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.9.2';
+const AP_VER = '1.9.1';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -32,10 +32,8 @@ const CFG = {
   RACE_MINUTE: 0,
   // 締切の何秒前から解析・購入するか。遅いほど直前のオッズで買えるが、
   // 解析が締切をまたぐと買い逃す。実測の所要時間はログの「解析 N.Ns」で見られる。
-  // 2026/08/29 実運用で 30→13、2026/08/31 に 13→10。
-  // 下限の目安: ログの「解析 N.Ns」の**最悪値 + 3秒**。これを割ると、
-  // 試し買いの金だけ入って本命の買い目が締切に間に合わない回が出る。
-  LEAD_SEC: 10,
+  // 2026/08/29 実運用で 30→13 に短縮（実測の解析時間に対して余裕があったため）。
+  LEAD_SEC: 13,
   WINDOW_SEC: 900,          // 発走何秒前から準備を始めるか
   // 口数は「EVが最大になる配分」を貪欲法で決める（Python の allocate_units_stable と同じ）。
   // 上限はゲームの上限そのまま（3連単20口・単勝100口）。下限は置かない。
@@ -190,6 +188,7 @@ ov.innerHTML = '<b style="color:#e2b96f">🛩 オートパイロット v' + AP_V
   + 'background:#0b0b14;border:1px solid #333;border-radius:6px;padding:.4rem"></div>'
   + '<div style="display:flex;gap:.4rem;margin-top:.5rem">'
   + '<button id=_now style="flex:1;padding:.6rem;background:#2e7d32;color:#fff;border:none;border-radius:5px;cursor:pointer">今すぐ解析</button>'
+  + '<button id=_cp style="padding:.6rem .7rem;background:#3949ab;color:#fff;border:none;border-radius:5px;cursor:pointer">📋 コピー</button>'
   + '<button id=_clr style="padding:.6rem .7rem;background:#444;color:#fff;border:none;border-radius:5px;cursor:pointer">ログ消去</button>'
   + '<button id=_x style="padding:.6rem .7rem;background:#7a2222;color:#fff;border:none;border-radius:5px;cursor:pointer">停止</button></div>';
 document.body.appendChild(ov);
@@ -820,34 +819,56 @@ async function doBuy() {
   // ⚠ 通信エラーのときは割り直さない（送信済みかもしれず、二重購入になる）。
   const buyUnits = async (url, mkBody, label, units, unit, chunk) => {
     if (units > chunk) {
-      if (await post(url, mkBody(units), `${label} ${units}口`, units * unit, true)) return;
+      if (await post(url, mkBody(units), `${label} ${units}口`, units * unit, true)) return units;
       log(`R${pl.sid}: ${label} ${units}口の一括購入が通らないので `
           + `${chunk}口ずつに分けます`, '#888');
     }
-    let leftU = units;
+    let leftU = units, sent = 0;
     while (leftU > 0) {
       const u = Math.min(leftU, chunk);
-      await post(url, mkBody(u), `${label} ${u}口`, u * unit);
+      if (await post(url, mkBody(u), `${label} ${u}口`, u * unit)) sent += u;
       leftU -= u;
     }
+    return sent;   // 買えた口数（通信エラーで届いたか不明なぶんも含む＝安全側）
   };
 
+  // 買えたぶんだけを積む（post が false ＝ APIに拒否された口数は入れない）。
+  const done = [];
   for (const pk of pl.picks) {
-    await buyUnits(`${API}/api/trifecta/buy`,
+    const got = await buyUnits(`${API}/api/trifecta/buy`,
       u => ({ user: AUTH.user, guild: AUTH.guild, race: pl.sid,
               first: pl.pets[pk.c.i].pet_id, second: pl.pets[pk.c.j].pet_id,
               third: pl.pets[pk.c.k].pet_id, amount: u * pl.unit, token: AUTH.token }),
       `3連単 ${pk.names.join('→')} 的中${fx(pk.p * 100, 1)}% `
       + `od${fx(pk.od, 1)}→${fx(pk.eff, 1)} +${fx(pk.edge * 100, 0)}%`,
       pk.k || 1, pl.unit, CFG.TRI_PER_REQ);
+    if (got) done.push({ kind: '3連単', name: pk.names.join('→'), u: got,
+                         unit: pl.unit, p: pk.p, eff: pk.eff, edge: pk.edge });
   }
   for (const w of (pl.win || [])) {
-    await buyUnits(`${API}/api/bet`,
+    const got = await buyUnits(`${API}/api/bet`,
       u => ({ user: AUTH.user, guild: AUTH.guild, race: pl.sid,
               pet_id: pl.pets[w.i].pet_id, amount: u * pl.winUnit, token: AUTH.token }),
       `単勝 ${w.name} 的中${fx(w.p * 100, 1)}% `
       + `od${fx(w.od, 2)}→${fx(w.eff, 2)} +${fx(w.edge * 100, 0)}%`,
       w.units, pl.winUnit, CFG.WIN_PER_REQ);
+    if (got) done.push({ kind: '単勝', name: w.name, u: got,
+                         unit: pl.winUnit, p: w.p, eff: w.eff, edge: w.edge });
+  }
+  // ---- 購入まとめ。あとで実結果と突き合わせられるように、買えた買い目だけを
+  //      的中率・実効オッズ・予測EV つきで残す。EV = 賭け金 × エッジ。
+  if (done.length) {
+    let stake = 0, ev = 0;
+    log(`━━ R${pl.sid} 購入まとめ（${new Date().toLocaleString('ja-JP')}）━━`, '#e2b96f');
+    for (const d of done) {
+      const st = d.u * d.unit, e = st * d.edge;
+      stake += st; ev += e;
+      log(`${d.kind} ${d.name} ${d.u}口 ${st.toLocaleString()}rrc`
+          + ` / 的中 ${fx(d.p * 100, 2)}% / 実効od ${fx(d.eff, 2)}`
+          + ` / EV ${e >= 0 ? '+' : ''}${Math.round(e).toLocaleString()}rrc`, '#81c784');
+    }
+    log(`合計 ${stake.toLocaleString()}rrc / 予測EV ${ev >= 0 ? '+' : ''}`
+        + `${Math.round(ev).toLocaleString()}rrc（${fx(ev / stake * 100, 1)}%）`, '#e2b96f');
   }
   ST.done[pl.sid] = { t: Date.now(), n: bought };
   disarm(`R${pl.sid} の購入が終わったのでアームを解除しました`);
@@ -929,6 +950,21 @@ $('_x').onclick = () => {
   log('停止しました（監視・カウントダウンとも止めました）', '#ffb74d');
 };
 $('_clr').onclick = () => { ST.log = []; saveState(ST); render(); };
+// ログは新しい順に持っているので、コピーは**古い順**に直して出す（読み返す用）。
+$('_cp').onclick = async () => {
+  const txt = ST.log.map(x => x.m).reverse().join('\n');
+  const b = $('_cp'), back = b.textContent;
+  const ok = () => { b.textContent = '✅ コピー'; setTimeout(() => { b.textContent = back; }, 1500); };
+  try { await navigator.clipboard.writeText(txt); ok(); return; } catch (e) {}
+  // クリップボードAPIが使えない環境（非セキュアなど）の最後の手。
+  const ta = document.createElement('textarea');
+  Object.assign(ta.style, { position: 'fixed', left: '2%', top: '8%', width: '96%',
+    height: '70%', zIndex: '99998', fontSize: '11px', fontFamily: 'monospace' });
+  ta.value = txt; document.body.appendChild(ta); ta.focus(); ta.setSelectionRange(0, txt.length);
+  let done = false; try { done = document.execCommand('copy'); } catch (e) {}
+  if (done) { ta.remove(); ok(); }
+  else { ta.title = '全選択済みです。Ctrl+C（スマホは長押し→コピー）'; }
+};
 $('_now').onclick = () => { log('手動で解析します', '#e2b96f'); tick(true); };
 
 try {

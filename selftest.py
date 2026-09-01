@@ -774,7 +774,7 @@ def regression_tests():
     # APIに**拒否されたときだけ**割る。通信エラーでは割らない（二重購入になる）。
     check('P19 autopilot はまず全口数を1リクエストで送る',
           'const buyUnits = async (url, mkBody, label, units, unit, chunk) => {' in _ap
-          and 'if (await post(url, mkBody(units), `${label} ${units}口`, units * unit, true)) return;' in _ap,
+          and 'if (await post(url, mkBody(units), `${label} ${units}口`, units * unit, true)) return units;' in _ap,
           '拒否されたら chunk 口ずつに割り直す')
     check('P19 autopilot は通信エラーでは再送しない',
           'return true; } };' in _ap.replace('\n', ' ').replace('  ', ' ')
@@ -845,6 +845,21 @@ def regression_tests():
           'ownUnits + Math.floor(Math.max(budgetLeft, 0) / WU)' in _ap
           and 'totalUnits: Math.min(left,' not in _ap,
           'winBetPicksPool が中で購入済みを引くので、ここで引くと二重になる')
+
+    # 購入後のまとめ。あとで実結果と突き合わせるので、**買えた口数だけ**を
+    # 的中率・実効オッズ・予測EV つきで残す（拒否された口数を混ぜない）。
+    check('P19 autopilot は購入後にまとめを出す',
+          '購入まとめ' in _ap and '予測EV' in _ap
+          and 'const st = d.u * d.unit, e = st * d.edge;' in _ap,
+          'EV = 賭け金 × エッジ')
+    check('P19 autopilot の buyUnits は買えた口数を返す',
+        'if (await post(url, mkBody(u), `${label} ${u}口`, u * unit)) sent += u;' in _ap
+          and 'return sent;' in _ap,
+          '拒否された口数をまとめに入れないため')
+    check('P19 autopilot にログのコピーボタンがある',
+          "$('_cp').onclick" in _ap and 'id=_cp' in _ap
+          and 'ST.log.map(x => x.m).reverse()' in _ap,
+          'ログは新しい順に持っているのでコピーは古い順に直す')
 
     check('P19 autopilot は起動時に自動でアームする',
           'if (!isArmed()) { arm(); }' in _ap
