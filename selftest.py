@@ -858,6 +858,12 @@ def regression_tests():
           and 'df_all = df_all[~_gap].copy()' in inspect.getsource(oc.train_model),
           '除外すると検証43レースで 1着的中 81.4%→83.7%、σ 0.0254→0.0217')
 
+    # Discord は `:59:` を絵文字コードとして食う。時刻にコロンを使わない。
+    check('P19 購入まとめの時刻に半角コロンを使わない',
+          '時${String(t.getMinutes()).padStart(2' in _ap
+          and "toLocaleString('ja-JP')}" not in _ap,
+          '14:59:49 が <:59:1482…> に化ける')
+
     check('P19 autopilot は購入まとめに解析秒数を出す',
           'if (pl) pl.took = took;' in _ap and '解析 ${fx(pl.took, 1)}s' in _ap)
 

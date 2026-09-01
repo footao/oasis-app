@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.11.1';
+const AP_VER = '1.12.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -861,17 +861,25 @@ async function doBuy() {
   //      的中率・実効オッズ・予測EV つきで残す。EV = 賭け金 × エッジ。
   if (done.length) {
     let stake = 0, ev = 0;
-    const lines = [`━━ R${pl.sid} 購入まとめ（${new Date().toLocaleString('ja-JP')}`
-      + (pl.took == null ? '' : ` / 解析 ${fx(pl.took, 1)}s・締切 ${CFG.LEAD_SEC}s前から`) + '）━━'];
+    // ⚠ 時刻を 14:59:49 と書くと Discord が `:59:` を絵文字コードと読んで
+    //   `<:59:1482…>` に化ける。コロンを使わない書き方にする。
+    const t = new Date();
+    const stamp = `${t.getFullYear()}/${t.getMonth() + 1}/${t.getDate()} `
+      + `${t.getHours()}時${String(t.getMinutes()).padStart(2, '0')}分`;
+    const lines = [`━━ R${pl.sid} 購入まとめ ━━`,
+      stamp + (pl.took == null ? '' : ` ・ 解析 ${fx(pl.took, 1)}s`)];
     for (const d of done) {
       const st = d.u * d.unit, e = st * d.edge;
       stake += st; ev += e;
-      lines.push(`${d.kind} ${d.name} ${d.u}口 ${st.toLocaleString()}rrc`
-          + ` / 的中 ${fx(d.p * 100, 2)}% / 実効od ${fx(d.eff, 2)}`
-          + ` / EV ${e >= 0 ? '+' : ''}${Math.round(e).toLocaleString()}rrc`);
+      // スマホの Discord は1行が短い。買い目名と数字を分けて、
+      // どちらも折り返さない長さに収める。
+      lines.push(`${d.kind} ${d.name}`);
+      lines.push(`　${d.u}口 ${st.toLocaleString()}rrc ・ 的中 ${fx(d.p * 100, 1)}%`
+          + ` ・ od ${fx(d.eff, 2)} ・ EV ${e >= 0 ? '+' : ''}`
+          + `${Math.round(e).toLocaleString()}`);
     }
-    lines.push(`合計 ${stake.toLocaleString()}rrc / 予測EV ${ev >= 0 ? '+' : ''}`
-        + `${Math.round(ev).toLocaleString()}rrc（${fx(ev / stake * 100, 1)}%）`);
+    lines.push(`合計 ${stake.toLocaleString()}rrc ・ 予測EV ${ev >= 0 ? '+' : ''}`
+        + `${Math.round(ev).toLocaleString()}rrc (${fx(ev / stake * 100, 0)}%)`);
     for (const l of lines) log(l, '#81c784');
     // コピーボタン用に**まとめだけ**を別に貯める。ログは解析の途中経過で
     // 埋まるので、あとで記録として貼るときはこちらが要る。
