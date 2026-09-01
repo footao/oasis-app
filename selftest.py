@@ -16,6 +16,7 @@ selftest.py — Oasis 予測ツール v2 の動作確認
 import itertools
 import math
 import os
+import inspect
 import re
 import sys
 import tempfile
@@ -850,6 +851,13 @@ def regression_tests():
     # 的中率・実効オッズ・予測EV つきで残す（拒否された口数を混ぜない）。
     # 解析にかかった秒数はまとめにも残す。ログは流れるが、まとめは記録として貼るので、
     # あとから「LEAD_SEC を詰めすぎていなかったか」を見返せる。
+    # 装備は 08/17 に実装されたが、ログに載り始めたのは 08/19。その間のレースは
+    # 「装備を着けて走ったのにログ上は素のステータス」なので学習に混ぜない。
+    check('装備がログに載る前の期間を学習から外している',
+          oc.ITEM_LOG_GAP == ('2026-08-17 17:25', '2026-08-19 18:10')
+          and 'df_all = df_all[~_gap].copy()' in inspect.getsource(oc.train_model),
+          '除外すると検証43レースで 1着的中 81.4%→83.7%、σ 0.0254→0.0217')
+
     check('P19 autopilot は購入まとめに解析秒数を出す',
           'if (pl) pl.took = took;' in _ap and '解析 ${fx(pl.took, 1)}s' in _ap)
 

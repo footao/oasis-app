@@ -892,6 +892,14 @@ EXCLUDED_RACES = {
     2037, '2026-08-19 12:00',   # 中距離13頭。結果がバグと運営告知（2026/08/19）
 }
 
+# 装備・お守りは 2026/08/17 17:25 に実装されたが、Discord のレース結果ログに
+# 装備が載り始めたのは 08/19 18:10（運営のアプデ告知の直後）。この間のレースは
+# **装備を着けて走ったのにログ上は素のステータス**なので、学習に混ぜると
+# 「装備ぶん速いのに素のステータスのまま」の行として係数を濁す。
+# 実測（08/25以降43レースで検証）: 除外すると 1着的中 81.4%→83.7%、
+# σ 0.0254→0.0217（σは真値 0.019 前後に近づく）。11レースが該当。
+ITEM_LOG_GAP = ('2026-08-17 17:25', '2026-08-19 18:10')
+
 
 def _race_time_key(date, time):
     """'2026/08/19' + '12:00' → '2026-08-19 12:00'。片方でも無ければ None。"""
@@ -1273,6 +1281,16 @@ def train_model(log_path=None, sigma_override=None, train_from=DEFAULT_TRAIN_FRO
     cut = pd.to_datetime(train_from, format='%Y/%m/%d')
     newest = df_all['_d'].max()
 
+    # 装備がログに載る前の「装備あり・記録なし」期間は落とす（ITEM_LOG_GAP 参照）
+    _g0, _g1 = (pd.to_datetime(x) for x in ITEM_LOG_GAP)
+    _gap = (df_all['_d'] >= _g0) & (df_all['_d'] < _g1)
+    n_gap = int(df_all.loc[_gap, 'race_key'].nunique())
+    if n_gap:
+        msgs.append(
+            f'ℹ 装備実装（{ITEM_LOG_GAP[0]}）からログに装備が載り始める（{ITEM_LOG_GAP[1]}）'
+            f'までの {n_gap}レースを学習から外しました'
+            '（装備を着けて走ったのにログ上は素のステータスのため）。')
+        df_all = df_all[~_gap].copy()
     df = df_all[df_all['_d'] >= cut].copy()
     n_races_new = df['race_key'].nunique()
     mode = 'new_only'
