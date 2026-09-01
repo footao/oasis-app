@@ -856,10 +856,11 @@ def regression_tests():
         'if (await post(url, mkBody(u), `${label} ${u}口`, u * unit)) sent += u;' in _ap
           and 'return sent;' in _ap,
           '拒否された口数をまとめに入れないため')
-    check('P19 autopilot にログのコピーボタンがある',
+    check('P19 autopilot に購入まとめのコピーボタンがある',
           "$('_cp').onclick" in _ap and 'id=_cp' in _ap
-          and 'ST.log.map(x => x.m).reverse()' in _ap,
-          'ログは新しい順に持っているのでコピーは古い順に直す')
+          and "const txt = (ST.sum || []).join('\\n\\n');" in _ap
+          and 'ST.sum = (ST.sum || []).concat([lines.join(' in _ap,
+          'コピーするのは記録に使うまとめだけ。解析の途中経過は入れない')
 
     check('P19 autopilot は起動時に自動でアームする',
           'if (!isArmed()) { arm(); }' in _ap

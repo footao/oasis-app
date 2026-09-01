@@ -188,7 +188,7 @@ ov.innerHTML = '<b style="color:#e2b96f">🛩 オートパイロット v' + AP_V
   + 'background:#0b0b14;border:1px solid #333;border-radius:6px;padding:.4rem"></div>'
   + '<div style="display:flex;gap:.4rem;margin-top:.5rem">'
   + '<button id=_now style="flex:1;padding:.6rem;background:#2e7d32;color:#fff;border:none;border-radius:5px;cursor:pointer">今すぐ解析</button>'
-  + '<button id=_cp style="padding:.6rem .7rem;background:#3949ab;color:#fff;border:none;border-radius:5px;cursor:pointer">📋 コピー</button>'
+  + '<button id=_cp style="padding:.6rem .7rem;background:#3949ab;color:#fff;border:none;border-radius:5px;cursor:pointer">📋 まとめ</button>'
   + '<button id=_clr style="padding:.6rem .7rem;background:#444;color:#fff;border:none;border-radius:5px;cursor:pointer">ログ消去</button>'
   + '<button id=_x style="padding:.6rem .7rem;background:#7a2222;color:#fff;border:none;border-radius:5px;cursor:pointer">停止</button></div>';
 document.body.appendChild(ov);
@@ -859,16 +859,21 @@ async function doBuy() {
   //      的中率・実効オッズ・予測EV つきで残す。EV = 賭け金 × エッジ。
   if (done.length) {
     let stake = 0, ev = 0;
-    log(`━━ R${pl.sid} 購入まとめ（${new Date().toLocaleString('ja-JP')}）━━`, '#e2b96f');
+    const lines = [`━━ R${pl.sid} 購入まとめ（${new Date().toLocaleString('ja-JP')}）━━`];
     for (const d of done) {
       const st = d.u * d.unit, e = st * d.edge;
       stake += st; ev += e;
-      log(`${d.kind} ${d.name} ${d.u}口 ${st.toLocaleString()}rrc`
+      lines.push(`${d.kind} ${d.name} ${d.u}口 ${st.toLocaleString()}rrc`
           + ` / 的中 ${fx(d.p * 100, 2)}% / 実効od ${fx(d.eff, 2)}`
-          + ` / EV ${e >= 0 ? '+' : ''}${Math.round(e).toLocaleString()}rrc`, '#81c784');
+          + ` / EV ${e >= 0 ? '+' : ''}${Math.round(e).toLocaleString()}rrc`);
     }
-    log(`合計 ${stake.toLocaleString()}rrc / 予測EV ${ev >= 0 ? '+' : ''}`
-        + `${Math.round(ev).toLocaleString()}rrc（${fx(ev / stake * 100, 1)}%）`, '#e2b96f');
+    lines.push(`合計 ${stake.toLocaleString()}rrc / 予測EV ${ev >= 0 ? '+' : ''}`
+        + `${Math.round(ev).toLocaleString()}rrc（${fx(ev / stake * 100, 1)}%）`);
+    for (const l of lines) log(l, '#81c784');
+    // コピーボタン用に**まとめだけ**を別に貯める。ログは解析の途中経過で
+    // 埋まるので、あとで記録として貼るときはこちらが要る。
+    ST.sum = (ST.sum || []).concat([lines.join('\n')]).slice(-20);
+    saveState(ST);
   }
   ST.done[pl.sid] = { t: Date.now(), n: bought };
   disarm(`R${pl.sid} の購入が終わったのでアームを解除しました`);
@@ -949,10 +954,11 @@ $('_x').onclick = () => {
   if (window.__oasisAutopilotClock) clearInterval(window.__oasisAutopilotClock);
   log('停止しました（監視・カウントダウンとも止めました）', '#ffb74d');
 };
-$('_clr').onclick = () => { ST.log = []; saveState(ST); render(); };
-// ログは新しい順に持っているので、コピーは**古い順**に直して出す（読み返す用）。
+$('_clr').onclick = () => { ST.log = []; ST.sum = []; saveState(ST); render(); };
+// コピーするのは**購入まとめだけ**（解析の途中経過は要らない）。古い順に並べる。
 $('_cp').onclick = async () => {
-  const txt = ST.log.map(x => x.m).reverse().join('\n');
+  const txt = (ST.sum || []).join('\n\n');
+  if (!txt) { log('まだ購入まとめがありません', '#888'); return; }
   const b = $('_cp'), back = b.textContent;
   const ok = () => { b.textContent = '✅ コピー'; setTimeout(() => { b.textContent = back; }, 1500); };
   try { await navigator.clipboard.writeText(txt); ok(); return; } catch (e) {}
