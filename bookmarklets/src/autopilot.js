@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.9.1';
+const AP_VER = '1.11.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -31,9 +31,11 @@ const CFG = {
   RACE_HOURS: [9, 12, 15, 18, 21, 23],   // 開催時刻（時）
   RACE_MINUTE: 0,
   // 締切の何秒前から解析・購入するか。遅いほど直前のオッズで買えるが、
-  // 解析が締切をまたぐと買い逃す。実測の所要時間はログの「解析 N.Ns」で見られる。
-  // 2026/08/29 実運用で 30→13 に短縮（実測の解析時間に対して余裕があったため）。
-  LEAD_SEC: 13,
+  // 解析が締切をまたぐと買い逃す。実測の所要時間は購入まとめの「解析 N.Ns」で見る。
+  // 2026/08/29 に 30→13、09/01 に 13→8（実測の解析時間に対して余裕があったため）。
+  // 下限の目安は「解析秒数の**最悪値** + 3秒」。これを割ると、試し買いの金だけ入って
+  // 本命の買い目が締切に間に合わない回が出る（一番損な負け方）。
+  LEAD_SEC: 8,
   WINDOW_SEC: 900,          // 発走何秒前から準備を始めるか
   // 口数は「EVが最大になる配分」を貪欲法で決める（Python の allocate_units_stable と同じ）。
   // 上限はゲームの上限そのまま（3連単20口・単勝100口）。下限は置かない。
@@ -859,7 +861,8 @@ async function doBuy() {
   //      的中率・実効オッズ・予測EV つきで残す。EV = 賭け金 × エッジ。
   if (done.length) {
     let stake = 0, ev = 0;
-    const lines = [`━━ R${pl.sid} 購入まとめ（${new Date().toLocaleString('ja-JP')}）━━`];
+    const lines = [`━━ R${pl.sid} 購入まとめ（${new Date().toLocaleString('ja-JP')}`
+      + (pl.took == null ? '' : ` / 解析 ${fx(pl.took, 1)}s・締切 ${CFG.LEAD_SEC}s前から`) + '）━━'];
     for (const d of done) {
       const st = d.u * d.unit, e = st * d.edge;
       stake += st; ev += e;
@@ -929,6 +932,7 @@ async function tick(force) {
             leftNow < 5 ? '#ffb74d' : '#888');
       }
       // 下見で見送っても done にはしない（窓の中で取り直す機会を残す）。
+      if (pl) pl.took = took;   // 購入まとめに出す（LEAD_SEC を詰めすぎていないかの実測）
       if (pl) showPending(pl); else if (canBuy) ST.done[r.sid] = { t: Date.now(), n: 0 };
       saveState(ST);
     }

@@ -848,6 +848,11 @@ def regression_tests():
 
     # 購入後のまとめ。あとで実結果と突き合わせるので、**買えた口数だけ**を
     # 的中率・実効オッズ・予測EV つきで残す（拒否された口数を混ぜない）。
+    # 解析にかかった秒数はまとめにも残す。ログは流れるが、まとめは記録として貼るので、
+    # あとから「LEAD_SEC を詰めすぎていなかったか」を見返せる。
+    check('P19 autopilot は購入まとめに解析秒数を出す',
+          'if (pl) pl.took = took;' in _ap and '解析 ${fx(pl.took, 1)}s' in _ap)
+
     check('P19 autopilot は購入後にまとめを出す',
           '購入まとめ' in _ap and '予測EV' in _ap
           and 'const st = d.u * d.unit, e = st * d.edge;' in _ap,
