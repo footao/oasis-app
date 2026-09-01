@@ -888,6 +888,17 @@ def regression_tests():
           f"本命 ×{_m1['speed']:.4f} / 一律 ×{_m0['speed']:.4f} / 人気薄 ×{_m2['speed']:.4f}")
     check('P22 素の倍率と1パス目の duty を持ち帰る（2パス目で割り戻す）',
           _m0.get('_lead_speed') == 1.065 and _m0.get('_lead_duty0') == 0.079)
+    # 首位の呪いはスピードが上がるがスタミナ消費も増える（実測 ×1.04）。
+    # 先頭にいる間だけなので、必要スタミナには duty ぶんだけ効く。
+    _e = oc.effective_stats(120, 60, 40, (), 'マイル', '芝', oc.default_spec(), None)
+    _n0 = oc.stamina_budget(_e, 'マイル')[0]
+    _n1 = oc.stamina_budget(_e, 'マイル', 1.0 + 0.04 * 0.58)[0]
+    check('P22 首位の呪いはスタミナ消費も増やす',
+          oc.LEAD_STAMINA_COST == 1.04 and abs(_n1 / _n0 - 1.0232) < 1e-3
+          and 'stamina_cost_mult' in inspect.getsource(oc.lead_adjusted_base)
+          and 'stamina_cost_mult' in _model_js,
+          f'必要スタミナ {_n0:.1f} → {_n1:.1f}（duty 0.58 のとき）')
+
     check('P22 lead_adjusted_base が model.js と両方にある',
           'def lead_adjusted_base(' in inspect.getsource(oc)
           and 'function leadAdjustedBase(' in _model_js

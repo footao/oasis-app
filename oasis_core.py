@@ -304,7 +304,7 @@ STAMINA_COST_LAW = {
 }
 
 
-def stamina_budget(eff, dist):
+def stamina_budget(eff, dist, cost_mult=1.0):
     """(必要スタミナ, 不足, 余り) を返す。eff は effective_stats() の戻り値。
 
     「余り」は疲労補正を最大 +3% まで上げる（1.030 で頭打ち）。
@@ -319,7 +319,8 @@ def stamina_budget(eff, dist):
     b = INTERNAL_DIST_BALANCE.get(dist, [1.0, 1.0, 1.0])
     base = (eff['speed'] * w[0] * b[0] + eff['power'] * w[1] * b[1]
             + eff['stamina'] * w[2] * b[2])
-    need = min(max(L['c'] * base, L['lo']), L['hi']) * L['n_seg']
+    # cost_mult は「消費を変えるパッシブ・装備」ぶん。clamp の**後**に掛かる（実測）。
+    need = min(max(L['c'] * base, L['lo']), L['hi']) * L['n_seg'] * float(cost_mult or 1.0)
     have = math.floor(eff['stamina'])
     return need, max(0.0, need - have), max(0.0, have - need)
 
@@ -918,6 +919,10 @@ ITEM_LOG_GAP = ('2026-08-17 17:25', '2026-08-19 18:10')
 # 脚質（逃げ・差し）のパッシブを足しても改善しなかった（該当22頭・12頭、係数 -0.03）。
 LEAD_DUTY_A = 0.655
 LEAD_DUTY_B = 0.345
+# 首位の呪いは「スピードが上がるがスタミナ消費も増える」。増える量を timeline から直読み:
+# clamp に張り付いた区間で cost/clamp を見ると 短距離 ×1.047 / 長距離 ×1.032 → ×1.04。
+# 先頭にいる間だけなので、必要スタミナには duty ぶんだけ効く（× 1 + 0.04×duty）。
+LEAD_STAMINA_COST = 1.04
 
 
 def _race_time_key(date, time):
@@ -1097,7 +1102,7 @@ def _row_features(speed, power, stamina, condition, passives, dist, track, spec,
     for d in DIST_LIST:
         m = 1.0 if dist == d else 0.0
         f += [m, m * sp, m * pw, m * st, m * lsp, m * lpw, m * lst]
-    _need, _short, _sur = stamina_budget(e, dist)
+    _need, _short, _sur = stamina_budget(e, dist, (ctx or {}).get('stamina_cost_mult', 1.0))
     # 不足は**必要量に対する割合**で入れる。同じ「不足5」でも、必要量28の短距離では
     # レースの2割を空っぽで走ることになり、必要量85の長距離では6%で済む。
     # timeline 2,159頭の実測: 枯渇割合 = 0.859×(不足/必要)（相関0.945）、
@@ -1141,7 +1146,9 @@ def build_features(df, spec):
     for i, (_, r) in enumerate(df.iterrows()):
         X[i] = _row_features(r['speed'], r['power'], r['stamina'],
                              r.get('condition', '普通'), r.get('passives', ()),
-                             r['dist'], r['track'], spec, {'same_species': bool(same[i])})
+                             r['dist'], r['track'], spec,
+                             {'same_species': bool(same[i]),
+                              'stamina_cost_mult': float(r.get('stamina_cost_mult') or 1.0)})
     return X
 
 
@@ -1655,6 +1662,7 @@ def export_model_json(bundle, path=None):
         'dist_balance': {d: list(v) for d, v in INTERNAL_DIST_BALANCE.items()},
         'odds_floor': ODDS_FLOOR, 'stake_unit': STAKE_UNIT,
         'lead_duty_a': LEAD_DUTY_A, 'lead_duty_b': LEAD_DUTY_B,
+        'lead_stamina_cost': LEAD_STAMINA_COST,
         'trifecta_pool_seed': TRIFECTA_POOL_SEED,
         'max_total_units': MAX_TOTAL_UNITS, 'max_units': MAX_UNITS,
         'min_field_trifecta': MIN_FIELD_TRIFECTA,
@@ -1718,6 +1726,7 @@ def predict_base(bundle, horses, dist, track):
         'name': h.get('name', ''), 'speed': h['speed'], 'power': h['power'],
         'stamina': h['stamina'], 'condition': h.get('condition', '普通'),
         'passives': h.get('passives', ()), 'dist': dist, 'track': track,
+        'stamina_cost_mult': h.get('stamina_cost_mult', 1.0),
         'same_species': same[i]} for i, h in enumerate(horses)])
     X = build_features(rows, spec)
     p = bundle['model'].predict(X)
@@ -1756,6 +1765,8 @@ def lead_adjusted_base(bundle, horses, base, dist, track, sigma, n_sim=20000):
                 continue
             # 1パス目で (1+(m-1)*d0) を掛けてあるので、それで割ってから d1 を掛ける
             hs2[i][k] = horses[i][k] * (1.0 + (m - 1.0) * d1) / (1.0 + (m - 1.0) * d0)
+        # 先頭を走る間はスタミナ消費も増える（実測 ×1.04）
+        hs2[i]['stamina_cost_mult'] = 1.0 + (LEAD_STAMINA_COST - 1.0) * d1
         notes.append((horses[i].get('name', ''), float(win[i]), d0, d1))
     return predict_base(bundle, hs2, dist, track), notes
 
@@ -2321,6 +2332,9 @@ def parse_unified(text, spec=None):
                               if '_lead_duty0' in _im else None),
                 'item_mult': ({k: v for k, v in _im.items()
                                if not k.startswith('_')} or None),
+                # 先頭でだけ効く装備はスタミナ消費も増やす。1パス目は一律 duty ぶん。
+                'stamina_cost_mult': (1.0 + (LEAD_STAMINA_COST - 1.0) * _im['_lead_duty0']
+                                      if '_lead_duty0' in _im else 1.0),
                 'condition': str(r.get('コンディション', '普通')).strip(),
                 'passives': _passives_from_row(r, cols),
                 'odds': float(win_odds) if pd.notna(win_odds) else float('nan'),

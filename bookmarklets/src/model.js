@@ -128,6 +128,8 @@ const OasisModel = (() => {
         if (m === 1) continue;
         hs2[i][k] = horses[i][k] * (1 + (m - 1) * d1) / (1 + (m - 1) * d0);
       }
+      const lsc = M.lead_stamina_cost == null ? 1.04 : M.lead_stamina_cost;
+      hs2[i].stamina_cost_mult = 1 + (lsc - 1) * d1;
       notes.push({ name: horses[i].name, p: p, d0: d0, d1: d1 });
     }
     return [predictBase(hs2, dist, track, M), notes];
@@ -141,6 +143,9 @@ const OasisModel = (() => {
       if (m._sigma != null) { sig *= m._sigma; continue; }
       if (m._lead_duty0 != null) {
         h.item_lead = { duty0: m._lead_duty0 };
+        // 先頭でだけ効く装備はスタミナ消費も増やす（実測 ×1.04）。1パス目は一律 duty ぶん。
+        const lsc = M.lead_stamina_cost == null ? 1.04 : M.lead_stamina_cost;
+        h.stamina_cost_mult = 1 + (lsc - 1) * m._lead_duty0;
         for (const k of ['speed','power','stamina']) {
           if (m['_lead_' + k]) h.item_lead[k] = m['_lead_' + k];
         }
@@ -165,12 +170,13 @@ const OasisModel = (() => {
 
   // --- スタミナ収支（Python: stamina_budget）---
   // 定数は model.json 経由で Python から来る。JS 側には数値を持たせない。
-  function staminaBudget(e, dist, M) {
+  function staminaBudget(e, dist, M, costMult) {
     const L = (M.stamina_cost_law || {})[dist];
     if (!L) return [0, 0, 0];
     const w = M.phase_early, b = (M.dist_balance || {})[dist] || [1, 1, 1];
     const base = e.speed * w[0] * b[0] + e.power * w[1] * b[1] + e.stamina * w[2] * b[2];
-    const need = Math.min(Math.max(L.c * base, L.lo), L.hi) * L.n_seg;
+    // costMult は消費を変える装備・パッシブぶん。clamp の**後**に掛かる（Python と同じ）。
+    const need = Math.min(Math.max(L.c * base, L.lo), L.hi) * L.n_seg * (+costMult || 1);
     const have = Math.floor(e.stamina);
     return [need, Math.max(0, need - have), Math.max(0, have - need)];
   }
@@ -190,7 +196,7 @@ const OasisModel = (() => {
         f[`${d}:lin(${s})`] = m * ln[s];
       }
     }
-    const bud = staminaBudget(e, dist, M);
+    const bud = staminaBudget(e, dist, M, (ctx && ctx.stamina_cost_mult) || 1);
     f['スタミナ余り'] = bud[2] / 10;
     // 不足は**必要量に対する割合**。同じ「不足5」でも短距離ではレースの2割を
     // 空っぽで走ることになり、長距離では6%で済む。×5 は列の桁を合わせるため。
@@ -228,7 +234,8 @@ const OasisModel = (() => {
   function predictBase(horses, dist, track, M) {
     const same = sameSpeciesFlags(horses);
     const raw = horses.map((h, i) => {
-      const f = rowFeatures(h, dist, track, M, { same_species: same[i] });
+      const f = rowFeatures(h, dist, track, M,
+        { same_species: same[i], stamina_cost_mult: h.stamina_cost_mult || 1 });
       let s = M.intercept;
       for (const k of Object.keys(f)) {
         const c = M.coef[k];
