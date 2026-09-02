@@ -904,6 +904,19 @@ def regression_tests():
           and 'function leadAdjustedBase(' in _model_js
           and 'OasisModel.leadAdjustedBase(' in _ap)
 
+    # 「予測は合っていたのに、なぜその組を買わなかったのか」は買い目だけでは追えない。
+    # 3連単のオッズはレース確定後に API から消えるので、その場で残すしかない。
+    check('P22 買わなかった上位候補をまとめに残す',
+          "const rej = cands.filter(c => !bought.has(c.key))" in _ap
+          and '.sort((a, b) => b.p - a.p).slice(0, 3)' in _ap
+          and '見送 ${r.names.join(' in _ap,
+          '的中率が高い順に3件、オッズ・エッジ・見送り理由つき')
+    check('P22 買い目に買う前と買ったあとの両方のオッズを出す',
+          "od ${d.od == null ? '未成立' : fx(d.od, 2)}→${fx(d.eff, 2)}" in _ap
+          and 'p: pk.p, od: pk.od, eff: pk.eff' in _ap
+          and 'p: w.p, od: w.od, eff: w.eff' in _ap,
+          'v1.12.0 で買う前のオッズを落としていたのを戻した')
+
     check('P19 autopilot は購入まとめに解析秒数を出す',
           'if (pl) pl.took = took;' in _ap and '解析 ${fx(pl.took, 1)}s' in _ap)
 

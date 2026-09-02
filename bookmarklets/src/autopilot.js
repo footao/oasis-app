@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.13.0';
+const AP_VER = '1.14.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -458,6 +458,7 @@ async function analyseRace(sid, info, canBuy) {
   // 計算のどこかを間違えたときに黙って上限を超えないようにしておく。
   if (cost > raceLeft) { log(`R${sid}: 予算 ${raceLeft.toLocaleString()} rrc を超えるため見送り`, '#ffb74d'); return null; }
   return { sid, pets: wpets, picks: triPicks.picks, win: winPicks.picks, cost,
+           rej: triPicks.rej || [],
            unit: U_, winUnit: M.win_stake_unit || 1000, canBuy: !!canBuy };
 }
 
@@ -532,7 +533,9 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
           + '。プールが薄いと素で出ますが、桁がおかしければ計算を疑ってください', '#ffb74d');
     }
     byKey.set(k, c); pOf.set(k, pBet);
-    cands.push({ key: k, p: pBet, od: od });
+    // eff1/edge1 は「1口だけ入れたとき」の値。買わなかった理由を後から説明するために持つ。
+    cands.push({ key: k, p: pBet, od: od, eff1: eff1, edge1: edge1,
+                 names: [c.i, c.j, c.k].map(nameOf) });
   }
   const budgetU = Math.min(CFG.TRI_MAX_UNITS, unitsLeft);
   const alloc = OasisModel.allocateUnitsStable(
@@ -579,7 +582,18 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
     return none;
   }
   picks.sort((a, b) => b.edge - a.edge);
-  return { picks: picks, cost: used * U_ };
+  // 買わなかった候補のうち**的中率が高い順**に3件だけ残す。
+  // 「予測は合っていたのに、なぜその組を買わなかったのか」は買い目だけ見ても分からない。
+  // オッズはレース確定後に API から消えるので、ここで残さないと永久に追えなくなる。
+  const bought = new Set();
+  for (const [k, v] of alloc) if (v[0]) bought.add(k);
+  const rej = cands.filter(c => !bought.has(c.key))
+    .sort((a, b) => b.p - a.p).slice(0, 3)
+    .map(c => ({ names: c.names, p: c.p, od: c.od, eff: c.eff1, edge: c.edge1,
+                 why: c.edge1 < CFG.EDGE_MIN
+                   ? `エッジ${(c.edge1 * 100).toFixed(0)}%<${(CFG.EDGE_MIN * 100) | 0}%`
+                   : '予算・口数の上限' }));
+  return { picks: picks, cost: used * U_, rej: rej };
 }
 
 // ---- 単勝プールの実測（試し買い）----
@@ -856,7 +870,7 @@ async function doBuy() {
       + `od${fx(pk.od, 1)}→${fx(pk.eff, 1)} +${fx(pk.edge * 100, 0)}%`,
       pk.k || 1, pl.unit, CFG.TRI_PER_REQ);
     if (got) done.push({ kind: '3連単', name: pk.names.join('→'), u: got,
-                         unit: pl.unit, p: pk.p, eff: pk.eff, edge: pk.edge });
+                         unit: pl.unit, p: pk.p, od: pk.od, eff: pk.eff, edge: pk.edge });
   }
   for (const w of (pl.win || [])) {
     const got = await buyUnits(`${API}/api/bet`,
@@ -866,7 +880,7 @@ async function doBuy() {
       + `od${fx(w.od, 2)}→${fx(w.eff, 2)} +${fx(w.edge * 100, 0)}%`,
       w.units, pl.winUnit, CFG.WIN_PER_REQ);
     if (got) done.push({ kind: '単勝', name: w.name, u: got,
-                         unit: pl.winUnit, p: w.p, eff: w.eff, edge: w.edge });
+                         unit: pl.winUnit, p: w.p, od: w.od, eff: w.eff, edge: w.edge });
   }
   // ---- 購入まとめ。あとで実結果と突き合わせられるように、買えた買い目だけを
   //      的中率・実効オッズ・予測EV つきで残す。EV = 賭け金 × エッジ。
@@ -885,9 +899,17 @@ async function doBuy() {
       // スマホの Discord は1行が短い。買い目名と数字を分けて、
       // どちらも折り返さない長さに収める。
       lines.push(`${d.kind} ${d.name}`);
+      // od は買う前の表示オッズ、実効は自分の口数で薄まったあと。両方無いと
+      // 「入れすぎたのか」「元から安かったのか」が区別できない。
       lines.push(`　${d.u}口 ${st.toLocaleString()}rrc ・ 的中 ${fx(d.p * 100, 1)}%`
-          + ` ・ od ${fx(d.eff, 2)} ・ EV ${e >= 0 ? '+' : ''}`
-          + `${Math.round(e).toLocaleString()}`);
+          + ` ・ od ${d.od == null ? '未成立' : fx(d.od, 2)}→${fx(d.eff, 2)}`
+          + ` ・ EV ${e >= 0 ? '+' : ''}${Math.round(e).toLocaleString()}`);
+    }
+    // 買わなかった上位候補。あとで「当たり目を検討したのか」を追えるようにする。
+    for (const r of (pl.rej || [])) {
+      lines.push(`見送 ${r.names.join('→')}`);
+      lines.push(`　的中 ${fx(r.p * 100, 1)}% ・ od ${fx(r.od, 2)}→${fx(r.eff, 2)}`
+          + ` ・ エッジ ${r.edge >= 0 ? '+' : ''}${fx(r.edge * 100, 0)}% ・ ${r.why}`);
     }
     lines.push(`合計 ${stake.toLocaleString()}rrc ・ 予測EV ${ev >= 0 ? '+' : ''}`
         + `${Math.round(ev).toLocaleString()}rrc (${fx(ev / stake * 100, 0)}%)`);
