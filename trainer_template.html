@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>おあしすっち 育成プランナー</title>
+<style>
+  :root{color-scheme:light dark;--bd:#c9cdd4;--mut:#6b7280;--hi:#0b7285;--warn:#b45309}
+  @media (prefers-color-scheme:dark){:root{--bd:#3a3f47;--mut:#9aa3af;--hi:#4dd0e1;--warn:#fbbf24}}
+  body{font:14px/1.65 system-ui,"Segoe UI","Hiragino Kaku Gothic ProN",Meiryo,sans-serif;
+       margin:0 auto;padding:16px;max-width:860px}
+  h1{font-size:19px;margin:0 0 2px}
+  h2{font-size:15px;margin:22px 0 6px;border-bottom:1px solid var(--bd);padding-bottom:3px}
+  .meta{color:var(--mut);font-size:12px;margin:0 0 14px}
+  fieldset{border:1px solid var(--bd);border-radius:6px;margin:0 0 12px;padding:8px 10px}
+  legend{font-size:12px;color:var(--mut);padding:0 4px}
+  .row{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center}
+  label{font-size:12px;color:var(--mut);display:flex;flex-direction:column;gap:2px}
+  input,select{font:inherit;padding:4px 6px;border:1px solid var(--bd);border-radius:4px;
+               background:transparent;color:inherit}
+  input[type=number]{width:76px}
+  .wide{flex:1 1 200px}.wide input{width:100%}
+  button{font:inherit;font-weight:600;padding:8px 20px;border-radius:6px;border:1px solid var(--hi);
+         background:var(--hi);color:#fff;cursor:pointer}
+  button:disabled{opacity:.5;cursor:default}
+  table{border-collapse:collapse;width:100%;font-size:13px;margin:4px 0}
+  th,td{border-bottom:1px solid var(--bd);padding:5px 6px;text-align:right;white-space:nowrap}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--mut);font-weight:600;font-size:12px}
+  tr.best td{font-weight:700;color:var(--hi)}
+  .note{color:var(--mut);font-size:12px;margin:6px 0}
+  .warn{color:var(--warn)}
+  .box{border:1px solid var(--hi);border-radius:6px;padding:10px 12px;margin:8px 0}
+  .big{font-size:16px;font-weight:700}
+  .tw{overflow-x:auto}
+</style>
+</head>
+<body>
+<h1>おあしすっち 育成プランナー</h1>
+<p class="meta">モデル __NRACES__レース学習 / __BUILT__ ・ 特訓 __NTRAIN__回 × 平均+__GROWTH__ポイント前提</p>
+
+<fieldset><legend>馬</legend>
+  <div class="row">
+    <label>スピード<input type="number" id="sp" value="40" min="1"></label>
+    <label>パワー<input type="number" id="pw" value="40" min="1"></label>
+    <label>スタミナ<input type="number" id="st" value="40" min="1"></label>
+    <label>残り特訓<input type="number" id="nt" value="__NTRAIN__" min="0" max="60"></label>
+    <label>1回の伸び<input type="number" id="gr" value="__GROWTH__" min="0.1" max="5" step="0.1"></label>
+    <label>調子<select id="cond"><option>好調</option><option selected>普通</option><option>不調</option></select></label>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <label>パッシブ1<select id="p1"></select></label>
+    <label>パッシブ2<select id="p2"></select></label>
+  </div>
+</fieldset>
+
+<fieldset><legend>装備</legend>
+  <div class="row">
+    <label>SP+<input type="number" id="eq_a0" value="0"></label>
+    <label>PW+<input type="number" id="eq_a1" value="0"></label>
+    <label>ST+<input type="number" id="eq_a2" value="0"></label>
+    <label>★効果名<input id="eq_lb" list="lbs" placeholder="俊足の加護" style="width:130px"></label>
+    <label class="wide">効果の説明文<input id="eq_ds" placeholder="スピードが常時9.1%上昇"></label>
+  </div>
+</fieldset>
+<fieldset><legend>お守り</legend>
+  <div class="row">
+    <label>SP+<input type="number" id="ch_a0" value="0"></label>
+    <label>PW+<input type="number" id="ch_a1" value="0"></label>
+    <label>ST+<input type="number" id="ch_a2" value="0"></label>
+    <label>★効果名<input id="ch_lb" list="lbs" placeholder="持久の加護" style="width:130px"></label>
+    <label class="wide">効果の説明文<input id="ch_ds" placeholder="スタミナが常時2%上昇"></label>
+  </div>
+</fieldset>
+<datalist id="lbs"></datalist>
+
+<fieldset><legend>出走先</legend>
+  <div class="row">
+    <label>距離<select id="dist"><option value="">全部くらべる</option></select></label>
+    <label>馬場<select id="track"><option value="">両方</option></select></label>
+    <button id="go">計算する</button>
+  </div>
+</fieldset>
+
+<div id="out"></div>
+
+<script>/*__MODELJS__*/</script>
+<script>
+const M = /*__MODEL__*/;
+const FIELD = /*__FIELD__*/;
+const G0 = __GROWTH__;                   // 特訓1回あたりの伸び（1〜5の一様乱数の期待値）
+const NSIM = 20000;
+const $ = id => document.getElementById(id);
+const fx = (v, d) => v.toFixed(d);
+
+// --- 選択肢 -------------------------------------------------------------
+for (const s of [$('p1'), $('p2')]) {
+  s.innerHTML = '<option value="">なし</option>'
+    + Object.keys(M.catalog).sort().map(p => `<option>${p}</option>`).join('');
+}
+$('lbs').innerHTML = Object.keys(M.item_scope || {}).map(k => `<option>${k}</option>`).join('');
+$('dist').innerHTML += M.dist_list.map(d => `<option>${d}</option>`).join('');
+$('track').innerHTML += M.track_list.map(t => `<option>${t}</option>`).join('');
+
+// --- 配分の全列挙（30回を3つに割る = 496通り）-----------------------------
+function allocs(n) {
+  const o = [];
+  for (let a = 0; a <= n; a++) for (let b = 0; b <= n - a; b++) o.push([a, b, n - a - b]);
+  return o;
+}
+
+function readCfg() {
+  const item = (p) => {
+    const lb = $(p + '_lb').value.trim(), ds = $(p + '_ds').value.trim();
+    return {
+      add: [+$(p + '_a0').value || 0, +$(p + '_a1').value || 0, +$(p + '_a2').value || 0],
+      it: (lb || ds) ? { effect_label: lb, effect_description: ds } : null };
+  };
+  const eq = item('eq'), ch = item('ch');
+  return {
+    sp: +$('sp').value, pw: +$('pw').value, st: +$('st').value,
+    n: Math.max(0, Math.trunc(+$('nt').value || 0)),
+    g: +$('gr').value || G0,
+    cond: $('cond').value,
+    passives: [$('p1').value, $('p2').value].filter(Boolean),
+    add: [eq.add[0] + ch.add[0], eq.add[1] + ch.add[1], eq.add[2] + ch.add[2]],
+    eq: eq.it, ch: ch.it,
+  };
+}
+
+// 配分Aの馬を組み立てる。装備の**加算**は特訓の外、**倍率**は applyItems が掛ける。
+function horseOf(cfg, A, dist, track) {
+  const h = { name: '自馬',
+    speed:   cfg.sp + cfg.g * A[0] + cfg.add[0],
+    power:   cfg.pw + cfg.g * A[1] + cfg.add[1],
+    stamina: cfg.st + cfg.g * A[2] + cfg.add[2],
+    condition: cfg.cond, passives: cfg.passives, equipment: cfg.eq, charm: cfg.ch };
+  return OasisModel.applyItems(h, M, null, { dist: dist, track: track });
+}
+
+// レース内で中心化する前の素点。相手が同じなら順位づけはこれで足りる（中心化は定数ずらし）。
+function rawScore(h, dist, track) {
+  const f = OasisModel.rowFeatures(h, dist, track, M,
+    { same_species: false, stamina_cost_mult: h.stamina_cost_mult || 1 });
+  let s = M.intercept;
+  for (const k of Object.keys(f)) { const c = M.coef[k]; if (c !== undefined) s += c * f[k]; }
+  return [s, f['スタミナ不足'] > 0];
+}
+
+// 基準フィールド10頭に混ぜたときの着順分布。距離をまたいで比べられるのはこれだけ。
+// 1着確率だけだと、育ち切っていない馬はどの距離でも 0% になって差が出ない。
+function rankStats(h, dist, track) {
+  const hs = [h].concat(FIELD);
+  let base = OasisModel.predictBase(hs, dist, track, M);
+  base = OasisModel.leadAdjustedBase(hs, base, dist, track, M, M.race_sigma, 4000)[0];
+  const sg = OasisModel.horseSigmas(hs, M.race_sigma, M);
+  const randn = OasisModel.makeRng(42), n = hs.length;
+  let sum = 0, w = 0, p3 = 0;
+  for (let it = 0; it < NSIM; it++) {
+    const me = base[0] + randn() * sg[0];
+    let r = 1;
+    for (let i = 1; i < n; i++) if (base[i] + randn() * sg[i] > me) r++;
+    sum += r; if (r === 1) w++; if (r <= 3) p3++;
+  }
+  return { rank: sum / NSIM, win: w / NSIM, top3: p3 / NSIM };
+}
+
+// 距離×馬場ごとに、全配分から素点最大を選び、その馬の着順分布まで出す。
+function evalCell(cfg, AS, dist, track) {
+  let best = null;
+  for (const A of AS) {
+    const h = horseOf(cfg, A, dist, track);
+    const r = rawScore(h, dist, track);
+    if (!best || r[0] > best.s) best = { s: r[0], short: r[1], A: A, h: h };
+  }
+  Object.assign(best, rankStats(best.h, dist, track));
+  best.dist = dist; best.track = track;
+  return best;
+}
+
+const stats = h => `${Math.round(h.speed)}/${Math.round(h.power)}/${Math.round(h.stamina)}`;
+const plan = A => `SP${A[0]} PW${A[1]} ST${A[2]}`;
+
+function run() {
+  const cfg = readCfg();
+  const AS = allocs(cfg.n);
+  const ds = $('dist').value ? [$('dist').value] : M.dist_list;
+  const ts = $('track').value ? [$('track').value] : M.track_list;
+  const cells = [];
+  for (const d of ds) for (const t of ts) cells.push(evalCell(cfg, AS, d, t));
+  cells.sort((a, b) => a.rank - b.rank);
+  const top = cells[0];
+
+  // おすすめ距離での配分ベスト5（素点の上位5つだけ勝率を出す）
+  // 隣どうしの配分ばかり並べても差が分からないので、6回ぶん以上離れたものだけ拾う。
+  const sorted = AS.map(A => {
+      const h = horseOf(cfg, A, top.dist, top.track);
+      return { A: A, h: h, s: rawScore(h, top.dist, top.track)[0] };
+    }).sort((a, b) => b.s - a.s);
+  const ranked = [];
+  for (const r of sorted) {
+    if (ranked.length >= 5) break;
+    const far = ranked.every(q => Math.abs(q.A[0] - r.A[0]) + Math.abs(q.A[1] - r.A[1])
+                                + Math.abs(q.A[2] - r.A[2]) >= 6);
+    if (far) ranked.push(r);
+  }
+  for (const r of ranked) Object.assign(r, rankStats(r.h, top.dist, top.track));
+
+  const next = ['スピード', 'パワー', 'スタミナ'][top.A.indexOf(Math.max.apply(null, top.A))];
+  let html = `<div class="box">
+    <div class="big">${top.dist} / ${top.track} ・ ${plan(top.A)}</div>
+    <div class="note">最終ステータス ${stats(top.h)}（SP/PW/ST）・ 基準10頭に混ざったときの平均${fx(top.rank, 2)}着
+    ・3着内 ${fx(top.top3 * 100, 1)}% ・1着 ${fx(top.win * 100, 1)}%
+    ${top.short ? '<span class="warn">・スタミナ不足のまま走ることになります</span>' : ''}</div>
+    <div class="note">残り${cfg.n}回 × 1回 +${fx(cfg.g, 1)} で計算。次の特訓は<b>${next}</b>から。
+    伸びは1〜5のランダムなので、何回か回したら実際のステータスと残り回数を入れて引き直してください。
+    悲観・楽観を見たいときは「1回の伸び」を 2 や 4 にしてください。</div></div>`;
+
+  html += '<h2>距離・馬場ごとの上限</h2><div class="tw"><table><tr>'
+    + '<th>距離</th><th>馬場</th><th>配分</th><th>最終ステ</th><th>平均着順</th><th>3着内</th><th>1着</th></tr>'
+    + cells.map((c, i) => `<tr class="${i ? '' : 'best'}"><td>${c.dist}</td><td>${c.track}</td>`
+      + `<td>${plan(c.A)}</td><td>${stats(c.h)}${c.short ? ' <span class="warn">ｽﾀﾐﾅ不足</span>' : ''}</td>`
+      + `<td>${fx(c.rank, 2)}</td><td>${fx(c.top3 * 100, 1)}%</td><td>${fx(c.win * 100, 1)}%</td></tr>`)
+      .join('') + '</table></div>';
+
+  html += `<h2>${top.dist}・${top.track} での配分候補</h2><div class="tw"><table><tr>`
+    + '<th>配分</th><th>最終ステ</th><th>平均着順</th><th>3着内</th></tr>'
+    + ranked.map((r, i) => `<tr class="${i ? '' : 'best'}"><td>${plan(r.A)}</td>`
+      + `<td>${stats(r.h)}</td><td>${fx(r.rank, 2)}</td><td>${fx(r.top3 * 100, 1)}%</td></tr>`)
+      .join('') + '</table></div>';
+
+  html += '<p class="note">相手はどの距離でも同じ基準10頭（現役の完成した馬も混ざっているので、'
+    + '育て終わったばかりの馬は1着確率が 0% になることがあります。平均着順で比べてください）。'
+    + '実際のレースは相手も頭数も毎回違うので、確率の絶対値ではなく距離どうしの差を見てください。</p>';
+  $('out').innerHTML = html;
+}
+
+$('go').addEventListener('click', () => {
+  $('go').disabled = true; $('out').innerHTML = '<p class="note">計算中…</p>';
+  setTimeout(() => { try { run(); } catch (e) { $('out').innerHTML =
+    '<p class="warn">計算に失敗しました: ' + e.message + '</p>'; } $('go').disabled = false; }, 20);
+});
+
+// --- 自己チェック（壊れていたら画面に出す）--------------------------------
+(function selfcheck() {
+  const bad = [];
+  if (allocs(30).length !== 496) bad.push('配分の列挙が496通りでない');
+  if (allocs(5).some(a => a[0] + a[1] + a[2] !== 5)) bad.push('配分の合計が回数と合わない');
+  const c = { sp: 40, pw: 40, st: 40, n: 30, g: G0, cond: '普通', passives: [], add: [0, 0, 0],
+              eq: null, ch: null };
+  const lo = rawScore(horseOf(c, [0, 0, 30], '短距離', '芝'), '短距離', '芝')[0];
+  const hi = rawScore(horseOf(c, [30, 0, 0], '短距離', '芝'), '短距離', '芝')[0];
+  if (!(hi > lo)) bad.push('短距離でスピード全振りが評価されない');
+  if (FIELD.length < 5) bad.push('基準フィールドが足りない');
+  if (bad.length) $('out').innerHTML = '<p class="warn">自己チェック失敗: ' + bad.join(' / ') + '</p>';
+})();
+</script>
+</body>
+</html>

@@ -864,6 +864,18 @@ def regression_tests():
               ('中距離',2.762,3.737),('長距離',2.720,3.680)],
           '直すと194レースで 1着的中 82.0%→82.5%')
 
+    # エッジ下限は Python が正、JS はフォールバック。値を直書きで二重管理すると
+    # 片方だけ変わって静かにズレる（LEAD_SEC で実際にやった）ので、一致を関係で見る。
+    _em = oc.DEFAULT_SETTINGS['edge_min']
+    _js_em = re.search(r"EDGE_MIN:\s*([\d.]+)", _ap)
+    check('P24 エッジ下限が Python と JS で一致している',
+          _js_em is not None and abs(float(_js_em.group(1)) - _em) < 1e-9,
+          f"Python {_em} / JS {_js_em.group(1) if _js_em else '見つからない'}")
+    check('P24 エッジ下限は +EV を切り捨てない値になっている',
+          _em <= 0.02,
+          f'{_em}（96レース実測: 本命1点 予測28.8% → 実測37.5% で過小側。'
+          '切ると人気=安い組だけが落ちて長い目しか残らない）')
+
     check('装備がログに載る前の期間を学習から外している',
           oc.ITEM_LOG_GAP == ('2026-08-17 17:25', '2026-08-19 18:10')
           and 'df_all = df_all[~_gap].copy()' in inspect.getsource(oc.train_model),

@@ -117,7 +117,7 @@ st.set_page_config(page_title="Oasis 予測 v2", page_icon="🐎", layout="wide"
 #  片方だけ更新すると「AttributeError（内容は伏せられます）」になって
 #  原因が分からなくなるので、起動時に分かる形で止める。
 # ---------------------------------------------------------------
-REQUIRED_CORE = "3.20.0"
+REQUIRED_CORE = "3.21.0"
 _NEEDED = [
     "CORE_VERSION", "WIN_MAX_TOTAL_UNITS", "WIN_STAKE_UNIT", "UNBET_ODDS",
     "MAX_TOTAL_UNITS", "SIGMA_SAFETY", "DIST_LIST", "TRACK_LIST",
@@ -439,7 +439,7 @@ with st.sidebar:
     kelly = st.slider("分数ケリー", 0.05, 1.0, 0.25, 0.05,
                       help="0.25=クォーターケリー。小さいほど低分散・低成長。")
     risk = st.slider("1レース上限（資金比）", 0.02, 0.30, 0.10, 0.01)
-    edge = st.slider("エッジ下限 (実効エッジ)", 0.0, 0.50, 0.10, 0.01)
+    edge = st.slider("エッジ下限 (実効エッジ)", 0.0, 0.50, 0.01, 0.01)
     st.caption(f"→ 1レース上限 ≒ {int(risk*bankroll//oc.STAKE_UNIT)}口"
                f"（{int(risk*bankroll):,} rrc / 3連単は最大 {oc.MAX_TOTAL_UNITS}口）")
 

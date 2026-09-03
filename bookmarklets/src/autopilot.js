@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.14.0';
+const AP_VER = '1.15.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -41,7 +41,9 @@ const CFG = {
   // 上限はゲームの上限そのまま（3連単20口・単勝100口）。下限は置かない。
   // 実際に何口入るかは分数ケリー・EDGE_MIN・希薄化が決める。
   TRI_MAX_UNITS: null,      // null = model.json の max_total_units（20口）
-  EDGE_MIN: 0.10,
+  // model.json の defaults.edge_min で上書きされる（Python が正）。ここは古い
+  // model.json を掴んだときのフォールバック。両者は selftest P24 で一致を見る。
+  EDGE_MIN: 0.01,
   MODEL_WEIGHT: 1.0,        // λ。model.json の defaults から上書きされる
   MIN_PROB: 0.003,        // model.json の defaults から上書きされる
   WIN_ON: true,             // 単勝も買う（NPCの初期金があるのでプールが常にある）

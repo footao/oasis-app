@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.20.0'
+CORE_VERSION = '3.21.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -2929,7 +2929,12 @@ def win_bet_picks(names, win_p, odds, bankroll, kelly_frac, edge_min,
 # =====================================================================
 DEFAULT_SETTINGS = dict(
     dist='中距離', track='芝', ground='良', topn=20,
-    bankroll=1_200_000, kelly_fraction=0.25, max_risk_frac=0.10, edge_min=0.10,
+    bankroll=1_200_000, kelly_fraction=0.25, max_risk_frac=0.10,
+    # エッジ下限。0.10 だと「モデルの本命＝人気で安い組」が軒並み落ち、
+    # 誰も賭けていない長い目だけが残る。実測（96レース・8/14以降）でも
+    # 本命1点は 予測28.8% → 実測37.5% と**過小**側で、切る理由が無かった。
+    # +EVなら買う。口数は分数ケリーが決めるので、薄いエッジは薄くしか乗らない。
+    edge_min=0.01,
     carryover_rrc=None,
     unformed_sleeve=False, unformed_max_units=10,
     unformed_p_min=0.05, unformed_edge_min=0.30,
