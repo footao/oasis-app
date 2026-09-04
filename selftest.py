@@ -14,6 +14,7 @@ selftest.py — Oasis 予測ツール v2 の動作確認
   5. ベットログの記録・精算・レポート
 """
 import itertools
+import json
 import math
 import os
 import inspect
@@ -863,6 +864,19 @@ def regression_tests():
           == [('短距離',2.125,2.875),('マイル',2.267,3.067),
               ('中距離',2.762,3.737),('長距離',2.720,3.680)],
           '直すと194レースで 1着的中 82.0%→82.5%')
+
+    check('P25 σ は実収支のある固定値に留めてある',
+          oc.RACE_SIGMA_PIN == 0.01268 and oc.TRI_SIGMA_PIN == 0.01372,
+          f'単勝 {oc.RACE_SIGMA_PIN} / 3連単 {oc.TRI_SIGMA_PIN}'
+          '（自動校正 0.0215/0.0254 に切り替えた 09/02 以降、13レースで的中1本・'
+          '回収率14%。それ以前は57レース中33本・189%）')
+    _mj = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                      'model.json'), encoding='utf-8'))
+    check('P25 配布中の model.json の σ が固定値と一致する（再ビルド忘れの検出）',
+          abs(_mj['race_sigma'] - oc.RACE_SIGMA_PIN) < 1e-9
+          and abs(_mj['tri_sigma'] - oc.TRI_SIGMA_PIN) < 1e-9,
+          f"model.json race {_mj['race_sigma']} / tri {_mj['tri_sigma']}"
+          '（ズレていたら build_autopilot.py を回し直す）')
 
     # エッジ下限は Python が正、JS はフォールバック。値を直書きで二重管理すると
     # 片方だけ変わって静かにズレる（LEAD_SEC で実際にやった）ので、一致を関係で見る。
