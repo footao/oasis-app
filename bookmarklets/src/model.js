@@ -641,7 +641,24 @@ const OasisModel = (() => {
     return cand.slice(0, cap).map(c => [c.names, c.p, eff, 1]);
   }
 
-  return { effectiveStats, sigmaMultiplier, rowFeatures, predictBase,
+  // --- 市場の一番人気の組（Python: market_fav_pick）---
+  // EVは見ない。「市場が一番人気にしている組を薄く買う」だけの別枠。
+  // 同オッズが並んだときの選び方（キー順）も Python と揃える。
+  function marketFavPick(oddsByKey, minOd, units, already) {
+    let bk = null, bo = 0;
+    for (const [k, v] of oddsByKey) {
+      const o = +v;
+      if (!(o > 0)) continue;
+      if (bk === null || o < bo || (o === bo && String(k) < String(bk))) { bk = k; bo = o; }
+    }
+    if (bk === null) return null;
+    const u = Math.trunc(units == null ? 1 : units);
+    if (bo < (minOd == null ? 2.0 : minOd) || u < 1) return null;
+    if (already && already.has && already.has(bk)) return null;
+    return [bk, bo, u];
+  }
+
+  return { effectiveStats, sigmaMultiplier, rowFeatures, predictBase, marketFavPick,
            sameSpeciesFlags, simulateTrifecta, horseSigmas, makeRng,
            pctMults, itemMult, applyItems, leadAdjustedBase,
            marketWinProb, diagnoseOddsFloor, winBetPicksPool,

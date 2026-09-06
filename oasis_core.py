@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.22.0'
+CORE_VERSION = '3.23.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -920,6 +920,18 @@ ITEM_LOG_GAP = ('2026-08-17 17:25', '2026-08-19 18:10')
 # 尤度だけ見ると 0.0254 が最適だが、それは「モデルが外したレース」に引きずられた値で、
 # 賭けに効くのは「当てたレースでどれだけ確信できるか」。実収支のある値に戻す。
 # 上書きをやめて自動校正に戻すなら None にする（そのときは必ず成績を追うこと）。
+# --- 市場本命枠（2026/09/05）------------------------------------------
+# 3連単で**市場が一番人気にしている組**を、EV計算とは別枠で薄く買う。
+# 購入まとめに残っていた「見送りの筆頭」＝市場の一番人気は 8レース連続で的中した
+# （R2216〜R2241）。1口ずつなら回収率213%、表示od 2.0以上の5件に限れば261%。
+# ただしサンプルは8件しかなく、しかも「モデルも上位に挙げた組」に偏っている。
+# **測るために入れる枠**であって、EVを最大化する枠ではない。
+#   - 一番人気の od が MIN_OD 未満なら買わない。od 1.3 台は市場の75%がそこに乗って
+#     いる状態で、自分の口数を足すと実効が 1.25 まで落ちて元返しになる（実測）。
+#   - EV側が既にその組を買っていれば何もしない（2番人気に流さない）。
+MARKET_FAV_MIN_OD = 2.0
+MARKET_FAV_UNITS  = 1
+
 RACE_SIGMA_PIN = 0.01268     # 単勝用（〜09/01 の実績値）
 TRI_SIGMA_PIN  = 0.01372     # 3連単用（〜09/01 の実績値）
 
@@ -1700,6 +1712,7 @@ def export_model_json(bundle, path=None):
                      ('bankroll', 'kelly_fraction', 'max_risk_frac', 'edge_min',
                       'win_edge_min', 'model_weight', 'min_prob',
                       'unformed_max_units', 'unformed_p_min', 'unformed_edge_min')},
+        'market_fav_min_od': MARKET_FAV_MIN_OD, 'market_fav_units': MARKET_FAV_UNITS,
         'win_max_total_units': WIN_MAX_TOTAL_UNITS, 'win_max_units': WIN_MAX_UNITS,
         # 下限オッズ判定（JS 側に 1.5 や 0.02 を直書きさせないため一式を渡す）
         'unbet_odds': UNBET_ODDS, 'odds_step': ODDS_STEP,
@@ -2642,6 +2655,23 @@ def allocate_units_stable(cands, P_total, bankroll, kelly_frac, max_risk_frac,
             eff = (P_total + used * stake_unit) / (Pc + k * stake_unit)
             res[c] = (k, (p * eff - 1) * stake_unit * k, eff)
     return res
+
+
+def market_fav_pick(odds_by_key, min_od=None, units=None, already=()):
+    """市場の一番人気（＝最小オッズ）の組を1点だけ返す。EVは見ない。
+
+    odds_by_key: {組キー: 表示オッズ}
+    戻り値 (組キー, オッズ, 口数) か None。
+    """
+    if not odds_by_key:
+        return None
+    min_od = MARKET_FAV_MIN_OD if min_od is None else float(min_od)
+    units = MARKET_FAV_UNITS if units is None else int(units)
+    # 同オッズが並んだときに Python と JS で違う組を選ばないよう、キー順で決める
+    key, od = min(odds_by_key.items(), key=lambda kv: (float(kv[1]), str(kv[0])))
+    if float(od) < min_od or key in already or units < 1:
+        return None
+    return key, float(od), units
 
 
 def unformed_sleeve_picks(combo_prob, disp, od_of, P_total, p_min=0.05, edge_min=0.30,

@@ -778,7 +778,8 @@ def regression_tests():
     # APIに**拒否されたときだけ**割る。通信エラーでは割らない（二重購入になる）。
     check('P19 autopilot はまず全口数を1リクエストで送る',
           'const buyUnits = async (url, mkBody, label, units, unit, chunk) => {' in _ap
-          and 'if (await post(url, mkBody(units), `${label} ${units}口`, units * unit, true)) return units;' in _ap,
+          and 'const r = await post(url, mkBody(units), `${label} ${units}口`, units * unit, true);' in _ap
+          and "if (r === 'ok') return [units, 0];" in _ap,
           '拒否されたら chunk 口ずつに割り直す')
     check('P19 autopilot は通信エラーでは再送しない',
           'return true; } };' in _ap.replace('\n', ' ').replace('  ', ' ')
@@ -865,6 +866,36 @@ def regression_tests():
               ('中距離',2.762,3.737),('長距離',2.720,3.680)],
           '直すと194レースで 1着的中 82.0%→82.5%')
 
+    _od = {('a',): 3.5, ('b',): 2.4, ('c',): 9.0}
+    check('P27 通信エラーぶんを「買えた」と混ぜない',
+          "return 'unknown'" in _ap and "return 'ok'" in _ap and "return 'fail'" in _ap
+          and '送信不明' in _ap,
+          '2026/09/05 21時: まとめは299,000rrc買った表示なのにBOTに1件も届かなかった。'
+          'post() が通信エラーで true を返していたため。3値にして、まとめに「うちN口 送信不明」を出す')
+    check('P27 通信エラーでも再送しない（二重購入を避ける）',
+          "if (r === 'unknown') return [units, units];" in _ap)
+
+    check('P26 市場の一番人気（最小オッズ）を選ぶ',
+          oc.market_fav_pick(_od) == (('b',), 2.4, 1))
+    check('P26 一番人気が下限オッズ未満なら買わない（希薄化で元返しになるため）',
+          oc.market_fav_pick({('a',): 1.9, ('b',): 5.0}) is None,
+          '2番人気に流さない：一番人気が短いレースは丸ごと見送る')
+    check('P26 EV側が既に買っていれば追加しない',
+          oc.market_fav_pick(_od, already={('b',)}) is None)
+    check('P26 同オッズはキー順で決める（Python と JS で同じ組を選ぶ）',
+          oc.market_fav_pick({('b',): 2.5, ('a',): 2.5})[0] == ('a',))
+    check('P26 市場本命枠は既定オフ（起動しただけなら従来どおり動く）',
+          re.search(r'MARKET_FAV:\s*false', _ap) is not None
+          and "localStorage.getItem(LSM) === '1'" in _ap
+          and "$('_mf').onclick" in _ap,
+          'パネルのボタンで明示的に入れたときだけ効く。状態は localStorage に残る')
+    check('P26 marketFavPick が model.js にもあり autopilot が使っている',
+          'function marketFavPick' in _model_js
+          and 'OasisModel.marketFavPick' in _ap,
+          f'下限 od {oc.MARKET_FAV_MIN_OD} / {oc.MARKET_FAV_UNITS}口'
+          '（見送りの筆頭＝市場の一番人気が R2216〜R2241 で8連続的中。'
+          '1口ずつなら回収率213%、od2.0以上の5件では261%。サンプル8件なので測定枠）')
+
     check('P25 σ は実収支のある固定値に留めてある',
           oc.RACE_SIGMA_PIN == 0.01268 and oc.TRI_SIGMA_PIN == 0.01372,
           f'単勝 {oc.RACE_SIGMA_PIN} / 3連単 {oc.TRI_SIGMA_PIN}'
@@ -950,10 +981,10 @@ def regression_tests():
           '購入まとめ' in _ap and '予測EV' in _ap
           and 'const st = d.u * d.unit, e = st * d.edge;' in _ap,
           'EV = 賭け金 × エッジ')
-    check('P19 autopilot の buyUnits は買えた口数を返す',
-        'if (await post(url, mkBody(u), `${label} ${u}口`, u * unit)) sent += u;' in _ap
-          and 'return sent;' in _ap,
-          '拒否された口数をまとめに入れないため')
+    check('P19 autopilot の buyUnits は [買えた口数, 送信不明の口数] を返す',
+          "if (r === 'ok') sent += u;" in _ap
+          and 'return [sent, unsure];' in _ap,
+          '拒否された口数はまとめに入れない。通信エラーぶんは計上するが「送信不明」として分ける')
     check('P19 autopilot に購入まとめのコピーボタンがある',
           "$('_cp').onclick" in _ap and 'id=_cp' in _ap
           and "const txt = (ST.sum || []).join('\\n\\n');" in _ap

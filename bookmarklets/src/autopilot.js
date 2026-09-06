@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.15.0';
+const AP_VER = '1.18.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -85,6 +85,13 @@ const CFG = {
   // オッズは1件も取りに行かず「未成立スリーブ」として扱う（下の unformed）。
   MIN_POOL: null,           // null = model.json の trifecta_pool_seed を使う
   UNFORMED_ON: true,        // 未成立組（誰も賭けていない組）にも置くか
+  // 市場の一番人気の組を、EVとは別枠で薄く買う（安定枠）。**既定オフ**。
+  // 起動しただけなら従来どおりの動作で、パネルのボタンで明示的に入れたときだけ効く。
+  // 「見送りの筆頭＝市場の一番人気」が8レース連続で来ているのを測るための枠で、
+  // EV最大化ではない。od が短い組は希薄化で元返しになるので下限を置く。
+  MARKET_FAV: false,
+  MARKET_FAV_MIN_OD: 2.0,
+  MARKET_FAV_UNITS: 1,
   UNFORMED_MAX_UNITS: null, // null = model.json の unformed_max_units
   MIN_TRAIN_RACES: 20,      // 学習レースがこれ未満のモデルでは賭けない（雛形のまま等）
   MODEL_URL: 'https://raw.githubusercontent.com/footao/oasis-app/main/model.json',
@@ -128,6 +135,9 @@ function loadState() {
 }
 const saveState = s => { try { localStorage.setItem(LS, JSON.stringify(s)); } catch (e) {} };
 let ST = loadState();
+// 市場本命枠のオン/オフ。既定オフ＝起動しただけなら従来どおり。
+const LSM = 'oasisAutopilotMarketFav';
+let MFAV = CFG.MARKET_FAV || localStorage.getItem(LSM) === '1';
 let PENDING = null;   // 承認待ちの買い目
 
 // ---- アーム（自動購入の予約）----
@@ -193,6 +203,7 @@ ov.innerHTML = '<b style="color:#e2b96f">🛩 オートパイロット v' + AP_V
   + '<div style="display:flex;gap:.4rem;margin-top:.5rem">'
   + '<button id=_now style="flex:1;padding:.6rem;background:#2e7d32;color:#fff;border:none;border-radius:5px;cursor:pointer">今すぐ解析</button>'
   + '<button id=_cp style="padding:.6rem .7rem;background:#3949ab;color:#fff;border:none;border-radius:5px;cursor:pointer">📋 まとめ</button>'
+  + '<button id=_mf style="padding:.6rem .7rem;background:#444;color:#fff;border:none;border-radius:5px;cursor:pointer">市場本命 OFF</button>'
   + '<button id=_clr style="padding:.6rem .7rem;background:#444;color:#fff;border:none;border-radius:5px;cursor:pointer">ログ消去</button>'
   + '<button id=_x style="padding:.6rem .7rem;background:#7a2222;color:#fff;border:none;border-radius:5px;cursor:pointer">停止</button></div>';
 document.body.appendChild(ov);
@@ -555,6 +566,30 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
     used += v[0];
   }
 
+  const bought = new Set();
+  for (const [k, v] of alloc) if (v[0]) bought.add(k);
+
+  // --- ②' 市場の一番人気（EVとは別枠・安定枠）---
+  // EV側が既にその組を買っていれば何もしない（2番人気に流さない）。
+  if (MFAV && budgetU - used >= 1) {
+    const oddsMap = new Map(cands.map(c => [c.key, c.od]));
+    const fav = OasisModel.marketFavPick(
+      oddsMap, D.market_fav_min_od == null ? CFG.MARKET_FAV_MIN_OD : D.market_fav_min_od,
+      Math.min(D.market_fav_units == null ? CFG.MARKET_FAV_UNITS : D.market_fav_units,
+               budgetU - used, M.max_units || 20),
+      bought);
+    if (fav) {
+      const c = byKey.get(fav[0]), k = fav[2], od = fav[1];
+      const eff = (P + (used + k) * U_) / (P / od + k * U_);
+      picks.push({ c: c, k: k, eff: eff, edge: pOf.get(fav[0]) * eff - 1,
+                   p: pOf.get(fav[0]), od: od, favMkt: true,
+                   names: [c.i, c.j, c.k].map(nameOf) });
+      used += k;
+      bought.add(fav[0]);
+      log(`R${sid}: 市場本命枠 ${[c.i, c.j, c.k].map(nameOf).join('→')} od ${od.toFixed(2)} を ${k}口`, '#888');
+    }
+  }
+
   // --- ② 未成立組（誰も賭けていない組）に余りを回す ---
   if (CFG.UNFORMED_ON && budgetU - used >= 1) {
     const disp = pets.map((h, i) => nameOf(i));
@@ -587,8 +622,6 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
   // 買わなかった候補のうち**的中率が高い順**に3件だけ残す。
   // 「予測は合っていたのに、なぜその組を買わなかったのか」は買い目だけ見ても分からない。
   // オッズはレース確定後に API から消えるので、ここで残さないと永久に追えなくなる。
-  const bought = new Set();
-  for (const [k, v] of alloc) if (v[0]) bought.add(k);
   const rej = cands.filter(c => !bought.has(c.key))
     .sort((a, b) => b.p - a.p).slice(0, 3)
     .map(c => ({ names: c.names, p: c.p, od: c.od, eff: c.eff1, edge: c.edge1,
@@ -809,8 +842,11 @@ async function doBuy() {
   const btn = $('_buy'); if (btn) { btn.disabled = true; btn.style.opacity = .5; btn.textContent = '購入中…'; }
   const pl = PENDING;
   let bought = 0;
-  // 戻り値: true = これ以上送らない（成功、または送信済みか不明）
-  //         false = APIに**拒否された**（金は動いていないので割って送り直してよい）
+  // 戻り値: 'ok'      = 買えた（APIが受理した）
+  //         'unknown' = 通信エラー。届いたか不明。これ以上送らない（二重購入を避ける）
+  //         'fail'    = APIに**拒否された**（金は動いていないので割って送り直してよい）
+  // ⚠ 'unknown' を 'ok' と混ぜてはいけない。2026/09/05 21時に、まとめでは
+  //   299,000rrc 買ったことになっているのに BOT に1件も届かない、という取り違えが起きた。
   const post = async (url, body, label, amount, quiet) => {
     try {
       const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -820,7 +856,7 @@ async function doBuy() {
         ST.spent += amount; bought++;
         log(`R${pl.sid} ✅ ${label}`, '#81c784');
         await sleep(400);
-        return true;
+        return 'ok';
       }
       const msg = String(d.detail || d.message || ('HTTP ' + r.status));
       if (!quiet) {
@@ -830,7 +866,7 @@ async function doBuy() {
         }
       }
       await sleep(400);
-      return false;
+      return 'fail';
     } catch (e) {
       // 届いているかもしれないので**予算は減らす**。減らさないと、実際には
       // 買えているのに残額が過大なまま1日分ずっとズレ続ける（安全側に倒す）。
@@ -839,7 +875,7 @@ async function doBuy() {
       log(`R${pl.sid} ⚠ ${label} 通信エラー（送信済みか不明・予算からは引きました）: `
           + esc(e.message), '#ffb74d');
       await sleep(400);
-      return true;
+      return 'unknown';
     }
   };
 
@@ -848,41 +884,45 @@ async function doBuy() {
   // ⚠ 通信エラーのときは割り直さない（送信済みかもしれず、二重購入になる）。
   const buyUnits = async (url, mkBody, label, units, unit, chunk) => {
     if (units > chunk) {
-      if (await post(url, mkBody(units), `${label} ${units}口`, units * unit, true)) return units;
+      const r = await post(url, mkBody(units), `${label} ${units}口`, units * unit, true);
+      if (r === 'ok') return [units, 0];
+      if (r === 'unknown') return [units, units];
       log(`R${pl.sid}: ${label} ${units}口の一括購入が通らないので `
           + `${chunk}口ずつに分けます`, '#888');
     }
-    let leftU = units, sent = 0;
+    let leftU = units, sent = 0, unsure = 0;
     while (leftU > 0) {
       const u = Math.min(leftU, chunk);
-      if (await post(url, mkBody(u), `${label} ${u}口`, u * unit)) sent += u;
+      const r = await post(url, mkBody(u), `${label} ${u}口`, u * unit);
+      if (r === 'ok') sent += u;
+      else if (r === 'unknown') { sent += u; unsure += u; }
       leftU -= u;
     }
-    return sent;   // 買えた口数（通信エラーで届いたか不明なぶんも含む＝安全側）
+    return [sent, unsure];   // [計上した口数, そのうち届いたか不明な口数]
   };
 
   // 買えたぶんだけを積む（post が false ＝ APIに拒否された口数は入れない）。
   const done = [];
   for (const pk of pl.picks) {
-    const got = await buyUnits(`${API}/api/trifecta/buy`,
+    const [got, unsure] = await buyUnits(`${API}/api/trifecta/buy`,
       u => ({ user: AUTH.user, guild: AUTH.guild, race: pl.sid,
               first: pl.pets[pk.c.i].pet_id, second: pl.pets[pk.c.j].pet_id,
               third: pl.pets[pk.c.k].pet_id, amount: u * pl.unit, token: AUTH.token }),
       `3連単 ${pk.names.join('→')} 的中${fx(pk.p * 100, 1)}% `
       + `od${fx(pk.od, 1)}→${fx(pk.eff, 1)} +${fx(pk.edge * 100, 0)}%`,
       pk.k || 1, pl.unit, CFG.TRI_PER_REQ);
-    if (got) done.push({ kind: '3連単', name: pk.names.join('→'), u: got,
-                         unit: pl.unit, p: pk.p, od: pk.od, eff: pk.eff, edge: pk.edge });
+    if (got) done.push({ kind: pk.favMkt ? '市場本命' : '3連単', name: pk.names.join('→'), u: got,
+                         uq: unsure, unit: pl.unit, p: pk.p, od: pk.od, eff: pk.eff, edge: pk.edge });
   }
   for (const w of (pl.win || [])) {
-    const got = await buyUnits(`${API}/api/bet`,
+    const [got, unsure] = await buyUnits(`${API}/api/bet`,
       u => ({ user: AUTH.user, guild: AUTH.guild, race: pl.sid,
               pet_id: pl.pets[w.i].pet_id, amount: u * pl.winUnit, token: AUTH.token }),
       `単勝 ${w.name} 的中${fx(w.p * 100, 1)}% `
       + `od${fx(w.od, 2)}→${fx(w.eff, 2)} +${fx(w.edge * 100, 0)}%`,
       w.units, pl.winUnit, CFG.WIN_PER_REQ);
     if (got) done.push({ kind: '単勝', name: w.name, u: got,
-                         unit: pl.winUnit, p: w.p, od: w.od, eff: w.eff, edge: w.edge });
+                         uq: unsure, unit: pl.winUnit, p: w.p, od: w.od, eff: w.eff, edge: w.edge });
   }
   // ---- 購入まとめ。あとで実結果と突き合わせられるように、買えた買い目だけを
   //      的中率・実効オッズ・予測EV つきで残す。EV = 賭け金 × エッジ。
@@ -903,7 +943,7 @@ async function doBuy() {
       lines.push(`${d.kind} ${d.name}`);
       // od は買う前の表示オッズ、実効は自分の口数で薄まったあと。両方無いと
       // 「入れすぎたのか」「元から安かったのか」が区別できない。
-      lines.push(`　${d.u}口 ${st.toLocaleString()}rrc ・ 的中 ${fx(d.p * 100, 1)}%`
+      lines.push(`　${d.u}口${d.uq ? `（うち${d.uq}口 送信不明）` : ''} ${st.toLocaleString()}rrc ・ 的中 ${fx(d.p * 100, 1)}%`
           + ` ・ od ${d.od == null ? '未成立' : fx(d.od, 2)}→${fx(d.eff, 2)}`
           + ` ・ EV ${e >= 0 ? '+' : ''}${Math.round(e).toLocaleString()}`);
     }
@@ -915,6 +955,13 @@ async function doBuy() {
     }
     lines.push(`合計 ${stake.toLocaleString()}rrc ・ 予測EV ${ev >= 0 ? '+' : ''}`
         + `${Math.round(ev).toLocaleString()}rrc (${fx(ev / stake * 100, 0)}%)`);
+    // 通信エラーぶんは「届いたか不明」。BOTの購入通知が来ていなければ買えていない。
+    const unsureAll = done.reduce((a, d) => a + (d.uq || 0), 0);
+    if (unsureAll) {
+      const unsureRrc = done.reduce((a, d) => a + (d.uq || 0) * d.unit, 0);
+      lines.push(`⚠ ${unsureAll}口 ${unsureRrc.toLocaleString()}rrc は通信エラーで`
+          + `送信できたか不明です。BOTの購入通知が無ければ買えていません`);
+    }
     for (const l of lines) log(l, '#81c784');
     // コピーボタン用に**まとめだけ**を別に貯める。ログは解析の途中経過で
     // 埋まるので、あとで記録として貼るときはこちらが要る。
@@ -1003,6 +1050,23 @@ $('_x').onclick = () => {
 };
 $('_clr').onclick = () => { ST.log = []; ST.sum = []; saveState(ST); render(); };
 // コピーするのは**購入まとめだけ**（解析の途中経過は要らない）。古い順に並べる。
+// 市場本命枠のトグル。日をまたいでも残るが、既定はオフ。
+function renderMfav() {
+  const b = $('_mf');
+  if (!b) return;
+  b.textContent = MFAV ? '市場本命 ON' : '市場本命 OFF';
+  b.style.background = MFAV ? '#2e7d32' : '#444';
+}
+$('_mf').onclick = () => {
+  MFAV = !MFAV;
+  try { localStorage.setItem(LSM, MFAV ? '1' : '0'); } catch (e) {}
+  renderMfav();
+  log(MFAV
+      ? `市場本命枠オン: 市場の一番人気の組を od ${(M.defaults || {}).market_fav_min_od || CFG.MARKET_FAV_MIN_OD} 以上のとき ${(M.defaults || {}).market_fav_units || CFG.MARKET_FAV_UNITS}口 買います（EVは見ません）`
+      : '市場本命枠オフ: 従来どおり EV でのみ買います', '#4fc3f7');
+};
+renderMfav();
+
 $('_cp').onclick = async () => {
   const txt = (ST.sum || []).join('\n\n');
   if (!txt) { log('まだ購入まとめがありません', '#888'); return; }
