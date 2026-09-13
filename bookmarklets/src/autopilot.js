@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.18.0';
+const AP_VER = '1.19.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -45,7 +45,9 @@ const CFG = {
   // model.json を掴んだときのフォールバック。両者は selftest P24 で一致を見る。
   EDGE_MIN: 0.01,
   MODEL_WEIGHT: 1.0,        // λ。model.json の defaults から上書きされる
-  MIN_PROB: 0.003,        // model.json の defaults から上書きされる
+  // 3連単の的中率下限。model.json の defaults.min_prob が正（単勝には掛からない）。
+  // 実ベット52レースで「予測5〜15%」の帯が実測1.1%・回収率24%だったので切る。
+  MIN_PROB: 0.20,
   WIN_ON: true,             // 単勝も買う（NPCの初期金があるのでプールが常にある）
   // 単勝プールの実測（試し買い）。1口ずつ買って前後のオッズの動きから逆算する。
   // **これは実際の購入**なので、アーム中（＝人が購入を許可したレース）でしか走らせない。
@@ -601,7 +603,7 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
     const odOf = names => odByName.get(names.join(' / ')) || null;
     const sleeve = OasisModel.unformedSleevePicks(
       combo.map(c => [[c.i, c.j, c.k], c.p]), disp, odOf, P,
-      { pMin: D.unformed_p_min || 0.05, edgeMin: D.unformed_edge_min || 0.30,
+      { pMin: D.unformed_p_min || 0.20, edgeMin: D.unformed_edge_min || 0.30,
         maxUnits: CFG.UNFORMED_MAX_UNITS, remainingBudget: budgetU - used,
         stakeUnit: U_, pScale: lam });
     const idxOf = new Map(disp.map((x, i) => [x, i]));

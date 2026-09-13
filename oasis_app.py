@@ -117,7 +117,7 @@ st.set_page_config(page_title="Oasis 予測 v2", page_icon="🐎", layout="wide"
 #  片方だけ更新すると「AttributeError（内容は伏せられます）」になって
 #  原因が分からなくなるので、起動時に分かる形で止める。
 # ---------------------------------------------------------------
-REQUIRED_CORE = "3.23.0"
+REQUIRED_CORE = "3.24.0"
 _NEEDED = [
     "CORE_VERSION", "WIN_MAX_TOTAL_UNITS", "WIN_STAKE_UNIT", "UNBET_ODDS",
     "MAX_TOTAL_UNITS", "SIGMA_SAFETY", "DIST_LIST", "TRACK_LIST",
@@ -473,10 +473,11 @@ with st.sidebar:
         n_sim = st.select_slider("モンテカルロ試行数", [200_000, 400_000, 800_000],
                                  value=oc.N_SIM)
         min_prob = st.number_input(
-            "最小モデル的中率（これ未満は買わない）", min_value=0.0, max_value=0.05,
-            value=0.003, step=0.001, format="%.3f",
-            help="確率が小さすぎる組はモンテカルロの推定ノイズが支配的で、"
-                 "「偽の+EV」のほぼ全てがこの領域から出ます。既定0.3%。")
+            "最小モデル的中率（これ未満の3連単は買わない）", min_value=0.0, max_value=0.50,
+            value=0.20, step=0.01, format="%.2f",
+            help="実ベット52レースの検証で、予測5〜15%の帯は 93件・実測1.1%・回収率24% と"
+                 "壊れていました（予測どおりなら8.5本当たるはずが1本）。既定20%。"
+                 "単勝には掛かりません。")
 
 settings = dict(dist=dist, track=track, ground=ground, topn=topn,
                 bankroll=bankroll, kelly_fraction=kelly, max_risk_frac=risk,

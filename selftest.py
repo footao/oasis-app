@@ -867,6 +867,21 @@ def regression_tests():
           '直すと194レースで 1着的中 82.0%→82.5%')
 
     _od = {('a',): 3.5, ('b',): 2.4, ('c',): 9.0}
+    _mp = oc.DEFAULT_SETTINGS['min_prob']
+    _js_mp = re.search(r'MIN_PROB:\s*([\d.]+)', _ap)
+    check('P28 3連単の的中率下限が Python と JS で一致している',
+          _js_mp is not None and abs(float(_js_mp.group(1)) - _mp) < 1e-9,
+          f"Python {_mp} / JS {_js_mp.group(1) if _js_mp else '見つからない'}")
+    check('P28 的中率5〜15%の帯を買わない値になっている',
+          _mp >= 0.15 and oc.DEFAULT_SETTINGS['unformed_p_min'] >= 0.15,
+          f"min_prob {_mp} / 未成立 {oc.DEFAULT_SETTINGS['unformed_p_min']}"
+          '（実ベット52レース: 予測5〜15%の帯は93件・予測9.1%→実測1.1%・回収率24%。'
+          '切ると全体123%→140%、σ差し戻し後34レースで139%→147%）')
+    check('P28 下限は単勝には掛からない（単勝は較正が合っている）',
+          'win_edge_min' in inspect.getsource(oc.analyze)
+          and 'min_prob' not in inspect.getsource(oc.win_bet_picks_pool),
+          '予測80%以上の帯は 予測94.5% → 実測93.9%')
+
     check('P27 通信エラーぶんを「買えた」と混ぜない',
           "return 'unknown'" in _ap and "return 'ok'" in _ap and "return 'fail'" in _ap
           and '送信不明' in _ap,
