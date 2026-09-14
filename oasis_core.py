@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.24.0'
+CORE_VERSION = '3.25.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -929,6 +929,17 @@ ITEM_LOG_GAP = ('2026-08-17 17:25', '2026-08-19 18:10')
 #   - 一番人気の od が MIN_OD 未満なら買わない。od 1.3 台は市場の75%がそこに乗って
 #     いる状態で、自分の口数を足すと実効が 1.25 まで落ちて元返しになる（実測）。
 #   - EV側が既にその組を買っていれば何もしない（2番人気に流さない）。
+# --- 安牌モード（2026/09/14）--------------------------------------------
+# 「当たる買い目だけ買ってじわじわ増やす」ための的中率下限。単勝・3連単の両方に掛ける。
+# 実ベット52レース（投入 9,101,000 rrc）を着順と突き合わせた結果:
+#     現状（全部買う）  222件  回収率 123%  的中 49/222 (22%)
+#     的中率35%以上だけ  62件  回収率 155%  的中 40/62  (65%)
+#     **的中率50%以上だけ 45件 回収率 166% 的中 37/45 (82%)**
+#     的中率80%以上だけ  33件  回収率 147%  的中 31/33 (94%)
+# 回収率も的中率も上がる。大穴の一撃が無くなるぶん、増え方は緩やかで安定する。
+# 既定オフ（オートパイロットのパネルで切り替え）。
+SAFE_P_MIN = 0.50
+
 MARKET_FAV_MIN_OD = 2.0
 MARKET_FAV_UNITS  = 1
 
@@ -1713,6 +1724,7 @@ def export_model_json(bundle, path=None):
                       'win_edge_min', 'model_weight', 'min_prob',
                       'unformed_max_units', 'unformed_p_min', 'unformed_edge_min')},
         'market_fav_min_od': MARKET_FAV_MIN_OD, 'market_fav_units': MARKET_FAV_UNITS,
+        'safe_p_min': SAFE_P_MIN,
         'win_max_total_units': WIN_MAX_TOTAL_UNITS, 'win_max_units': WIN_MAX_UNITS,
         # 下限オッズ判定（JS 側に 1.5 や 0.02 を直書きさせないため一式を渡す）
         'unbet_odds': UNBET_ODDS, 'odds_step': ODDS_STEP,

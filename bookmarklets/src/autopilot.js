@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.19.0';
+const AP_VER = '1.20.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -92,6 +92,10 @@ const CFG = {
   // 「見送りの筆頭＝市場の一番人気」が8レース連続で来ているのを測るための枠で、
   // EV最大化ではない。od が短い組は希薄化で元返しになるので下限を置く。
   MARKET_FAV: false,
+  // 安牌モード。オンにすると単勝・3連単とも「的中率がこの値以上」の買い目しか買わない。
+  // EV最大化ではなく、当たる買い目だけでじわじわ増やすための枠。既定オフ。
+  SAFE_MODE: false,
+  SAFE_P_MIN: 0.50,       // model.json の defaults.safe_p_min で上書きされる
   MARKET_FAV_MIN_OD: 2.0,
   MARKET_FAV_UNITS: 1,
   UNFORMED_MAX_UNITS: null, // null = model.json の unformed_max_units
@@ -140,6 +144,15 @@ let ST = loadState();
 // 市場本命枠のオン/オフ。既定オフ＝起動しただけなら従来どおり。
 const LSM = 'oasisAutopilotMarketFav';
 let MFAV = CFG.MARKET_FAV || localStorage.getItem(LSM) === '1';
+// 安牌モード。既定オフ＝起動しただけなら従来どおり。
+const LSS = 'oasisAutopilotSafeMode';
+let SAFE = CFG.SAFE_MODE || localStorage.getItem(LSS) === '1';
+// model.json の設定値。トップレベル → defaults → CFG のフォールバック。
+// ⚠ market_fav_min_od は defaults の下ではなくトップレベルに出ているのに
+//   D.market_fav_min_od を見ていた。既定値と同じ 2.0 だったので気づけなかった。
+const mNum = (k, d) => (M && M[k] != null ? +M[k]
+                        : (M && M.defaults && M.defaults[k] != null ? +M.defaults[k] : d));
+const safeP = () => mNum('safe_p_min', CFG.SAFE_P_MIN);
 let PENDING = null;   // 承認待ちの買い目
 
 // ---- アーム（自動購入の予約）----
@@ -206,6 +219,7 @@ ov.innerHTML = '<b style="color:#e2b96f">🛩 オートパイロット v' + AP_V
   + '<button id=_now style="flex:1;padding:.6rem;background:#2e7d32;color:#fff;border:none;border-radius:5px;cursor:pointer">今すぐ解析</button>'
   + '<button id=_cp style="padding:.6rem .7rem;background:#3949ab;color:#fff;border:none;border-radius:5px;cursor:pointer">📋 まとめ</button>'
   + '<button id=_mf style="padding:.6rem .7rem;background:#444;color:#fff;border:none;border-radius:5px;cursor:pointer">市場本命 OFF</button>'
+  + '<button id=_sf style="padding:.6rem .7rem;background:#444;color:#fff;border:none;border-radius:5px;cursor:pointer">安牌 OFF</button>'
   + '<button id=_clr style="padding:.6rem .7rem;background:#444;color:#fff;border:none;border-radius:5px;cursor:pointer">ログ消去</button>'
   + '<button id=_x style="padding:.6rem .7rem;background:#7a2222;color:#fff;border:none;border-radius:5px;cursor:pointer">停止</button></div>';
 document.body.appendChild(ov);
@@ -536,7 +550,7 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
   const byKey = new Map(), pOf = new Map(), cands = [];
   for (const c of combo) {
     const k = key3(c), od = odds.get(k);
-    if (!od || od <= 1 || c.p < CFG.MIN_PROB) continue;
+    if (!od || od <= 1 || c.p < Math.max(CFG.MIN_PROB, SAFE ? safeP() : 0)) continue;
     const odRaw = oddsRaw.get(k) || od;
     const pBet = lam * c.p + (1 - lam) * ((1 / odRaw) / norm);
     const eff1 = (P + U_) / (P / od + U_);
@@ -576,9 +590,8 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
   if (MFAV && budgetU - used >= 1) {
     const oddsMap = new Map(cands.map(c => [c.key, c.od]));
     const fav = OasisModel.marketFavPick(
-      oddsMap, D.market_fav_min_od == null ? CFG.MARKET_FAV_MIN_OD : D.market_fav_min_od,
-      Math.min(D.market_fav_units == null ? CFG.MARKET_FAV_UNITS : D.market_fav_units,
-               budgetU - used, M.max_units || 20),
+      oddsMap, mNum('market_fav_min_od', CFG.MARKET_FAV_MIN_OD),
+      Math.min(mNum('market_fav_units', CFG.MARKET_FAV_UNITS), budgetU - used, M.max_units || 20),
       bought);
     if (fav) {
       const c = byKey.get(fav[0]), k = fav[2], od = fav[1];
@@ -763,8 +776,10 @@ function analyseWin(sid, pets, winP, measuredPool, budgetLeft) {
   const D = M.defaults || {};
   // 同名馬がいると name で引き戻せないので、一意キー「i:名前」を渡して後で剥がす。
   const key = pets.map((h, i) => `${i}:${h.display_name || h.name}`);
+  // 安牌モードでは下限未満の馬を確率0にして渡す。後から間引くと口数が宙に浮くため。
+  const pUse = SAFE ? pBet.map(p => (p >= safeP() ? p : 0)) : pBet;
   const [picks] = OasisModel.winBetPicksPool(
-    key, pBet, fl.odds_eff, pool,
+    key, pUse, fl.odds_eff, pool,
     bankroll(), D.kelly_fraction || 0.25, D.win_edge_min || 0.15,
     { stakeUnit: WU,
       // ⚠ totalUnits は「このレースの**合計**上限」であって残り枠ではない。
@@ -1068,6 +1083,23 @@ $('_mf').onclick = () => {
       : '市場本命枠オフ: 従来どおり EV でのみ買います', '#4fc3f7');
 };
 renderMfav();
+
+// 安牌モードのトグル。日をまたいでも残るが、既定はオフ。
+function renderSafe() {
+  const b = $('_sf');
+  if (!b) return;
+  b.textContent = SAFE ? '安牌 ON' : '安牌 OFF';
+  b.style.background = SAFE ? '#2e7d32' : '#444';
+}
+$('_sf').onclick = () => {
+  SAFE = !SAFE;
+  try { localStorage.setItem(LSS, SAFE ? '1' : '0'); } catch (e) {}
+  renderSafe();
+  log(SAFE
+      ? `安牌モード オン: 的中率 ${(safeP() * 100) | 0}% 以上の買い目だけ買います（単勝・3連単とも）`
+      : '安牌モード オフ: 従来どおり EV で買います', '#4fc3f7');
+};
+renderSafe();
 
 $('_cp').onclick = async () => {
   const txt = (ST.sum || []).join('\n\n');
