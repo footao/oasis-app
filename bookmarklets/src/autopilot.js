@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.21.0';
+const AP_VER = '1.23.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -92,6 +92,11 @@ const CFG = {
   // 「見送りの筆頭＝市場の一番人気」が8レース連続で来ているのを測るための枠で、
   // EV最大化ではない。od が短い組は希薄化で元返しになるので下限を置く。
   MARKET_FAV: false,
+  // 市場本命の的中率は **min(0.95, max(0.50, 1.3/od))**。モデルの確率は使わない。
+  MARKET_FAV_P: 0.50,
+  MARKET_FAV_RATIO: 1.3,
+  MARKET_FAV_P_MAX: 0.95,
+  MARKET_FAV_MAX_UNITS: 8,
   // 安牌モード。オンにすると**3連単だけ**「的中率がこの値以上」に絞る。
   // 単勝は対象外（較正が合っていて実績も出ているので触らない）。既定オフ。
   SAFE_MODE: false,
@@ -488,6 +493,9 @@ async function analyseRace(sid, info, canBuy) {
   if (cost > raceLeft) { log(`R${sid}: 予算 ${raceLeft.toLocaleString()} rrc を超えるため見送り`, '#ffb74d'); return null; }
   return { sid, pets: wpets, picks: triPicks.picks, win: winPicks.picks, cost,
            rej: triPicks.rej || [],
+           // まとめ（機械可読）に載せる文脈。後から実結果と突き合わせるときに要る。
+           dist: dist, track: track, nField: n,
+           poolTri: triPicks.pool || null, poolWin: wpool || null, bank: bankroll(),
            unit: U_, winUnit: M.win_stake_unit || 1000, canBuy: !!canBuy };
 }
 
@@ -594,14 +602,29 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
       Math.min(mNum('market_fav_units', CFG.MARKET_FAV_UNITS), budgetU - used, M.max_units || 20),
       bought);
     if (fav) {
-      const c = byKey.get(fav[0]), k = fav[2], od = fav[1];
+      const c = byKey.get(fav[0]), od = fav[1];
+      // 口数はモデルの確率ではなく**実測の的中率**（market_fav_p）で決める。
+      // モデルはこの組を平均19.3%と言うが、実測は57%（od2〜4なら69%）。
+      // オッズが安いほど的中率は高い。一律50%だと od1.65 で 0.82 となり買えない。
+      const fp = Math.min(mNum('market_fav_p_max', CFG.MARKET_FAV_P_MAX),
+                          Math.max(mNum('market_fav_p', CFG.MARKET_FAV_P),
+                                   mNum('market_fav_ratio', CFG.MARKET_FAV_RATIO) / od));
+      const room = Math.min(budgetU - used, M.max_units || 20,
+                            mNum('market_fav_max_units', CFG.MARKET_FAV_MAX_UNITS));
+      const kEv = OasisModel.optimalUnitsEv(fp, od, P, U_, room)[0];
+      // 資金が細いときに張り過ぎないよう、分数ケリーでも頭を押さえる
+      const kKelly = Math.floor((D.kelly_fraction || 0.25) * ((fp * od - 1) / (od - 1))
+                                * bankroll() / U_);
+      // 見積もりでEVが立たないなら買わない（「最低1口」の下駄で損を確定させない）
+      const k = fp * od <= 1 ? 0 : Math.max(1, Math.min(kEv || 1, Math.max(kKelly, 1), room));
       const eff = (P + (used + k) * U_) / (P / od + k * U_);
-      picks.push({ c: c, k: k, eff: eff, edge: pOf.get(fav[0]) * eff - 1,
-                   p: pOf.get(fav[0]), od: od, favMkt: true,
-                   names: [c.i, c.j, c.k].map(nameOf) });
+      if (k > 0) {
+      picks.push({ c: c, k: k, eff: eff, edge: fp * eff - 1, p: fp, od: od, favMkt: true,
+                   pModel: pOf.get(fav[0]), names: [c.i, c.j, c.k].map(nameOf) });
       used += k;
-      bought.add(fav[0]);
-      log(`R${sid}: 市場本命枠 ${[c.i, c.j, c.k].map(nameOf).join('→')} od ${od.toFixed(2)} を ${k}口`, '#888');
+      bought.add(fav[0]); }
+      log(`R${sid}: 市場本命枠 ${[c.i, c.j, c.k].map(nameOf).join('→')} od ${od.toFixed(2)} を ${k}口`
+          + `（的中率は実測の ${(fp * 100) | 0}% で見積もり。モデルは ${(pOf.get(fav[0]) * 100).toFixed(1)}%）`, '#888');
     }
   }
 
@@ -643,7 +666,7 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
                  why: c.edge1 < CFG.EDGE_MIN
                    ? `エッジ${(c.edge1 * 100).toFixed(0)}%<${(CFG.EDGE_MIN * 100) | 0}%`
                    : '予算・口数の上限' }));
-  return { picks: picks, cost: used * U_, rej: rej };
+  return { picks: picks, cost: used * U_, rej: rej, pool: P };
 }
 
 // ---- 単勝プールの実測（試し買い）----
@@ -928,8 +951,11 @@ async function doBuy() {
       `3連単 ${pk.names.join('→')} 的中${fx(pk.p * 100, 1)}% `
       + `od${fx(pk.od, 1)}→${fx(pk.eff, 1)} +${fx(pk.edge * 100, 0)}%`,
       pk.k || 1, pl.unit, CFG.TRI_PER_REQ);
-    if (got) done.push({ kind: pk.favMkt ? '市場本命' : '3連単', name: pk.names.join('→'), u: got,
-                         uq: unsure, unit: pl.unit, p: pk.p, od: pk.od, eff: pk.eff, edge: pk.edge });
+    if (got) done.push({ kind: pk.favMkt ? '市場本命' : '3連単',
+                         src: pk.favMkt ? 'mfav' : (pk.unformed ? 'sleeve' : 'ev'),
+                         names: pk.names, name: pk.names.join('→'), u: got,
+                         uq: unsure, unit: pl.unit, p: pk.p, pm: pk.pModel == null ? null : pk.pModel,
+                         od: pk.od, eff: pk.eff, edge: pk.edge });
   }
   for (const w of (pl.win || [])) {
     const [got, unsure] = await buyUnits(`${API}/api/bet`,
@@ -938,50 +964,44 @@ async function doBuy() {
       `単勝 ${w.name} 的中${fx(w.p * 100, 1)}% `
       + `od${fx(w.od, 2)}→${fx(w.eff, 2)} +${fx(w.edge * 100, 0)}%`,
       w.units, pl.winUnit, CFG.WIN_PER_REQ);
-    if (got) done.push({ kind: '単勝', name: w.name, u: got,
-                         uq: unsure, unit: pl.winUnit, p: w.p, od: w.od, eff: w.eff, edge: w.edge });
+    if (got) done.push({ kind: '単勝', src: 'win', names: [w.name], name: w.name, u: got,
+                         uq: unsure, unit: pl.winUnit, p: w.p, pm: null,
+                         od: w.od, eff: w.eff, edge: w.edge });
   }
-  // ---- 購入まとめ。あとで実結果と突き合わせられるように、買えた買い目だけを
-  //      的中率・実効オッズ・予測EV つきで残す。EV = 賭け金 × エッジ。
+  // ---- 購入まとめ。**人が読む用ではなく、後から機械で集計する用**。
+  //      見出し1行＋JSON 1行。Discord に貼っても壊れない1行JSONにしてある。
+  //      後から実結果（races.jsonl の着順）と突き合わせて、帯ごとの的中率・回収率・
+  //      モード別の成績を出すのに必要な文脈（プール・所持金・モード・版）を全部載せる。
+  //      ⚠ 時刻に半角コロンを使わない。Discord が `:59:` を絵文字として食う。
   if (done.length) {
-    let stake = 0, ev = 0;
-    // ⚠ 時刻を 14:59:49 と書くと Discord が `:59:` を絵文字コードと読んで
-    //   `<:59:1482…>` に化ける。コロンを使わない書き方にする。
+    const stake = done.reduce((a, d) => a + d.u * d.unit, 0);
     const t = new Date();
     const stamp = `${t.getFullYear()}/${t.getMonth() + 1}/${t.getDate()} `
       + `${t.getHours()}時${String(t.getMinutes()).padStart(2, '0')}分`;
-    const lines = [`━━ R${pl.sid} 購入まとめ ━━`,
-      stamp + (pl.took == null ? '' : ` ・ 解析 ${fx(pl.took, 1)}s`)];
-    for (const d of done) {
-      const st = d.u * d.unit, e = st * d.edge;
-      stake += st; ev += e;
-      // スマホの Discord は1行が短い。買い目名と数字を分けて、
-      // どちらも折り返さない長さに収める。
-      lines.push(`${d.kind} ${d.name}`);
-      // od は買う前の表示オッズ、実効は自分の口数で薄まったあと。両方無いと
-      // 「入れすぎたのか」「元から安かったのか」が区別できない。
-      lines.push(`　${d.u}口${d.uq ? `（うち${d.uq}口 送信不明）` : ''} ${st.toLocaleString()}rrc ・ 的中 ${fx(d.p * 100, 1)}%`
-          + ` ・ od ${d.od == null ? '未成立' : fx(d.od, 2)}→${fx(d.eff, 2)}`
-          + ` ・ EV ${e >= 0 ? '+' : ''}${Math.round(e).toLocaleString()}`);
-    }
-    // 買わなかった上位候補。あとで「当たり目を検討したのか」を追えるようにする。
-    for (const r of (pl.rej || [])) {
-      lines.push(`見送 ${r.names.join('→')}`);
-      lines.push(`　的中 ${fx(r.p * 100, 1)}% ・ od ${fx(r.od, 2)}→${fx(r.eff, 2)}`
-          + ` ・ エッジ ${r.edge >= 0 ? '+' : ''}${fx(r.edge * 100, 0)}% ・ ${r.why}`);
-    }
-    lines.push(`合計 ${stake.toLocaleString()}rrc ・ 予測EV ${ev >= 0 ? '+' : ''}`
-        + `${Math.round(ev).toLocaleString()}rrc (${fx(ev / stake * 100, 0)}%)`);
-    // 通信エラーぶんは「届いたか不明」。BOTの購入通知が来ていなければ買えていない。
+    const r3 = x => (x == null ? null : Math.round(x * 1000) / 1000);
+    const rec = {
+      v: AP_VER, c: M.core_version, sid: pl.sid, stamp: stamp,
+      took: pl.took == null ? null : r3(pl.took),
+      d: pl.dist, s: pl.track, nf: pl.nField,
+      pool3: pl.poolTri == null ? null : Math.round(pl.poolTri),
+      poolW: pl.poolWin == null ? null : Math.round(pl.poolWin),
+      bank: Math.round(pl.bank || 0),
+      sig: [M.race_sigma, M.tri_sigma],
+      cfg: { safe: SAFE ? 1 : 0, mfav: MFAV ? 1 : 0,
+             pmin: M.defaults ? M.defaults.min_prob : null,
+             safep: SAFE ? safeP() : null, edge: CFG.EDGE_MIN, kelly: D.kelly_fraction || 0.25 },
+      bets: done.map(d => ({ t: d.src === 'win' ? 'win' : 'tri', src: d.src, n: d.names,
+                             u: d.u, unit: d.unit, unsure: d.uq || 0,
+                             p: r3(d.p), pm: r3(d.pm), od: r3(d.od), eff: r3(d.eff) })),
+      rej: (pl.rej || []).map(r => ({ n: r.names, p: r3(r.p), od: r3(r.od), eff: r3(r.eff),
+                                      edge: r3(r.edge), w: r.why })),
+    };
+    // 送信不明は見出しにも出す。JSON の unsure だけだと、貼られた人が気づけない。
     const unsureAll = done.reduce((a, d) => a + (d.uq || 0), 0);
-    if (unsureAll) {
-      const unsureRrc = done.reduce((a, d) => a + (d.uq || 0) * d.unit, 0);
-      lines.push(`⚠ ${unsureAll}口 ${unsureRrc.toLocaleString()}rrc は通信エラーで`
-          + `送信できたか不明です。BOTの購入通知が無ければ買えていません`);
-    }
+    const lines = [`━━ R${pl.sid} ${stamp} ・ ${done.reduce((a, d) => a + d.u, 0)}口 ${stake.toLocaleString()}rrc`
+                   + (unsureAll ? ` ・ ⚠送信不明 ${unsureAll}口（BOTの購入通知が無ければ買えていません）` : '') + ' ━━',
+                   JSON.stringify(rec)];
     for (const l of lines) log(l, '#81c784');
-    // コピーボタン用に**まとめだけ**を別に貯める。ログは解析の途中経過で
-    // 埋まるので、あとで記録として貼るときはこちらが要る。
     ST.sum = (ST.sum || []).concat([lines.join('\n')]).slice(-20);
     saveState(ST);
   }

@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.26.0'
+CORE_VERSION = '3.28.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -947,7 +947,29 @@ ITEM_LOG_GAP = ('2026-08-17 17:25', '2026-08-19 18:10')
 SAFE_P_MIN = 0.25
 
 MARKET_FAV_MIN_OD = 2.0
-MARKET_FAV_UNITS  = 1
+# 市場本命の的中率は**モデルではなく実測値**を使う。モデルはここを大きく過小評価する。
+# 実ベット52レースのうち「3連単を買い、かつ見送りも記録された」35レース:
+#     買った組のどれかが的中        12/35 = 34%
+#     **見送った市場本命が的中      20/35 = 57%**   モデルの予測は平均 19.3%
+#     どちらも外れ                  3/35
+#   od2〜4 に絞ると: 市場本命 9/13 (69%) / 買った組 2/13 (15%) / モデル予測 17.5%
+# つまり「モデルが安牌を当てているのにオッズが安くてEVが立たず見送る → 次善の目に
+# 賭けて取り逃す」が実際に起きていた。市場の本命だけは実測の的中率で見積もる。
+# 0.50 は実測 57〜69% より**低め**に置いた保守値。
+# オッズが安い帯ほど一律50%では低すぎる（od1.65 なら 0.5×1.65=0.82 で買えない）。
+# 実測の「実際の的中率 ÷ 市場の暗黙確率(1/od)」:
+#     od 1.0〜1.5  実測100% ÷ 市場76% = 1.32倍
+#     od 2.0〜3.0  実測 78% ÷ 市場42% = 1.86倍
+#     od 5.0以上   実測 33% ÷ 市場11% = 3.0倍
+# 倍率は 1.3（いちばん小さい帯に合わせた保守値）。
+#     的中率 = min(0.95, max(MARKET_FAV_P, MARKET_FAV_RATIO / od))
+# 35レースの実測: 一律50%・od2.0以上 → 25レース190口 190% ／
+#                 この式・od1.0以上  → 35レース280口 164%（利益額はわずかに上）
+MARKET_FAV_P = 0.50            # 下限（オッズが長い帯はこちらが効く）
+MARKET_FAV_RATIO = 1.3         # 市場の暗黙確率の何倍と見るか
+MARKET_FAV_P_MAX = 0.95        # 上限
+MARKET_FAV_UNITS  = 1          # 下限（最低1口）
+MARKET_FAV_MAX_UNITS = 8       # 上限。25レースの実測では 8口でも回収率188%
 
 RACE_SIGMA_PIN = 0.01268     # 単勝用（〜09/01 の実績値）
 TRI_SIGMA_PIN  = 0.01372     # 3連単用（〜09/01 の実績値）
@@ -1730,6 +1752,8 @@ def export_model_json(bundle, path=None):
                       'win_edge_min', 'model_weight', 'min_prob',
                       'unformed_max_units', 'unformed_p_min', 'unformed_edge_min')},
         'market_fav_min_od': MARKET_FAV_MIN_OD, 'market_fav_units': MARKET_FAV_UNITS,
+        'market_fav_p': MARKET_FAV_P, 'market_fav_max_units': MARKET_FAV_MAX_UNITS,
+        'market_fav_ratio': MARKET_FAV_RATIO, 'market_fav_p_max': MARKET_FAV_P_MAX,
         'safe_p_min': SAFE_P_MIN,
         'win_max_total_units': WIN_MAX_TOTAL_UNITS, 'win_max_units': WIN_MAX_UNITS,
         # 下限オッズ判定（JS 側に 1.5 や 0.02 を直書きさせないため一式を渡す）

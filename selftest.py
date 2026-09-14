@@ -903,11 +903,21 @@ def regression_tests():
 
     check('P27 通信エラーぶんを「買えた」と混ぜない',
           "return 'unknown'" in _ap and "return 'ok'" in _ap and "return 'fail'" in _ap
-          and '送信不明' in _ap,
+          and 'unsure: d.uq || 0' in _ap and '⚠送信不明' in _ap,
           '2026/09/05 21時: まとめは299,000rrc買った表示なのにBOTに1件も届かなかった。'
           'post() が通信エラーで true を返していたため。3値にして、まとめに「うちN口 送信不明」を出す')
     check('P27 通信エラーでも再送しない（二重購入を避ける）',
           "if (r === 'unknown') return [units, units];" in _ap)
+
+    check('P30 市場本命の口数はモデルではなく実測の的中率で決める',
+          "mNum('market_fav_p'" in _ap and 'OasisModel.optimalUnitsEv(fp, od, P, U_, room)' in _ap
+          and oc.MARKET_FAV_P == 0.50,
+          '実ベット35レース: 見送った市場本命が的中 20/35(57%)、モデルの予測は平均19.3%。'
+          'od2〜4 なら 9/13(69%) に対しモデル17.5%。買った組は 12/35(34%)')
+    check('P30 市場本命枠にも上限と分数ケリーが効く',
+          "mNum('market_fav_max_units'" in _ap and 'kKelly' in _ap
+          and oc.MARKET_FAV_MAX_UNITS == 8,
+          '25レースの実測では8口でも回収率188%だが、資金が細いときはケリーが頭を押さえる')
 
     check('P26 市場の一番人気（最小オッズ）を選ぶ',
           oc.market_fav_pick(_od) == (('b',), 2.4, 1))
@@ -1000,21 +1010,30 @@ def regression_tests():
     check('P22 買わなかった上位候補をまとめに残す',
           "const rej = cands.filter(c => !bought.has(c.key))" in _ap
           and '.sort((a, b) => b.p - a.p).slice(0, 3)' in _ap
-          and '見送 ${r.names.join(' in _ap,
-          '的中率が高い順に3件、オッズ・エッジ・見送り理由つき')
+          and 'rej: (pl.rej || []).map(r => ({ n: r.names' in _ap,
+          '的中率が高い順に3件、オッズ・エッジ・見送り理由つきで JSON に載せる')
     check('P22 買い目に買う前と買ったあとの両方のオッズを出す',
-          "od ${d.od == null ? '未成立' : fx(d.od, 2)}→${fx(d.eff, 2)}" in _ap
-          and 'p: pk.p, od: pk.od, eff: pk.eff' in _ap
-          and 'p: w.p, od: w.od, eff: w.eff' in _ap,
+          'od: r3(d.od), eff: r3(d.eff)' in _ap
+          and 'od: pk.od, eff: pk.eff' in _ap
+          and 'od: w.od, eff: w.eff' in _ap,
           'v1.12.0 で買う前のオッズを落としていたのを戻した')
 
     check('P19 autopilot は購入まとめに解析秒数を出す',
-          'if (pl) pl.took = took;' in _ap and '解析 ${fx(pl.took, 1)}s' in _ap)
+          'if (pl) pl.took = took;' in _ap and 'took: pl.took == null ? null : r3(pl.took)' in _ap)
 
-    check('P19 autopilot は購入後にまとめを出す',
-          '購入まとめ' in _ap and '予測EV' in _ap
-          and 'const st = d.u * d.unit, e = st * d.edge;' in _ap,
-          'EV = 賭け金 × エッジ')
+    # まとめは人が読む形ではなく、後から機械で集計する形（見出し1行＋JSON 1行）。
+    check('P31 購入まとめは機械可読（JSON 1行）で出る',
+          'JSON.stringify(rec)' in _ap and 'const rec = {' in _ap
+          and "bets: done.map(d => ({ t: d.src === 'win' ? 'win' : 'tri'" in _ap,
+          'EV は p・eff・口数から後で計算できるので持たせない')
+    check('P31 後から突き合わせるのに要る文脈を載せている',
+          all(k in _ap for k in ('pool3:', 'poolW:', 'bank:', 'sig:', 'cfg: { safe:',
+                                 'v: AP_VER', 'c: M.core_version', 'nf: pl.nField')),
+          'プール・所持金・σ・モード・版・頭数。どれか欠けると後で回帰分析ができない')
+    check('P31 買い目の出所（EV枠/未成立/市場本命/単勝）が区別できる',
+          "src: pk.favMkt ? 'mfav' : (pk.unformed ? 'sleeve' : 'ev')" in _ap
+          and "src: 'win'" in _ap and 'pm: r3(d.pm)' in _ap,
+          '市場本命は pm にモデルの確率も残す（実測見積もりとの乖離を測るため）')
     check('P19 autopilot の buyUnits は [買えた口数, 送信不明の口数] を返す',
           "if (r === 'ok') sent += u;" in _ap
           and 'return [sent, unsure];' in _ap,
