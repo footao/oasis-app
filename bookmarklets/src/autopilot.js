@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.20.0';
+const AP_VER = '1.21.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -92,10 +92,10 @@ const CFG = {
   // 「見送りの筆頭＝市場の一番人気」が8レース連続で来ているのを測るための枠で、
   // EV最大化ではない。od が短い組は希薄化で元返しになるので下限を置く。
   MARKET_FAV: false,
-  // 安牌モード。オンにすると単勝・3連単とも「的中率がこの値以上」の買い目しか買わない。
-  // EV最大化ではなく、当たる買い目だけでじわじわ増やすための枠。既定オフ。
+  // 安牌モード。オンにすると**3連単だけ**「的中率がこの値以上」に絞る。
+  // 単勝は対象外（較正が合っていて実績も出ているので触らない）。既定オフ。
   SAFE_MODE: false,
-  SAFE_P_MIN: 0.50,       // model.json の defaults.safe_p_min で上書きされる
+  SAFE_P_MIN: 0.25,       // model.json の safe_p_min で上書きされる
   MARKET_FAV_MIN_OD: 2.0,
   MARKET_FAV_UNITS: 1,
   UNFORMED_MAX_UNITS: null, // null = model.json の unformed_max_units
@@ -776,10 +776,10 @@ function analyseWin(sid, pets, winP, measuredPool, budgetLeft) {
   const D = M.defaults || {};
   // 同名馬がいると name で引き戻せないので、一意キー「i:名前」を渡して後で剥がす。
   const key = pets.map((h, i) => `${i}:${h.display_name || h.name}`);
-  // 安牌モードでは下限未満の馬を確率0にして渡す。後から間引くと口数が宙に浮くため。
-  const pUse = SAFE ? pBet.map(p => (p >= safeP() ? p : 0)) : pBet;
+  // ⚠ 安牌モードは単勝には掛けない。単勝は予測80%以上の帯で 予測94.5% → 実測93.9% と
+  //   較正が合っており、52レースでも 125%（σ差し戻し後は149%）と稼ぎ頭。絞る理由がない。
   const [picks] = OasisModel.winBetPicksPool(
-    key, pUse, fl.odds_eff, pool,
+    key, pBet, fl.odds_eff, pool,
     bankroll(), D.kelly_fraction || 0.25, D.win_edge_min || 0.15,
     { stakeUnit: WU,
       // ⚠ totalUnits は「このレースの**合計**上限」であって残り枠ではない。
@@ -1096,8 +1096,8 @@ $('_sf').onclick = () => {
   try { localStorage.setItem(LSS, SAFE ? '1' : '0'); } catch (e) {}
   renderSafe();
   log(SAFE
-      ? `安牌モード オン: 的中率 ${(safeP() * 100) | 0}% 以上の買い目だけ買います（単勝・3連単とも）`
-      : '安牌モード オフ: 従来どおり EV で買います', '#4fc3f7');
+      ? `安牌モード オン: 3連単は的中率 ${(safeP() * 100) | 0}% 以上だけ買います（単勝は従来どおり）`
+      : '安牌モード オフ: 3連単の下限は既定値に戻ります', '#4fc3f7');
 };
 renderSafe();
 

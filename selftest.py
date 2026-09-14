@@ -871,20 +871,20 @@ def regression_tests():
           re.search(r'SAFE_MODE:\s*false', _ap) is not None
           and "localStorage.getItem(LSS) === '1'" in _ap and "$('_sf').onclick" in _ap,
           'パネルの[安牌]ボタンで切り替え。状態は localStorage に残る')
-    check('P29 安牌モードは単勝にも3連単にも掛かる',
+    check('P29 安牌モードは3連単にだけ掛かる（単勝は触らない）',
           'Math.max(CFG.MIN_PROB, SAFE ? safeP() : 0)' in _ap
-          and 'const pUse = SAFE ? pBet.map(p => (p >= safeP() ? p : 0)) : pBet;' in _ap,
-          '単勝は下限未満の馬を確率0にして渡す（後から間引くと口数が宙に浮く）')
+          and 'const pUse = SAFE ?' not in _ap
+          and 'key, pBet, fl.odds_eff, pool,' in _ap,
+          '単勝は予測80%以上の帯で 予測94.5%→実測93.9% と較正が合っており、絞る理由がない')
     check('P29 model.json の設定値をトップレベルからも拾う',
           "const mNum = (k, d) =>" in _ap and "mNum('safe_p_min'" in _ap
           and "mNum('market_fav_min_od'" in _ap,
           'market_fav_min_od は defaults の下ではなくトップレベルに出ている。'
           'D.market_fav_min_od では拾えず、既定値と同値だったので気づけていなかった')
     check('P29 安牌の下限は Python 側が正',
-          oc.SAFE_P_MIN == 0.50 and 'safe_p_min' in oc.export_model_json.__doc__ + str(oc.SAFE_P_MIN)
-          or oc.SAFE_P_MIN == 0.50,
-          f'{oc.SAFE_P_MIN}（実ベット52レース: 的中率50%以上だけ買うと 45件・回収率166%・的中37/45。'
-          '全部買うと 222件・123%・的中49/222）')
+          oc.SAFE_P_MIN == 0.25 and oc.SAFE_P_MIN > oc.DEFAULT_SETTINGS['min_prob'],
+          f'{oc.SAFE_P_MIN}（3連単155件の実測: 15〜25%の帯は 予測20.2%→実測5.0%・回収率48%。'
+          '下限25%なら 167%・27レースで買える。35%でも172%だが買えるレースが23に減る）')
 
     _mp = oc.DEFAULT_SETTINGS['min_prob']
     _js_mp = re.search(r'MIN_PROB:\s*([\d.]+)', _ap)
