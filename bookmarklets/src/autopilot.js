@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.23.0';
+const AP_VER = '1.24.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -101,7 +101,7 @@ const CFG = {
   // 単勝は対象外（較正が合っていて実績も出ているので触らない）。既定オフ。
   SAFE_MODE: false,
   SAFE_P_MIN: 0.25,       // model.json の safe_p_min で上書きされる
-  MARKET_FAV_MIN_OD: 2.0,
+  MARKET_FAV_MIN_OD: 1.0,
   MARKET_FAV_UNITS: 1,
   UNFORMED_MAX_UNITS: null, // null = model.json の unformed_max_units
   MIN_TRAIN_RACES: 20,      // 学習レースがこれ未満のモデルでは賭けない（雛形のまま等）
@@ -1099,7 +1099,7 @@ $('_mf').onclick = () => {
   try { localStorage.setItem(LSM, MFAV ? '1' : '0'); } catch (e) {}
   renderMfav();
   log(MFAV
-      ? `市場本命枠オン: 市場の一番人気の組を od ${(M.defaults || {}).market_fav_min_od || CFG.MARKET_FAV_MIN_OD} 以上のとき ${(M.defaults || {}).market_fav_units || CFG.MARKET_FAV_UNITS}口 買います（EVは見ません）`
+      ? `市場本命枠オン: 市場の一番人気の組を od ${mNum('market_fav_min_od', CFG.MARKET_FAV_MIN_OD)} 以上のとき ${mNum('market_fav_units', CFG.MARKET_FAV_UNITS)}口 買います（EVは見ません）`
       : '市場本命枠オフ: 従来どおり EV でのみ買います', '#4fc3f7');
 };
 renderMfav();

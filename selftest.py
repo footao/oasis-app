@@ -922,8 +922,10 @@ def regression_tests():
     check('P26 市場の一番人気（最小オッズ）を選ぶ',
           oc.market_fav_pick(_od) == (('b',), 2.4, 1))
     check('P26 一番人気が下限オッズ未満なら買わない（希薄化で元返しになるため）',
-          oc.market_fav_pick({('a',): 1.9, ('b',): 5.0}) is None,
-          '2番人気に流さない：一番人気が短いレースは丸ごと見送る')
+          oc.market_fav_pick({('a',): oc.MARKET_FAV_MIN_OD - 0.01, ('b',): 50.0}) is None
+          and oc.market_fav_pick({('a',): oc.MARKET_FAV_MIN_OD, ('b',): 50.0}) is not None,
+          f'2番人気に流さない：一番人気が下限 od {oc.MARKET_FAV_MIN_OD} を切るレースは丸ごと見送る。'
+          '下限を 1.0 にしたのは od1.0〜1.5 の帯も実測100%（市場の暗黙確率の1.32倍）だったため')
     check('P26 EV側が既に買っていれば追加しない',
           oc.market_fav_pick(_od, already={('b',)}) is None)
     check('P26 同オッズはキー順で決める（Python と JS で同じ組を選ぶ）',
