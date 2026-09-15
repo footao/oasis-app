@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.25.0';
+const AP_VER = '1.26.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -976,7 +976,11 @@ async function doBuy() {
   //      後から実結果（races.jsonl の着順）と突き合わせて、帯ごとの的中率・回収率・
   //      モード別の成績を出すのに必要な文脈（プール・所持金・モード・版）を全部載せる。
   //      ⚠ 時刻に半角コロンを使わない。Discord が `:59:` を絵文字として食う。
-  if (done.length) {
+  // ⚠ ここは**購入が全部終わった後**に走る。ここで例外を投げると、金は動いたのに
+  //   報告だけ消えて buying が true のまま固まる（2026/09/15 に実際に起きた：
+  //   スコープに無い D を参照して ReferenceError）。だから丸ごと try で囲い、
+  //   失敗しても購入フローは必ず最後まで進める。買い目ゼロでも1行は必ず出す。
+  try {
     const stake = done.reduce((a, d) => a + d.u * d.unit, 0);
     const t = new Date();
     const stamp = `${t.getFullYear()}/${t.getMonth() + 1}/${t.getDate()} `
@@ -992,7 +996,8 @@ async function doBuy() {
       sig: [M.race_sigma, M.tri_sigma],
       cfg: { safe: SAFE ? 1 : 0, mfav: MFAV ? 1 : 0,
              pmin: M.defaults ? M.defaults.min_prob : null,
-             safep: SAFE ? safeP() : null, edge: CFG.EDGE_MIN, kelly: D.kelly_fraction || 0.25 },
+             safep: SAFE ? safeP() : null, edge: CFG.EDGE_MIN,
+             kelly: mNum('kelly_fraction', 0.25) },
       bets: done.map(d => ({ t: d.src === 'win' ? 'win' : 'tri', src: d.src, n: d.names,
                              u: d.u, unit: d.unit, unsure: d.uq || 0,
                              p: r3(d.p), pm: r3(d.pm), od: r3(d.od), eff: r3(d.eff) })),
@@ -1007,6 +1012,13 @@ async function doBuy() {
     for (const l of lines) log(l, '#81c784');
     ST.sum = (ST.sum || []).concat([lines.join('\n')]).slice(-20);
     saveState(ST);
+  } catch (e) {
+    const l = `━━ R${pl.sid} まとめの組み立てに失敗 ━━\n`
+      + JSON.stringify({ v: AP_VER, sid: pl.sid, err: String(e && e.message || e),
+                         nbets: done.length, bought: bought });
+    log(l, '#e57373');
+    ST.sum = (ST.sum || []).concat([l]).slice(-20);
+    try { saveState(ST); } catch (e2) {}
   }
   ST.done[pl.sid] = { t: Date.now(), n: bought };
   disarm(`R${pl.sid} の購入が終わったのでアームを解除しました`);

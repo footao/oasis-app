@@ -1040,6 +1040,26 @@ def regression_tests():
           "src: pk.favMkt ? 'mfav' : (pk.unformed ? 'sleeve' : 'ev')" in _ap
           and "src: 'win'" in _ap and 'pm: r3(d.pm)' in _ap,
           '市場本命は pm にモデルの確率も残す（実測見積もりとの乖離を測るため）')
+    # 2026/09/15: 購入は全件通ったのに「購入中…」で固まり、まとめが出なかった。
+    # 原因は kelly: D.kelly_fraction — D は他の3つの関数の中で const 宣言されていて
+    # doBuy() のスコープには存在せず、購入完了直後に ReferenceError で中断していた。
+    # P31 が見逃したのは「文字列が入っているか」しか見ていなかったから。
+    # _ap は空白が1個に潰してあるので、行頭の } では関数の終わりを取れない。
+    _doBuy = _ap[_ap.index('async function doBuy()'):]
+    _doBuy = _doBuy[:_doBuy.index('// ---- メインループ')]
+    check('P32 まとめは doBuy のスコープに無い D を参照しない',
+          'D.' not in _doBuy and "mNum('kelly_fraction'" in _ap,
+          'D = M.defaults は他の関数の中だけで宣言されている。'
+          'まとめからは top-level の mNum() で読む')
+    check('P32 まとめの組み立ては try で囲ってあり、失敗しても購入フローを止めない',
+          'try { const stake = done.reduce(' in _doBuy
+          and 'まとめの組み立てに失敗' in _doBuy,
+          '購入は済んでいるので、報告で落ちても buying を解除して最後まで進める。'
+          '失敗したこと自体も1行 JSON で Discord に出す')
+    check('P32 買い目ゼロでも まとめを必ず1行出す',
+          'if (done.length) {' not in _doBuy,
+          '買わなかったのか報告が壊れたのかを Discord から区別できるようにする')
+
     check('P19 autopilot の buyUnits は [買えた口数, 送信不明の口数] を返す',
           "if (r === 'ok') sent += u;" in _ap
           and 'return [sent, unsure];' in _ap,
