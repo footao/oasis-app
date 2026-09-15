@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.24.0';
+const AP_VER = '1.25.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -91,15 +91,17 @@ const CFG = {
   // 起動しただけなら従来どおりの動作で、パネルのボタンで明示的に入れたときだけ効く。
   // 「見送りの筆頭＝市場の一番人気」が8レース連続で来ているのを測るための枠で、
   // EV最大化ではない。od が短い組は希薄化で元返しになるので下限を置く。
-  MARKET_FAV: false,
+  MARKET_FAV: true,
   // 市場本命の的中率は **min(0.95, max(0.50, 1.3/od))**。モデルの確率は使わない。
   MARKET_FAV_P: 0.50,
   MARKET_FAV_RATIO: 1.3,
   MARKET_FAV_P_MAX: 0.95,
   MARKET_FAV_MAX_UNITS: 8,
   // 安牌モード。オンにすると**3連単だけ**「的中率がこの値以上」に絞る。
-  // 単勝は対象外（較正が合っていて実績も出ているので触らない）。既定オフ。
-  SAFE_MODE: false,
+  // 単勝は対象外（較正が合っていて実績も出ているので触らない）。
+  // 2026/09/15 から既定オン。52レースの精算で 両方オン 回収率149%/勝率69%/最大DD -261,540
+  // に対し 両方オフ 123%/44%/-1,214,730。パネルの[安牌][市場本命]で切れる。
+  SAFE_MODE: true,
   SAFE_P_MIN: 0.25,       // model.json の safe_p_min で上書きされる
   MARKET_FAV_MIN_OD: 1.0,
   MARKET_FAV_UNITS: 1,
@@ -148,10 +150,11 @@ const saveState = s => { try { localStorage.setItem(LS, JSON.stringify(s)); } ca
 let ST = loadState();
 // 市場本命枠のオン/オフ。既定オフ＝起動しただけなら従来どおり。
 const LSM = 'oasisAutopilotMarketFav';
-let MFAV = CFG.MARKET_FAV || localStorage.getItem(LSM) === '1';
+// localStorage に明示的な記録があればそれが優先。無ければ CFG の既定値（両方オン）。
+let MFAV = (v => v === null ? !!CFG.MARKET_FAV : v === '1')(localStorage.getItem(LSM));
 // 安牌モード。既定オフ＝起動しただけなら従来どおり。
 const LSS = 'oasisAutopilotSafeMode';
-let SAFE = CFG.SAFE_MODE || localStorage.getItem(LSS) === '1';
+let SAFE = (v => v === null ? !!CFG.SAFE_MODE : v === '1')(localStorage.getItem(LSS));
 // model.json の設定値。トップレベル → defaults → CFG のフォールバック。
 // ⚠ market_fav_min_od は defaults の下ではなくトップレベルに出ているのに
 //   D.market_fav_min_od を見ていた。既定値と同じ 2.0 だったので気づけなかった。

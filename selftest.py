@@ -867,10 +867,13 @@ def regression_tests():
           '直すと194レースで 1着的中 82.0%→82.5%')
 
     _od = {('a',): 3.5, ('b',): 2.4, ('c',): 9.0}
-    check('P29 安牌モードは既定オフ（起動しただけなら従来どおり）',
-          re.search(r'SAFE_MODE:\s*false', _ap) is not None
-          and "localStorage.getItem(LSS) === '1'" in _ap and "$('_sf').onclick" in _ap,
-          'パネルの[安牌]ボタンで切り替え。状態は localStorage に残る')
+    check('P29 安牌モードは既定オン（2026/09/15から）／ボタンで切れる',
+          re.search(r'SAFE_MODE:\s*true', _ap) is not None
+          and "v === null ? !!CFG.SAFE_MODE : v === '1'" in _ap
+          and "$('_sf').onclick" in _ap,
+          '既定オンにしたので localStorage の記録が無い状態＝オン。'
+          'CFG || localStorage という書き方だとオフに戻せなくなるため、'
+          '記録があればそれを優先し、無いときだけ CFG を使う形にしてある')
     check('P29 安牌モードは3連単にだけ掛かる（単勝は触らない）',
           'Math.max(CFG.MIN_PROB, SAFE ? safeP() : 0)' in _ap
           and 'const pUse = SAFE ?' not in _ap
@@ -930,11 +933,12 @@ def regression_tests():
           oc.market_fav_pick(_od, already={('b',)}) is None)
     check('P26 同オッズはキー順で決める（Python と JS で同じ組を選ぶ）',
           oc.market_fav_pick({('b',): 2.5, ('a',): 2.5})[0] == ('a',))
-    check('P26 市場本命枠は既定オフ（起動しただけなら従来どおり動く）',
-          re.search(r'MARKET_FAV:\s*false', _ap) is not None
-          and "localStorage.getItem(LSM) === '1'" in _ap
+    check('P26 市場本命枠は既定オン（2026/09/15から）／ボタンで切れる',
+          re.search(r'MARKET_FAV:\s*true', _ap) is not None
+          and "v === null ? !!CFG.MARKET_FAV : v === '1'" in _ap
           and "$('_mf').onclick" in _ap,
-          'パネルのボタンで明示的に入れたときだけ効く。状態は localStorage に残る')
+          '52レースの精算で 両方オン 149%/勝率69%/DD -261,540 ＞ 両方オフ 123%/44%/-1,214,730。'
+          '片方だけなら安牌の方（市場本命だけオンは1点勝負なのでばらつきが大きい）')
     check('P26 marketFavPick が model.js にもあり autopilot が使っている',
           'function marketFavPick' in _model_js
           and 'OasisModel.marketFavPick' in _ap,
