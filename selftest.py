@@ -1329,11 +1329,20 @@ def regression_tests():
           _all_ok, ' / '.join(_detail))
 
     # --- P12: 装備図鑑・スキル図鑑（2026/08/23）の30種を効果名で引けること ---
-    check('P12 図鑑の効果は装備16種＋お守り14種の30種',
-          len(oc.ITEM_EFFECT_CATALOG) == 30, f'{len(oc.ITEM_EFFECT_CATALOG)}種')
+    check('P12 図鑑の効果は装備16種＋お守り14種＋ユニーク1種の31種',
+          len(oc.ITEM_EFFECT_CATALOG) == 31, f'{len(oc.ITEM_EFFECT_CATALOG)}種')
     check('P12 効果名を説明文の頭から取り出せる',
           oc.item_effect_label('末脚：終盤のパワーが8.2%上昇') == '末脚'
           and oc.item_effect_label('スピードが常時4.4%上昇') is None)
+    check('P12 ユニークの ★ 付き効果名も引ける（★時界超越 → 時界超越）',
+          oc.item_effect_label('★時界超越：中盤のパワーが23.5%上昇') == '時界超越',
+          'ユニーク装備の効果名は ★ 付きで来る。★ を落とさないと図鑑を引けず、'
+          'duty が名目の 1/3 に落ちて中盤の倍率を過小評価する')
+    check('P12 時喰らいの機鎧は中盤加速と同じ範囲（実測 duty 0.4）で割り引く',
+          abs(oc.item_effect_spec('★時界超越：中盤のパワーが23.5%上昇', None,
+                                  oc.load_passive_spec(), {'dist': '中距離', 'track': '芝'}
+                                  )['power'] - (1 + 0.235 * 0.4)) < 1e-9,
+          'パワー ×1.094（名目 1/3 なら ×1.078）')
     _sp12 = oc.load_passive_spec(os.path.join(
         os.path.dirname(os.path.abspath(__file__)), 'passive_spec.json'))
     # 効果キーが分からない新効果でも、**効果名だけ**で実測 duty まで割り引けること

@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.30.0'
+CORE_VERSION = '3.31.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -2101,6 +2101,10 @@ ITEM_EFFECT_CATALOG = {
     # ※ スタミナ消費増（実測 発動中の区間消費 ×1.049）はまだ入れていない。
     '首位の呪い':     dict(scope='lead', duty=0.079),
     '終焉加速':       dict(scope='conditional', duty=0.200),  # 残り300m（下の注記）
+    # ---- ユニーク ----
+    # 時喰らいの機鎧『★時界超越：中盤のパワーが23.5%上昇』（2026/09/17 実装）。
+    # 範囲は中盤加速と同じなので実測 duty 0.4 を借りる。倍率だけが桁違いに大きい。
+    '時界超越':       dict(alias='中盤加速'),
     '芝啜り':         dict(scope='aptitude', scope_arg='芝'),
     '泥啜り':         dict(scope='aptitude', scope_arg='ダート'),
     # ---- お守り（14種）----
@@ -2153,7 +2157,7 @@ ITEM_KEY_ALIAS = {
     'grave_chase': '差しの構え',
 }
 
-_LABEL_RE = re.compile(r'^\s*([^：:]{2,12})[：:]')
+_LABEL_RE = re.compile(r'^\s*[★☆]?\s*([^：:]{2,12})[：:]')
 
 
 def item_effect_label(desc):
