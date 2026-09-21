@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.26.0';
+const AP_VER = '1.27.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -599,13 +599,21 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
   // --- ②' 市場の一番人気（EVとは別枠・安定枠）---
   // EV側が既にその組を買っていれば何もしない（2番人気に流さない）。
   if (MFAV && budgetU - used >= 1) {
-    const oddsMap = new Map(cands.map(c => [c.key, c.od]));
+    // ⚠ 市場の一番人気は**モデルで絞る前の全組**から選ぶ。以前は cands（モデル確率
+    //   25%以上だけ）から選んでいたので、実態は「モデルが既に気に入っている組の中の
+    //   一番人気」になっていた。モデルと市場が割れたレースほど市場側が見えず、
+    //   R2436（2026/09/21、市場2番人気のすーちゃんが2着）でも枠が空振りした。
+    //   odds には金の乗った組が全部入っている（fetchOdds はプールの残額が尽きるまで舐める）。
+    const oddsMap = new Map(odds);
+    const comboByKey = new Map(combo.map(c => [key3(c), c]));
     const fav = OasisModel.marketFavPick(
       oddsMap, mNum('market_fav_min_od', CFG.MARKET_FAV_MIN_OD),
       Math.min(mNum('market_fav_units', CFG.MARKET_FAV_UNITS), budgetU - used, M.max_units || 20),
       bought);
-    if (fav) {
-      const c = byKey.get(fav[0]), od = fav[1];
+    if (fav && (byKey.has(fav[0]) || comboByKey.has(fav[0]))) {
+      const c = byKey.get(fav[0]) || comboByKey.get(fav[0]), od = fav[1];
+      // モデルの確率（比較用に残すだけ。口数には使わない）
+      const pm = pOf.has(fav[0]) ? pOf.get(fav[0]) : (c && c.p != null ? c.p : null);
       // 口数はモデルの確率ではなく**実測の的中率**（market_fav_p）で決める。
       // モデルはこの組を平均19.3%と言うが、実測は57%（od2〜4なら69%）。
       // オッズが安いほど的中率は高い。一律50%だと od1.65 で 0.82 となり買えない。
@@ -623,11 +631,11 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
       const eff = (P + (used + k) * U_) / (P / od + k * U_);
       if (k > 0) {
       picks.push({ c: c, k: k, eff: eff, edge: fp * eff - 1, p: fp, od: od, favMkt: true,
-                   pModel: pOf.get(fav[0]), names: [c.i, c.j, c.k].map(nameOf) });
+                   pModel: pm, names: [c.i, c.j, c.k].map(nameOf) });
       used += k;
       bought.add(fav[0]); }
       log(`R${sid}: 市場本命枠 ${[c.i, c.j, c.k].map(nameOf).join('→')} od ${od.toFixed(2)} を ${k}口`
-          + `（的中率は実測の ${(fp * 100) | 0}% で見積もり。モデルは ${(pOf.get(fav[0]) * 100).toFixed(1)}%）`, '#888');
+          + `（的中率は実測の ${(fp * 100) | 0}% で見積もり。モデルは ${pm == null ? '—' : (pm * 100).toFixed(1) + '%'}）`, '#888');
     }
   }
 

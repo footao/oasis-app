@@ -939,6 +939,13 @@ def regression_tests():
           and "$('_mf').onclick" in _ap,
           '52レースの精算で 両方オン 149%/勝率69%/DD -261,540 ＞ 両方オフ 123%/44%/-1,214,730。'
           '片方だけなら安牌の方（市場本命だけオンは1点勝負なのでばらつきが大きい）')
+    # 2026/09/21: 市場本命枠が cands（モデル確率25%以上）から選んでいたため、
+    # モデルと市場が割れたレースで市場の一番人気が見えていなかった（R2436）。
+    check('P26 市場本命枠はモデルで絞る前の全組オッズから選ぶ',
+          'const oddsMap = new Map(odds);' in _ap
+          and 'new Map(cands.map(c => [c.key, c.od]))' not in _ap
+          and 'comboByKey.get(fav[0])' in _ap,
+          'cands から選ぶと「モデルが気に入った組の中の一番人気」になり、枠の意味が無くなる')
     check('P26 marketFavPick が model.js にもあり autopilot が使っている',
           'function marketFavPick' in _model_js
           and 'OasisModel.marketFavPick' in _ap,
