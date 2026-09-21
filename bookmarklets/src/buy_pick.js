@@ -2,7 +2,7 @@
 // 手打ち専用の一括購入ブックマークレット（予測ツールを持っていない人向け）。
 // buy.js との違いは**入力方法だけ**で、購入処理・上限チェック・二重購入防止は同じ。
 // 貼り付け欄をやめて、出走馬をタップして買い目を組み立てる形にしている。
-const BM_VER='1.1.0';
+const BM_VER='1.2.0';
 const B='https://api.oasis.red';
 const q=new URLSearchParams(location.search);
 const G=q.get('guild'),S=q.get('race')||q.get('schedule_id'),U=q.get('user'),T=q.get('token');
@@ -162,10 +162,23 @@ function drawCart(){
     :(x.type==='3連単'&&own===undefined?'<span style="color:#666;font-size:.7rem"> 照会中…</span>':'');
   return '<div style="display:flex;justify-content:space-between;align-items:center;padding:.25rem .35rem;border-bottom:1px solid #333">'
   +'<span>'+(x.type==='3連単'?'🎯':'🥇')+' '+esc(x.label)+note+'</span>'
-  +'<span><b style="color:#e2b96f">'+x.units+'口</b> '
-  +'<span data-del="'+i+'" style="color:#ef5350;cursor:pointer;padding:0 .3rem">✕</span></span></div>';}).join('');
+  +'<span style="white-space:nowrap"><span data-dec="'+i+'" style="display:inline-block;width:1.5rem;text-align:center;background:#333;border-radius:4px;cursor:pointer">−</span>'
+  +' <b style="color:#e2b96f">'+x.units+'口</b> '
+  +'<span data-inc="'+i+'" style="display:inline-block;width:1.5rem;text-align:center;background:#333;border-radius:4px;cursor:pointer">＋</span>'
+  +' <span data-del="'+i+'" style="color:#ef5350;cursor:pointer;padding:0 .3rem">✕</span></span></div>';}).join('');
  $('_cart').querySelectorAll('[data-del]').forEach(el=>el.onclick=()=>{
   cart.splice(+el.dataset.del,1); drawCart(); drawUnits(); });
+ /* カートの中で口数を増減できるようにする（以前は✕で消して入れ直すしかなかった）。
+    0口まで減らしたらその買い目ごと消す。増やすときは券種ごとの上限を守る。 */
+ $('_cart').querySelectorAll('[data-dec]').forEach(el=>el.onclick=()=>{
+  const x=cart[+el.dataset.dec]; if(!x)return;
+  x.units--; if(x.units<1)cart.splice(+el.dataset.dec,1);
+  drawCart(); drawUnits(); });
+ $('_cart').querySelectorAll('[data-inc]').forEach(el=>el.onclick=()=>{
+  const x=cart[+el.dataset.inc]; if(!x)return;
+  const c=capLeft(), room=x.type==='3連単'?c.tri:c.win;
+  if(room<1){ log((x.type==='3連単'?'3連単':'単勝')+'は上限に達しています。','#ffb74d'); return; }
+  x.units++; drawCart(); drawUnits(); });
  const c=capLeft();
  const total=c.triU*TRI_UNIT+c.winU*WIN_UNIT;
  // カートに入れた買い目ぶんだけは購入済み口数が分かる。それ以外は引く手段が無い。
