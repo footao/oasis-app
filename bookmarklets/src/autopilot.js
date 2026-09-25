@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.27.0';
+const AP_VER = '1.28.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -805,6 +805,14 @@ function analyseWin(sid, pets, winP, measuredPool, budgetLeft) {
     log(`R${sid}: 単勝プールの大半が自分の掛け金 → どう買っても期待値マイナス。単勝なし`, '#ffb74d');
     return none;
   }
+  const smallField = pets.length < (M.min_field_trifecta || 8);
+  const winTotalCap = smallField
+    ? Math.min(M.win_max_total_units || 100, mNum('win_small_field_max_units', 20))
+    : (M.win_max_total_units || 100);
+  if (smallField) {
+    log(`R${sid}: ${pets.length}頭の少頭数レース → 単勝は合計 ${winTotalCap}口までに絞ります`
+        + '（少頭数は本命の的中率が落ちる）', '#ffb74d');
+  }
   const lam = CFG.MODEL_WEIGHT;
   const pBet = winP.map((p, i) => lam * p + (1 - lam) * (Number.isFinite(mktP[i]) ? mktP[i] : p));
   const D = M.defaults || {};
@@ -822,7 +830,9 @@ function analyseWin(sid, pets, winP, measuredPool, budgetLeft) {
       //   試し買いで1口入れると 100 → 99口 で止まっていたのはこれ（Python 側は
       //   WIN_MAX_TOTAL_UNITS をそのまま渡していて正しい）。
       //   金額の上限も同じ理由で購入済みぶんを足し戻してから渡す。
-      totalUnits: Math.min(M.win_max_total_units || 100,
+      // 少頭数（3連単が成立しない頭数）は本命の的中率が落ちるので合計上限を絞る。
+      //   9月実測: 8頭以上の単勝 回収率121% / 8頭未満 56%。
+      totalUnits: Math.min(winTotalCap,
                            ownUnits + Math.floor(Math.max(budgetLeft, 0) / WU)),
       maxUnits: M.win_max_units || 100, riskCapFrac: riskFrac(),
       myUnits: mine.map(a => Math.floor(a / WU)), unbet: fl.unbet });

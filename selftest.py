@@ -866,6 +866,19 @@ def regression_tests():
               ('中距離',2.762,3.737),('長距離',2.720,3.680)],
           '直すと194レースで 1着的中 82.0%→82.5%')
 
+    check('P33 少頭数レースは単勝の合計上限を絞る',
+          oc.WIN_SMALL_FIELD_MAX_UNITS < oc.WIN_MAX_TOTAL_UNITS
+          and 'const smallField = pets.length < (M.min_field_trifecta || 8);' in _ap
+          and "mNum('win_small_field_max_units'" in _ap
+          and 'totalUnits: Math.min(winTotalCap,' in _ap,
+          f'{oc.MIN_FIELD_TRIFECTA}頭未満は {oc.WIN_SMALL_FIELD_MAX_UNITS}口まで'
+          f'（通常 {oc.WIN_MAX_TOTAL_UNITS}口）。9月実測で 8頭以上の単勝 回収率121% / '
+          '8頭未満 56%。0にしないのは少頭数の較正を測り続けるため')
+    check('P33 上限は model.json 経由で JS に渡る',
+          'win_small_field_max_units' in json.load(open(os.path.join(
+              os.path.dirname(os.path.abspath(__file__)), 'model.json'), encoding='utf-8')),
+          'JS 側に定数を持たせない（Python と二重管理にしない）ため')
+
     _od = {('a',): 3.5, ('b',): 2.4, ('c',): 9.0}
     check('P29 安牌モードは既定オン（2026/09/15から）／ボタンで切れる',
           re.search(r'SAFE_MODE:\s*true', _ap) is not None

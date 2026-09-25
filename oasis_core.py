@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.31.0'
+CORE_VERSION = '3.32.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -69,6 +69,15 @@ MAX_UNITS           = 20       # 1組あたり上限口数
 MAX_TOTAL_UNITS     = 20       # 1レース合計口数の上限（2026/04/17 で 10→20）
 WIN_MAX_UNITS       = 100      # 単勝の1頭あたり上限口数
 WIN_MAX_TOTAL_UNITS = 100      # 単勝は【1レース合計】100口まで（全頭の合算）
+# 少頭数レースは本命が当てにならない。9月の実測（1番人気を単勝で買うだけの回収率）:
+#     2〜4頭  17レース 勝率 64.7%  回収率  87%
+#     5〜7頭  11レース 勝率 72.7%  回収率  90%
+#     8〜11頭 52レース 勝率 86.5%  回収率 125%
+#     12頭以上 58レース 勝率 87.9%  回収率 123%
+# 自動購入の実績も同じ向き: 8頭以上 121%(25レース) / 8頭未満 56%(10レース・-364,550)。
+# 出走が揃わない回は上位の常連だけが残って実力が拮抗し、ほぼコイン投げになる。
+# 止めずに絞るのは、少頭数の較正を測り続けるため（0にすると永久に分からない）。
+WIN_SMALL_FIELD_MAX_UNITS = 20     # MIN_FIELD_TRIFECTA 未満のレースの単勝合計上限
 WIN_STAKE_UNIT      = 1_000    # 単勝は 1口 = 1,000 rrc（購入画面の表記）
 WIN_POOL_QUANTUM    = 1_000    # 単勝プール総額は 1,000 rrc 単位で決まる（全ベットが1口=1000rrcの倍数のため）
 MIN_FIELD_TRIFECTA  = 8        # 2026/06/17: 7頭以下は3連単なし
@@ -1747,6 +1756,7 @@ def export_model_json(bundle, path=None):
         'min_field_trifecta': MIN_FIELD_TRIFECTA,
         # 単勝（2026/08/24 実装。NPC が自動投票するので初期プールが常にある）
         'win_pool_seed': WIN_POOL_SEED, 'win_stake_unit': WIN_STAKE_UNIT,
+        'win_small_field_max_units': WIN_SMALL_FIELD_MAX_UNITS,
         # オッズのバグ（od=(P-S)/bet）が生きているか。race 2097 で修正済みを確認。
         # JS 側はこれを見て「初期プール金ぶんのオッズ補正」を掛けるか決める。
         'trifecta_seed_bug_active': bool(TRIFECTA_SEED_BUG_ACTIVE),
