@@ -30,19 +30,18 @@ DIAG = (
     "catch(e){alert(m)}})()"
 )
 
-# ⚠ jsDelivr は @main を12時間キャッシュし、クエリ文字列を無視する。
-# push 直後に古いバンドルを掴む事故を bm.js で実際にやったので、
-# 「raw（キャッシュなし）→ raw.githack（キャッシュなし）→ jsDelivr（最後の砦）」
-# の順に落とす。他のブックマークレットのローダーと同じ構成。
-RAW = 'https://raw.githubusercontent.com/footao/oasis-app/main/autopilot.bundle.js'
+# ⚠ 2026/09/25: レースサイトに CSP が入り eval が禁止された。
+#     "Evaluating a string as JavaScript violates ... 'unsafe-eval' is not an allowed source"
+#   raw.githubusercontent は Content-Type: text/plain + nosniff で返すので
+#   script タグでは実行できない（だから以前は fetch + eval にしていた）。
+#   eval が使えない今、raw は使えないので githack → jsDelivr の2段にする。
+#   jsDelivr は @main を12時間キャッシュしクエリ文字列も無視するので最後の砦のまま。
 GHACK = 'https://raw.githack.com/footao/oasis-app/main/autopilot.bundle.js'
 LOADER = (
-    "javascript:(t=>{fetch('" + RAW + "?'+t).then(r=>r.text()).then(x=>{(0,eval)(x)})"
-    ".catch(e=>{console.warn('Oasis autopilot loader fallback:',e);"
-    "var a=document.createElement('script');a.src='" + GHACK + "?'+t;"
-    "a.onerror=function(){var b=document.createElement('script');"
+    "javascript:(t=>{var s=document.createElement('script');s.src='" + GHACK + "?'+t;"
+    "s.onerror=function(){var b=document.createElement('script');"
     "b.src='" + CDN + "?'+t;document.body.appendChild(b)};"
-    "document.body.appendChild(a)})})(Date.now())"
+    "document.body.appendChild(s)})(Date.now())"
 )
 
 

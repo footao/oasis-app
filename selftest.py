@@ -866,6 +866,23 @@ def regression_tests():
               ('中距離',2.762,3.737),('長距離',2.720,3.680)],
           '直すと194レースで 1着的中 82.0%→82.5%')
 
+    check('P34 単勝に下限的中率がある（低確率帯を買わない）',
+          oc.WIN_MIN_PROB == 0.50
+          and 'p[i] >= minP' in _model_js
+          and "minProb: mNum('win_min_prob'" in _ap,
+          '実測（81本）で単勝は予測50%未満が 25本中1本・回収率78%、'
+          '全体では回収率99%とトントンだった。3連単は同期間178%')
+    _wp = oc.win_bet_picks_pool(['a', 'b'], [0.9, 0.3], [1.5, 8.0], 1_000_000,
+                                1_000_000, 0.25, 0.0, my_units=[0, 0])[0]
+    check('P34 下限未満の馬は配分に出てこない',
+          all(r['name'] != 'b' for r in _wp) and any(r['name'] == 'a' for r in _wp),
+          f'予測30%の b は買わない（買い目 {[r["name"] for r in _wp]}）')
+    check('P34 下限は呼び出し側で変えられる（Streamlit の検証用）',
+          any(r['name'] == 'b' for r in oc.win_bet_picks_pool(
+              ['a', 'b'], [0.9, 0.3], [1.5, 8.0], 1_000_000, 1_000_000, 0.25, 0.0,
+              my_units=[0, 0], min_prob=0.0)[0]),
+          'min_prob=0 を渡せば従来どおり。過去データの再評価に要る')
+
     check('P33 少頭数レースは単勝の合計上限を絞る',
           oc.WIN_SMALL_FIELD_MAX_UNITS < oc.WIN_MAX_TOTAL_UNITS
           and 'const smallField = pets.length < (M.min_field_trifecta || 8);' in _ap
@@ -912,10 +929,20 @@ def regression_tests():
           f"min_prob {_mp} / 未成立 {oc.DEFAULT_SETTINGS['unformed_p_min']}"
           '（実ベット52レース: 予測5〜15%の帯は93件・予測9.1%→実測1.1%・回収率24%。'
           '切ると全体123%→140%、σ差し戻し後34レースで139%→147%）')
-    check('P28 下限は単勝には掛からない（単勝は較正が合っている）',
+    # 2026/09/25 に方針転換。それまでは「単勝は較正が合っているので下限を掛けない」
+    # としていた（予測80%以上の帯は 予測94.5%→実測93.9% で実際に合っている）。
+    # だが JSON レポート81本で測ると、問題は高い帯ではなく**低い帯**だった:
+    #     〜50%   25本 回収率 78%  実測 1/25（予測平均19.7%）
+    #     80〜95%  7本 回収率132%
+    #     95%以上 14本 回収率107%
+    # 単勝は全体で回収率99%（3連単は178%）。低確率帯が利益を食っていたので
+    # WIN_MIN_PROB=0.50 を入れた。3連単の min_prob とは別の定数・別の根拠。
+    check('P28 単勝は EV 下限と確率下限の両方を持つ',
           'win_edge_min' in inspect.getsource(oc.analyze)
-          and 'min_prob' not in inspect.getsource(oc.win_bet_picks_pool),
-          '予測80%以上の帯は 予測94.5% → 実測93.9%')
+          and 'min_prob' in inspect.getsource(oc.win_bet_picks_pool)
+          and oc.WIN_MIN_PROB > oc.DEFAULT_SETTINGS['min_prob'],
+          f"単勝 {oc.WIN_MIN_PROB} / 3連単 {oc.DEFAULT_SETTINGS['min_prob']}"
+          '（単勝の方が高いのは、単勝の低確率帯の実測が 1/25 と壊滅的だったため）')
 
     check('P27 通信エラーぶんを「買えた」と混ぜない',
           "return 'unknown'" in _ap and "return 'ok'" in _ap and "return 'fail'" in _ap

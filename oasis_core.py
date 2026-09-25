@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.32.0'
+CORE_VERSION = '3.33.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -78,6 +78,15 @@ WIN_MAX_TOTAL_UNITS = 100      # 単勝は【1レース合計】100口まで（�
 # 出走が揃わない回は上位の常連だけが残って実力が拮抗し、ほぼコイン投げになる。
 # 止めずに絞るのは、少頭数の較正を測り続けるため（0にすると永久に分からない）。
 WIN_SMALL_FIELD_MAX_UNITS = 20     # MIN_FIELD_TRIFECTA 未満のレースの単勝合計上限
+# 単勝の下限的中率。3連単には min_prob があるのに単勝は素通しだった。
+# 実測（reports.txt 81本・2026/09/25）— 単勝をモデルの予測確率で分けると:
+#     〜50%    25本 投入 952,000 回収率  78%  実測的中 1/25(4.0%) ／ 予測平均 19.7%
+#     80〜95%   7本 投入 622,000 回収率 132%  実測 5/7
+#     95%以上  14本 投入1,380,000 回収率 107%  実測 12/14
+# 低確率帯の負けで高確率帯の利益を食い潰し、単勝は全体で回収率99%（トントン）だった。
+# 3連単は同期間 178% なので、利益は3連単から出ている。
+# 50% にしたのは 50〜80% の実績が2本しかなく、そこを切る根拠がないため。
+WIN_MIN_PROB = 0.50
 WIN_STAKE_UNIT      = 1_000    # 単勝は 1口 = 1,000 rrc（購入画面の表記）
 WIN_POOL_QUANTUM    = 1_000    # 単勝プール総額は 1,000 rrc 単位で決まる（全ベットが1口=1000rrcの倍数のため）
 MIN_FIELD_TRIFECTA  = 8        # 2026/06/17: 7頭以下は3連単なし
@@ -1757,6 +1766,7 @@ def export_model_json(bundle, path=None):
         # 単勝（2026/08/24 実装。NPC が自動投票するので初期プールが常にある）
         'win_pool_seed': WIN_POOL_SEED, 'win_stake_unit': WIN_STAKE_UNIT,
         'win_small_field_max_units': WIN_SMALL_FIELD_MAX_UNITS,
+        'win_min_prob': WIN_MIN_PROB,
         # オッズのバグ（od=(P-S)/bet）が生きているか。race 2097 で修正済みを確認。
         # JS 側はこれを見て「初期プール金ぶんのオッズ補正」を掛けるか決める。
         'trifecta_seed_bug_active': bool(TRIFECTA_SEED_BUG_ACTIVE),
@@ -2901,7 +2911,7 @@ def estimate_win_pool(before, after, floor=None):
 def win_bet_picks_pool(names, win_p, odds, pool, bankroll, kelly_frac, edge_min,
                        stake_unit=WIN_STAKE_UNIT, total_units=WIN_MAX_TOTAL_UNITS,
                        max_units=WIN_MAX_UNITS, risk_cap_frac=0.10, my_units=None,
-                       unbet=None):
+                       unbet=None, min_prob=None):
     """プール総額が分かっている場合の単勝配分（希薄化を織り込む）。
 
     パリミュチュエルなので、自分が k口 入れると
@@ -2914,7 +2924,9 @@ def win_bet_picks_pool(names, win_p, odds, pool, bankroll, kelly_frac, edge_min,
     od = np.asarray(odds, dtype=float)
     p = np.asarray(win_p, dtype=float)
     unb = np.zeros(n, dtype=bool) if unbet is None else np.asarray(unbet, dtype=bool)
-    ok = np.isfinite(od) & (p > 0) & ((od > 1.0) | unb)
+    mp = WIN_MIN_PROB if min_prob is None else float(min_prob)
+    # 予測が低い馬は買わない（実測で 50%未満は 25本中1本・回収率78%）。
+    ok = np.isfinite(od) & (p >= mp) & ((od > 1.0) | unb)
     if pool is None or pool <= 0 or not ok.any():
         return [], None
     # 未投票の馬（オッズが初期値のまま）は「その馬への投入額 0」。

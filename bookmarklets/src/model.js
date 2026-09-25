@@ -421,6 +421,7 @@ const OasisModel = (() => {
     const o = opts || {};
     const unit = +o.stakeUnit, totalUnits = +o.totalUnits, maxUnits = +o.maxUnits;
     const riskCapFrac = (o.riskCapFrac == null ? 0.10 : +o.riskCapFrac);
+    const minP = (o.minProb == null ? 0.50 : +o.minProb);
     const n = names.length;
     const od = [], p = [], unb = [], k0 = [], ok = [];
     for (let i = 0; i < n; i++) {
@@ -430,7 +431,8 @@ const OasisModel = (() => {
       // k0 = すでに買った分。pool と P_i は「現在の値」＝ k0 を含んでいるので、
       // プールの再計算で k0 を足してはいけない（二重計上で希薄化を過小評価する）。
       k0.push(o.myUnits && o.myUnits[i] != null ? Math.trunc(o.myUnits[i]) : 0);
-      ok.push(Number.isFinite(od[i]) && p[i] > 0 && (od[i] > 1.0 || unb[i]));
+      // 予測が低い馬は買わない（実測で 50%未満は 25本中1本・回収率78%）。
+      ok.push(Number.isFinite(od[i]) && p[i] >= minP && (od[i] > 1.0 || unb[i]));
     }
     if (pool == null || pool <= 0 || !ok.some(Boolean)) return [[], null];
     // 未投票の馬（オッズが初期値のまま）は「その馬への投入額 0」。
