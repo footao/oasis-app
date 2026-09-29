@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.34.0'
+CORE_VERSION = '3.35.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -95,6 +95,19 @@ WIN_MIN_PROB = 0.50
 # 市場が同意する帯（od1.17〜1.55）は同期間 16/17 なので、そこは触らない。
 WIN_SKIP_P = 0.90        # これ以上の予測確率で
 WIN_SKIP_OD = 10.0       # これ以上のオッズなら見送る
+
+# --- 2着と3着の順序をならす（2026/09/29）---
+# 9月141レースで、着順が隣り合う馬のスコア差の中央値は
+#     1→2着 3.30%（1%未満 24%） ／ 2→3着 1.56%（1%未満 35%）
+# 2→3着の差は σ(1.27%) と同じ大きさで、**2着と3着の順序は実質コイン投げ**。
+# それなのにモデルは片方に確率を寄せる。実ベット44レースでは、外した17レースの
+# うち12レースが「3頭は当てていて順序だけ違う」で、大半が2・3着の入れ替えだった。
+#   例: R2492 いゔ→だぼ→きっざにあ に p=0.95 で8口、正解の いゔ→きっざにあ→だぼ は
+#       p=0.755 で1口。実際のスコア差は1.5%しかない。
+# 対策: 1着が同じで2・3着が入れ替わった2組の確率を**平均に揃える**。
+# 別の買い方を足すのではなく確率を直すので、口数配分は既存の経路がそのまま使える。
+SWAP23_ON = True
+SWAP23_MIN_P = 0.05     # 相方の確率がこれ未満なら、そもそも候補に足さない
 WIN_STAKE_UNIT      = 1_000    # 単勝は 1口 = 1,000 rrc（購入画面の表記）
 WIN_POOL_QUANTUM    = 1_000    # 単勝プール総額は 1,000 rrc 単位で決まる（全ベットが1口=1000rrcの倍数のため）
 MIN_FIELD_TRIFECTA  = 8        # 2026/06/17: 7頭以下は3連単なし
@@ -1792,6 +1805,7 @@ def export_model_json(bundle, path=None):
         'market_fav_ratio': MARKET_FAV_RATIO, 'market_fav_p_max': MARKET_FAV_P_MAX,
         'market_fav_max_od': MARKET_FAV_MAX_OD,
         'win_skip_p': WIN_SKIP_P, 'win_skip_od': WIN_SKIP_OD,
+        'swap23_on': bool(SWAP23_ON), 'swap23_min_p': SWAP23_MIN_P,
         'safe_p_min': SAFE_P_MIN,
         'win_max_total_units': WIN_MAX_TOTAL_UNITS, 'win_max_units': WIN_MAX_UNITS,
         # 下限オッズ判定（JS 側に 1.5 や 0.02 を直書きさせないため一式を渡す）

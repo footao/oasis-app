@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.30.0';
+const AP_VER = '1.31.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -577,6 +577,50 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
     cands.push({ key: k, p: pBet, od: od, eff1: eff1, edge1: edge1,
                  names: [c.i, c.j, c.k].map(nameOf) });
   }
+  // --- 2着と3着の順序をならす ---
+  // 実測（9月141レース）: 2→3着のスコア差の中央値 1.56% ＝ σ(1.27%) と同程度。
+  // 順序はほぼコイン投げなのに、モデルは片方に確率を寄せる（R2492 で 0.95 対 0.755、
+  // 実際のスコア差は1.5%）。1着が同じで2・3着が入れ替わった組の確率を平均に揃える。
+  if (mNum('swap23_on', 1)) {
+    const swKey = c => `${c.i}-${c.k}-${c.j}`;
+    const pRaw = new Map();                    // 平均する前の値（まとめに残す）
+    const add = [];
+    for (const c of combo) {
+      const k = key3(c);
+      if (!byKey.has(k)) continue;
+      const sk = swKey(c);
+      if (byKey.has(sk)) {
+        // 両方が候補にいる → 確率を平均に揃える（1回だけ）
+        if (!pRaw.has(k)) {
+          const a = pOf.get(k), b = pOf.get(sk), m = (a + b) / 2;
+          pRaw.set(k, a); pRaw.set(sk, b);
+          pOf.set(k, m); pOf.set(sk, m);
+        }
+      } else {
+        // 相方が候補に無い → オッズが付いていれば足す（確率は平均で）
+        const od = odds.get(sk);
+        const partner = combo.find(x => key3(x) === sk);
+        if (!od || od <= 1 || !partner) continue;
+        const pb = lam * partner.p + (1 - lam) * ((1 / (oddsRaw.get(sk) || od)) / norm);
+        if (pb < mNum('swap23_min_p', 0.05)) continue;
+        const m = (pOf.get(k) + pb) / 2;
+        const eff1 = (P + U_) / (P / od + U_);
+        if (eff1 > CFG.MAX_SANE_ODDS) continue;
+        pRaw.set(k, pOf.get(k)); pRaw.set(sk, pb);
+        pOf.set(k, m); pOf.set(sk, m);
+        byKey.set(sk, partner);
+        add.push({ key: sk, p: m, od: od, eff1: eff1, edge1: m * eff1 - 1, swap23: true,
+                   names: [partner.i, partner.j, partner.k].map(nameOf) });
+      }
+    }
+    for (const c of cands) if (pRaw.has(c.key)) { c.pRaw = pRaw.get(c.key); c.p = pOf.get(c.key); }
+    for (const a of add) cands.push(a);
+    if (pRaw.size) {
+      log(`R${sid}: 2・3着の順序をならしました（${add.length}組を追加 / `
+          + `${pRaw.size}組の確率を平均に）`, '#888');
+    }
+  }
+
   const budgetU = Math.min(CFG.TRI_MAX_UNITS, unitsLeft);
   const alloc = OasisModel.allocateUnitsStable(
     cands, P, bankroll(), D.kelly_fraction || 0.25,
@@ -587,7 +631,10 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
   for (const [k, v] of alloc) {
     const c = byKey.get(k);
     if (!c || !v[0]) continue;
-    picks.push({ c: c, k: v[0], eff: v[2], edge: pOf.get(k) * v[2] - 1, p: c.p,
+    const cand = cands.find(x => x.key === k);
+    picks.push({ c: c, k: v[0], eff: v[2], edge: pOf.get(k) * v[2] - 1, p: pOf.get(k),
+                 pRaw: cand && cand.pRaw != null ? cand.pRaw : null,
+                 swap23: !!(cand && cand.swap23),
                  od: odds.get(k) || null,       // 買う前の表示オッズ
                  names: [c.i, c.j, c.k].map(nameOf) });
     used += v[0];
@@ -975,9 +1022,12 @@ async function doBuy() {
       + `od${fx(pk.od, 1)}→${fx(pk.eff, 1)} +${fx(pk.edge * 100, 0)}%`,
       pk.k || 1, pl.unit, CFG.TRI_PER_REQ);
     if (got) done.push({ kind: pk.favMkt ? '市場本命' : '3連単',
-                         src: pk.favMkt ? 'mfav' : (pk.unformed ? 'sleeve' : 'ev'),
+                         src: pk.favMkt ? 'mfav' : (pk.unformed ? 'sleeve'
+                                                   : (pk.swap23 ? 'ev23' : 'ev')),
                          names: pk.names, name: pk.names.join('→'), u: got,
                          uq: unsure, unit: pl.unit, p: pk.p, pm: pk.pModel == null ? null : pk.pModel,
+                         // ならす前のモデル確率。後で「ならしが効いたか」を測るのに要る。
+                         praw: pk.pRaw == null ? null : pk.pRaw,
                          od: pk.od, eff: pk.eff, edge: pk.edge });
   }
   for (const w of (pl.win || [])) {
@@ -1020,7 +1070,8 @@ async function doBuy() {
              kelly: mNum('kelly_fraction', 0.25) },
       bets: done.map(d => ({ t: d.src === 'win' ? 'win' : 'tri', src: d.src, n: d.names,
                              u: d.u, unit: d.unit, unsure: d.uq || 0,
-                             p: r3(d.p), pm: r3(d.pm), od: r3(d.od), eff: r3(d.eff) })),
+                             p: r3(d.p), pm: r3(d.pm), pr: r3(d.praw),
+                             od: r3(d.od), eff: r3(d.eff) })),
       rej: (pl.rej || []).map(r => ({ n: r.names, p: r3(r.p), od: r3(r.od), eff: r3(r.eff),
                                       edge: r3(r.edge), w: r.why })),
     };

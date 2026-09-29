@@ -866,6 +866,21 @@ def regression_tests():
               ('中距離',2.762,3.737),('長距離',2.720,3.680)],
           '直すと194レースで 1着的中 82.0%→82.5%')
 
+    check('P37 2着と3着の順序をならす（確率を平均に揃える）',
+          oc.SWAP23_ON is True
+          and "const swKey = c => `${c.i}-${c.k}-${c.j}`;" in _ap
+          and 'pOf.set(k, m); pOf.set(sk, m);' in _ap
+          and "mNum('swap23_on'" in _ap,
+          '9月141レースで 2→3着のスコア差は中央 1.56% ＝ σ(1.27%)と同程度。'
+          '実ベット44レースの外し17件のうち12件が「3頭は当てて順序違い」だった')
+    check('P37 相方が候補に無ければ足す（確率の下限つき）',
+          "mNum('swap23_min_p'" in _ap and 'swap23: true' in _ap
+          and oc.SWAP23_MIN_P == 0.05,
+          '片方しか候補に無いと、ならしても意味がない。オッズが付いていれば相方も買う')
+    check('P37 まとめに「ならす前の確率」と出所を残す',
+          "pk.swap23 ? 'ev23' : 'ev'" in _ap and 'pr: r3(d.praw)' in _ap,
+          'src=ev23 と pr（ならす前）で、後からこの変更の効果だけを切り出せる')
+
     check('P35 モデルだけ強気で市場が同意しない単勝は買わない',
           oc.WIN_SKIP_P == 0.90 and oc.WIN_SKIP_OD == 10.0
           and 'p[i] >= skipP && od[i] >= skipOd' in _model_js
@@ -1109,7 +1124,8 @@ def regression_tests():
                                  'v: AP_VER', 'c: M.core_version', 'nf: pl.nField')),
           'プール・所持金・σ・モード・版・頭数。どれか欠けると後で回帰分析ができない')
     check('P31 買い目の出所（EV枠/未成立/市場本命/単勝）が区別できる',
-          "src: pk.favMkt ? 'mfav' : (pk.unformed ? 'sleeve' : 'ev')" in _ap
+          "src: pk.favMkt ? 'mfav' : (pk.unformed ? 'sleeve'" in _ap
+          and "(pk.swap23 ? 'ev23' : 'ev'))" in _ap
           and "src: 'win'" in _ap and 'pm: r3(d.pm)' in _ap,
           '市場本命は pm にモデルの確率も残す（実測見積もりとの乖離を測るため）')
     # 2026/09/15: 購入は全件通ったのに「購入中…」で固まり、まとめが出なかった。

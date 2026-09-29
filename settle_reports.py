@@ -95,7 +95,7 @@ def settle(rec, q):
             got = amt * float(b.get('eff') or 0) if hit else 0.0
         ret += got
         lines.append(dict(t=b['t'], src=b.get('src'), n=b['n'], amt=amt,
-                          p=b.get('p'), od=b.get('od'), eff=b.get('eff'),
+                          p=b.get('p'), pr=b.get('pr'), od=b.get('od'), eff=b.get('eff'),
                           hit=bool(hit), ret=round(got)))
     return stake, ret, lines
 
@@ -159,20 +159,37 @@ def main():
                 print(f'      {mark} {l["t"]:<4}{str(l["src"]):<6} {"→".join(l["n"]):<34}'
                       f'{l["amt"]:>9,}rrc  p={l["p"]}  eff={l["eff"]}  払戻 {l["ret"]:>9,}')
 
-    def line(label, key):
+    def line(label, key, prefix=''):
+        # ⚠ 実績が無い枠では何も出さない。prefix を別の print で出すと、
+        #   出さなかった行の枝記号だけが次の行にくっつく（2026/09/29 に実際に崩れた）。
         st, rt = tot[key + '_st'], tot[key + '_rt']
         if not st:
             return
-        print(f'  {label:<12} 投入 {st:>10,.0f}  払戻 {rt:>11,.0f}  '
+        print(f'  {prefix}{label:<12} 投入 {st:>10,.0f}  払戻 {rt:>11,.0f}  '
               f'回収率 {rt/st*100:>4.0f}%  的中 {tot[key+"_hit"]}/{tot[key+"_n"]}')
 
     print(f'\n  {"合計":<12} 投入 {tot["st"]:>10,.0f}  払戻 {tot["rt"]:>11,.0f}  '
           f'収支 {tot["rt"]-tot["st"]:>+12,.0f}  回収率 {tot["rt"]/tot["st"]*100:.0f}%')
     line('単勝', 't:win')
     line('3連単', 't:tri')
-    print('   ├ ' , end='');  line('EV枠', 's:ev')
-    print('   ├ ' , end='');  line('市場本命', 's:mfav')
-    print('   └ ' , end='');  line('未成立枠', 's:sleeve')
+    line('EV枠', 's:ev', '├ ')
+    line('市場本命', 's:mfav', '├ ')
+    line('EV枠（2/3ならし）', 's:ev23', '├ ')
+    line('未成立枠', 's:sleeve', '└ ')
+
+    # 2・3着のならし（SWAP23）の効果。pr（ならす前の確率）が入っている買い目だけを見る。
+    sw = [l for x in rows for l in x['lines'] if l.get('pr') is not None or l['src'] == 'ev23']
+    if sw:
+        st = sum(l['amt'] for l in sw); rt = sum(l['ret'] for l in sw)
+        hit = sum(1 for l in sw if l['hit'])
+        added = [l for l in sw if l['src'] == 'ev23']
+        ast = sum(l['amt'] for l in added); art = sum(l['ret'] for l in added)
+        print(f'\n  2・3着のならし: 対象 {len(sw)}本  投入 {st:,.0f}  払戻 {rt:,.0f}  '
+              f'回収率 {rt/st*100:.0f}%  的中 {hit}/{len(sw)}')
+        if added:
+            print(f'    うち「ならしで足した組」{len(added)}本  投入 {ast:,.0f}  払戻 {art:,.0f}  '
+                  f'回収率 {art/ast*100 if ast else 0:.0f}%  的中 '
+                  f'{sum(1 for l in added if l["hit"])}/{len(added)}')
 
     # 市場本命枠は「実測確率 1.3/od」で買っている。モデル確率(pm)との勝負を分けて見る。
     mf = [l for x in rows for l in x['lines'] if l['src'] == 'mfav']
