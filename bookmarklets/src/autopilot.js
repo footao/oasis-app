@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.31.0';
+const AP_VER = '1.33.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -417,7 +417,11 @@ async function fetchOdds(sid, pets, combo, pool, unit, maxReq) {
   }
   // 全組を舐め切ったのに残額がある ＝ その残りは賭け金ではない ＝ キャリーオーバー。
   // 覚えておけば次からは打ち切りが効く。下見の回は時間があるのでここまで来られる。
-  if (!queue.length) {
+  // ⚠ オッズが1件も返らなかったスイープは「誰も賭けていない」証拠にならない
+  //   （エンドポイントが落ちていても同じ見え方になる）。ここで CO を書くと、
+  //   次のレース以降 BASE が 0 に落ちて**オッズ取得そのものが止まり**、
+  //   全組が未成立＝実効100倍超に見える。2026/09/28 21時から実際にそうなった。
+  if (!queue.length && out.size) {
     const found = Math.max(Math.round((pool - SEED - seenAmt) / unit) * unit, 0);
     if (found !== CO) {
       setCO(found);
@@ -527,11 +531,23 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
   let oddsRaw = new Map();
   // 下見（締切まで時間がある回）は上限を外して全組舐める。そこで CO を確定させ、
   // 締切30秒前の本番では引いた BASE で早く打ち切れるようにする。
+  const fullReq = canBuy ? CFG.ODDS_MAX_REQ : combo.length;
   if (BASE >= U_) {
-    oddsRaw = await fetchOdds(sid, pets, combo, P, U_,
-                              canBuy ? CFG.ODDS_MAX_REQ : combo.length);
+    oddsRaw = await fetchOdds(sid, pets, combo, P, U_, fullReq);
+  } else {
+    // 「賭け0件」は CO を信じた結論にすぎない。CO は guild ごとに保存され続けるので、
+    // 古い値が残っていると永久にオッズを取らなくなり、全組が未成立に見える（＝最も
+    // 危険な向きに倒れる）。上位1バッチだけは必ず実測して裏を取る。
+    oddsRaw = await fetchOdds(sid, pets, combo, P, U_, 20);
+    if (oddsRaw.size) {
+      setCO(0);
+      log(`R${sid}: 賭け0件と判定していましたが実際にはオッズが付いています。`
+          + `キャリーオーバー ${CO.toLocaleString()} rrc を破棄して取り直します`, '#ff8a80');
+      oddsRaw = await fetchOdds(sid, pets, combo, P, U_, fullReq);
+    } else {
+      log(`R${sid}: 賭け0件（プール ${pool0.toLocaleString()}・上位20組もオッズなし）`, '#888');
+    }
   }
-  else log(`R${sid}: 賭け0件（プール ${pool0.toLocaleString()}）→ オッズ取得を省略`, '#888');
 
   let odds = oddsRaw;
   // かつてサイト側に「表示オッズが (プール総額 − 初期プール金) 基準」というバグがあり、
@@ -883,7 +899,7 @@ function analyseWin(sid, pets, winP, measuredPool, budgetLeft) {
                            ownUnits + Math.floor(Math.max(budgetLeft, 0) / WU)),
       maxUnits: M.win_max_units || 100, riskCapFrac: riskFrac(),
       minProb: mNum('win_min_prob', 0.50),
-      skipP: mNum('win_skip_p', 0.90), skipOd: mNum('win_skip_od', 10.0),
+      skipP: mNum('win_skip_p', 0.90), skipOd: mNum('win_skip_od', 10.0), skipRatio: mNum('win_skip_ratio', 12.0),
       myUnits: mine.map(a => Math.floor(a / WU)), unbet: fl.unbet });
   if (!picks || !picks.length) { log(`R${sid}: 単勝に+EVの馬なし`, '#888'); return none; }
   const out = picks.map(r => {

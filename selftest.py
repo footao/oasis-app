@@ -898,6 +898,39 @@ def regression_tests():
           and 'tail300' in _model_js and '3 / L.n_seg' in _model_js,
           '図鑑の一覧など ctx 無しの呼び出しで落ちないこと。JS も同じ式を持つ')
 
+    # 2026/09/28 21時〜09/29 12時の10レースで、3連単の買い目が全部 src=sleeve・od=null に
+    # なっていた。原因は localStorage のキャリーオーバーが約300万に確定してしまい、
+    # BASE = プール − 初期金 − CO < 1口 → オッズ取得を丸ごとスキップ → 全組が未成立扱い。
+    # R2529 は実効136倍と見積もった組が実際には2.3倍（払戻23,000）だった。
+    # 実結果と突き合わせた単勝72件（〜2026/09/29）を乖離（p × od）で割ると、
+    # 12未満 63件 114.9% / 12以上 9件 0.0%（741,000rrc 全損）。
+    check('P40 市場との乖離が大きすぎる単勝は買わない',
+          oc.WIN_SKIP_RATIO == 12.0
+          and 'p[i] * od[i] >= skipRatio' in _model_js
+          and "skipRatio: mNum('win_skip_ratio'" in _ap,
+          '乖離12以上は 0/9・全損。12未満だけなら 63件で回収率114.9%')
+    check('P40 p が低くても乖離が大きければ止まる（旧 p 閾値の穴）',
+          not oc.win_bet_picks_pool(['a'], [0.62], [45.7], 10**6, 10**6, 0.25, 0.0,
+                                    my_units=[0])[0]
+          and any(r['name'] == 'b' for r in oc.win_bet_picks_pool(
+              ['b'], [0.71], [6.55], 10**6, 10**6, 0.25, 0.0, my_units=[0])[0]),
+          'R2530 の せん（p0.62 / od45.7 / 乖離28.3）は WIN_SKIP_P=0.90 では止まらなかった。'
+          'R2519 の 招き猫（p0.71 / od6.55 / 乖離4.6）は的中しているので切らない')
+    check('P40 未投票の馬は乖離の対象外（オッズが実在しない）',
+          bool(oc.win_bet_picks_pool(['a'], [0.62], [1.5], 10**6, 10**6, 0.25, 0.0,
+                                     my_units=[0], unbet=[True])[0]),
+          'unbet はオッズが下限に張り付いているだけなので、p × od に意味がない')
+
+    check('P39 オッズが1件も返らないスイープからキャリーオーバーを確定しない',
+          'if (!queue.length && out.size) {' in _ap,
+          'エンドポイントが落ちていても「誰も賭けていない」と同じ見え方になる。'
+          '書いてしまうと次のレース以降オッズ取得そのものが止まる')
+    check('P39 「賭け0件」は上位1バッチを実測して裏を取る',
+          "oddsRaw = await fetchOdds(sid, pets, combo, P, U_, 20);" in _ap
+          and 'if (oddsRaw.size) { setCO(0);' in _ap,
+          'CO は guild ごとに残り続けるので、古い値があると永久に未成立扱いになる。'
+          '未成立＝実効100倍超なので、間違う向きが最悪（最も強気に倒れる）')
+
     check('P37 2着と3着の順序をならす（確率を平均に揃える）',
           oc.SWAP23_ON is True
           and "const swKey = c => `${c.i}-${c.k}-${c.j}`;" in _ap

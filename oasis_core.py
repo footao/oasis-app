@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.36.0'
+CORE_VERSION = '3.37.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -95,6 +95,17 @@ WIN_MIN_PROB = 0.50
 # 市場が同意する帯（od1.17〜1.55）は同期間 16/17 なので、そこは触らない。
 WIN_SKIP_P = 0.90        # これ以上の予測確率で
 WIN_SKIP_OD = 10.0       # これ以上のオッズなら見送る
+# 乖離 = モデルp × オッズ。1.0 で市場と同意、大きいほどモデルだけが強気。
+# 実結果と突き合わせた単勝72件（〜2026/09/29）:
+#   乖離 0〜1.5  27件 的中92.6% 回収117.0%
+#   乖離 1.5〜3  18件 的中16.7% 回収 57.6%
+#   乖離 3〜6    13件 的中 7.7% 回収 73.8%
+#   乖離 6〜12    5件 的中40.0% 回収277.7%
+#   乖離 12以上   9件 的中 0.0% 回収  0.0%（741,000rrc 全損）
+# 12未満をまとめると63件・114.9%。上の WIN_SKIP_P/OD は p が閾値なので
+# p<0.90 の乖離特大（R2459 p0.88/od58、R2494 p0.51/od42、R2530 p0.62/od45.7）を
+# 取りこぼしていた。乖離で切るとその3件も止まる。
+WIN_SKIP_RATIO = 12.0          # p × od がこれ以上なら見送る
 
 # --- 2着と3着の順序をならす（2026/09/29）---
 # 9月141レースで、着順が隣り合う馬のスコア差の中央値は
@@ -1805,6 +1816,7 @@ def export_model_json(bundle, path=None):
         'market_fav_ratio': MARKET_FAV_RATIO, 'market_fav_p_max': MARKET_FAV_P_MAX,
         'market_fav_max_od': MARKET_FAV_MAX_OD,
         'win_skip_p': WIN_SKIP_P, 'win_skip_od': WIN_SKIP_OD,
+        'win_skip_ratio': WIN_SKIP_RATIO,
         'swap23_on': bool(SWAP23_ON), 'swap23_min_p': SWAP23_MIN_P,
         'safe_p_min': SAFE_P_MIN,
         'win_max_total_units': WIN_MAX_TOTAL_UNITS, 'win_max_units': WIN_MAX_UNITS,
@@ -2959,7 +2971,8 @@ def estimate_win_pool(before, after, floor=None):
 def win_bet_picks_pool(names, win_p, odds, pool, bankroll, kelly_frac, edge_min,
                        stake_unit=WIN_STAKE_UNIT, total_units=WIN_MAX_TOTAL_UNITS,
                        max_units=WIN_MAX_UNITS, risk_cap_frac=0.10, my_units=None,
-                       unbet=None, min_prob=None, skip_p=None, skip_od=None):
+                       unbet=None, min_prob=None, skip_p=None, skip_od=None,
+                       skip_ratio=None):
     """プール総額が分かっている場合の単勝配分（希薄化を織り込む）。
 
     パリミュチュエルなので、自分が k口 入れると
@@ -2979,6 +2992,10 @@ def win_bet_picks_pool(names, win_p, odds, pool, bankroll, kelly_frac, edge_min,
     sp = WIN_SKIP_P if skip_p is None else float(skip_p)
     so = WIN_SKIP_OD if skip_od is None else float(skip_od)
     ok &= ~((p >= sp) & (od >= so) & ~unb)
+    # 市場との乖離そのもので切る（上の p 閾値が取りこぼす帯を止める）。
+    sr = WIN_SKIP_RATIO if skip_ratio is None else float(skip_ratio)
+    if sr > 0:
+        ok &= ~(np.isfinite(od) & (p * od >= sr) & ~unb)
     if pool is None or pool <= 0 or not ok.any():
         return [], None
     # 未投票の馬（オッズが初期値のまま）は「その馬への投入額 0」。
