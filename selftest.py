@@ -904,6 +904,22 @@ def regression_tests():
     # R2529 は実効136倍と見積もった組が実際には2.3倍（払戻23,000）だった。
     # 実結果と突き合わせた単勝72件（〜2026/09/29）を乖離（p × od）で割ると、
     # 12未満 63件 114.9% / 12以上 9件 0.0%（741,000rrc 全損）。
+    # 3.36.0〜3.37.0 の間、oasis_app.py の REQUIRED_CORE が 3.35.0 のままで
+    # Streamlit が版不一致のエラー画面で止まっていた。core を上げたら必ずここで落とす。
+    _app = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'oasis_app.py'),
+                encoding='utf-8').read()
+    _req = re.search(r'^REQUIRED_CORE\s*=\s*"([\d.]+)"', _app, re.M)
+    check('P42 oasis_app.py の REQUIRED_CORE が oasis_core.py の版と一致',
+          bool(_req) and _req.group(1) == oc.CORE_VERSION,
+          f'app {_req.group(1) if _req else "?"} / core {oc.CORE_VERSION}')
+
+    check('P41 未成立枠は1レース1口まで',
+          oc.DEFAULT_SETTINGS['unformed_max_units'] == 1
+          and len(oc.unformed_sleeve_picks({(0, 1, 2): 0.5, (0, 2, 1): 0.4, (1, 0, 2): 0.3},
+                                           ['a', 'b', 'c'], lambda n: None, 1_300_000,
+                                           p_min=0.2, edge_min=0.3, max_units=1)) == 1,
+          '実結果24件で1本・回収率9.6%。宝くじとして最小額だけ残す（JS は model.json の defaults から読む）')
+
     check('P40 市場との乖離が大きすぎる単勝は買わない',
           oc.WIN_SKIP_RATIO == 12.0
           and 'p[i] * od[i] >= skipRatio' in _model_js

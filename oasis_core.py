@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.37.0'
+CORE_VERSION = '3.38.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -3131,7 +3131,10 @@ DEFAULT_SETTINGS = dict(
     # +EVなら買う。口数は分数ケリーが決めるので、薄いエッジは薄くしか乗らない。
     edge_min=0.01,
     carryover_rrc=None,
-    unformed_sleeve=False, unformed_max_units=10,
+    # 未成立枠は1レース1口まで（2026/09/29）。実結果24件で的中1本・回収率9.6%、
+    # その1本も CO バグで人気組を未成立と誤認したもの（実効136倍の見積りが実際2.3倍）。
+    # 「当たれば120倍」の払戻は未観測なので、宝くじとして最小額だけ残す。
+    unformed_sleeve=False, unformed_max_units=1,
     # 未成立組も同じ下限を通す（下の min_prob と同じ理由。実測 0/31 だった）
     unformed_p_min=0.20, unformed_edge_min=0.30,
     win_bets=False, win_edge_min=0.15,
