@@ -83,6 +83,12 @@ const OasisModel = (() => {
     if (!Object.keys(mult).length) return push();
     let duty = aptDuty != null ? aptDuty
       : Math.min(Math.max(c.duty == null ? 1 : c.duty, 0), 1);
+    // 「残り300m」（終焉加速・幻界終走）は距離で決まる決定論的な窓＝3区間ぶん。
+    // 距離が分かれば正確に引ける。分からなければ M.item_scope の 0.200 のまま。
+    if (c.scope === 'tail300') {
+      const L = (M.stamina_cost_law || {})[(ctx && ctx.dist) || ''];
+      if (L && L.n_seg) duty = 3 / L.n_seg;
+    }
     const out = {};
     // 先頭の間だけ効く装備（首位の呪い）。発動割合は馬によって桁違いに違うので、
     // 1着確率が分かっていればそこから引き直す（Python: LEAD_DUTY_A/B と同じ式）。

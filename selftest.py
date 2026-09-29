@@ -866,6 +866,38 @@ def regression_tests():
               ('中距離',2.762,3.737),('長距離',2.720,3.680)],
           '直すと194レースで 1着的中 82.0%→82.5%')
 
+    # ユニーク装備は effect_key が `unique_*` なので gear_/charm_ を外す前処理でも
+    # コード表に落ちない。ラベルをカタログに入れていないと itemMult が丸ごと捨てる
+    # （= 25%超の倍率が 0 になる）ので、4種すべてが倍率になることを見る。
+    _uniq = {
+        '幻界終走：残り300mでスピードが25.1%上昇': 'unique_mirage_finish',
+        '終星の鎮魂歌：終盤で下位半分ならパワーが26.1%上昇': 'unique_last_requiem',
+        '紅蓮点火：残りスタミナ25%以下でスピードが26.8%上昇': 'unique_blood_ignition',
+        '時界超越：中盤のパワーが23.5%上昇': 'unique_chrono_overclock',
+    }
+    _sp_u = oc.default_spec()
+    check('P38 ユニーク装備4種すべてが倍率に落ちる',
+          all(oc.item_effect_spec(d, k, _sp_u, {'dist': 'マイル'})
+              for d, k in _uniq.items()),
+          'いゔが幻界終走を着けた9/25以降、終盤レートが183→224（+22%）で3連勝。'
+          'モデルはこの+25.1%を丸ごと見ていなかった')
+    # 「残り300m」は 3区間ぶんの決定論的な窓。timeline 実測も短距離3/10・マイル3/15。
+    check('P38 「残り300m」の duty は距離から引く（3/区間数）',
+          [round(oc.item_effect_spec('幻界終走：残り300mでスピードが25.1%上昇',
+                                     'unique_mirage_finish', _sp_u,
+                                     {'dist': d})['speed'], 5)
+           for d in ('短距離', 'マイル', '中距離', '長距離')]
+          == [1.07530, 1.05020, 1.03765, 1.03012]
+          and oc.item_scope_table(_sp_u)['終焉加速']['scope'] == 'tail300',
+          '短距離 0.300 / マイル 0.200 / 中距離 0.150 / 長距離 0.120。'
+          '固定 0.200 だと短距離で1/3ぶん足りない')
+    check('P38 距離が分からない呼び出しはカタログの 0.200 に落ちる',
+          round(oc.item_effect_spec('幻界終走：残り300mでスピードが25.1%上昇',
+                                    'unique_mirage_finish', _sp_u, None)['speed'], 5)
+          == 1.05020
+          and 'tail300' in _model_js and '3 / L.n_seg' in _model_js,
+          '図鑑の一覧など ctx 無しの呼び出しで落ちないこと。JS も同じ式を持つ')
+
     check('P37 2着と3着の順序をならす（確率を平均に揃える）',
           oc.SWAP23_ON is True
           and "const swKey = c => `${c.i}-${c.k}-${c.j}`;" in _ap
