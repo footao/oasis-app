@@ -866,6 +866,30 @@ def regression_tests():
               ('中距離',2.762,3.737),('長距離',2.720,3.680)],
           '直すと194レースで 1着的中 82.0%→82.5%')
 
+    check('P35 モデルだけ強気で市場が同意しない単勝は買わない',
+          oc.WIN_SKIP_P == 0.90 and oc.WIN_SKIP_OD == 10.0
+          and 'p[i] >= skipP && od[i] >= skipOd' in _model_js
+          and "skipP: mNum('win_skip_p'" in _ap,
+          '実測 0/6・投入507,000が全損（モデル90〜99%／od11〜45）。'
+          '市場が同意する帯（od1.17〜1.55）は 16/17 なので触らない')
+    check('P35 弾くのは「高確率かつ長オッズ」の組み合わせだけ',
+          not oc.win_bet_picks_pool(['a'], [0.95], [20.0], 10**6, 10**6, 0.25, 0.0,
+                                    my_units=[0])[0]
+          and any(r['name'] == 'b' for r in oc.win_bet_picks_pool(
+              ['b'], [0.8], [1.6], 10**6, 10**6, 0.25, 0.0, my_units=[0])[0]),
+          'p95%/od20 は見送り、p80%/od1.6 は買う')
+    check('P36 市場本命枠にオッズ上限がある',
+          oc.MARKET_FAV_MAX_OD == 1.5
+          and oc.market_fav_pick({('a',): 2.0, ('b',): 9.0}) is None
+          and oc.market_fav_pick({('a',): 1.4, ('b',): 9.0}) is not None
+          and 'maxOd == null ? 1.5' in _model_js
+          and "mNum('market_fav_max_od'" in _ap,
+          '実測28本: 〜1.5 回収率110%（11本・実測82%）／1.5〜2 44%（9本・33%）／'
+          '2〜3 43%（8本・25%）。上限なしだと枠全体で70%だった')
+    check('P36 見積りの上限を実測に合わせた',
+          oc.MARKET_FAV_P_MAX == 0.85,
+          'od1.5以下の実測的中率 82%。旧 0.95 は口数を張りすぎる')
+
     check('P34 単勝に下限的中率がある（低確率帯を買わない）',
           oc.WIN_MIN_PROB == 0.50
           and 'p[i] >= minP' in _model_js
@@ -896,7 +920,8 @@ def regression_tests():
               os.path.dirname(os.path.abspath(__file__)), 'model.json'), encoding='utf-8')),
           'JS 側に定数を持たせない（Python と二重管理にしない）ため')
 
-    _od = {('a',): 3.5, ('b',): 2.4, ('c',): 9.0}
+    # ⚠ MARKET_FAV_MAX_OD=1.5 を入れたので、テストの一番人気も上限内に置く。
+    _od = {('a',): 1.45, ('b',): 1.2, ('c',): 9.0}
     check('P29 安牌モードは既定オン（2026/09/15から）／ボタンで切れる',
           re.search(r'SAFE_MODE:\s*true', _ap) is not None
           and "v === null ? !!CFG.SAFE_MODE : v === '1'" in _ap
@@ -963,7 +988,7 @@ def regression_tests():
           '25レースの実測では8口でも回収率188%だが、資金が細いときはケリーが頭を押さえる')
 
     check('P26 市場の一番人気（最小オッズ）を選ぶ',
-          oc.market_fav_pick(_od) == (('b',), 2.4, 1))
+          oc.market_fav_pick(_od) == (('b',), 1.2, 1))
     check('P26 一番人気が下限オッズ未満なら買わない（希薄化で元返しになるため）',
           oc.market_fav_pick({('a',): oc.MARKET_FAV_MIN_OD - 0.01, ('b',): 50.0}) is None
           and oc.market_fav_pick({('a',): oc.MARKET_FAV_MIN_OD, ('b',): 50.0}) is not None,
@@ -972,7 +997,7 @@ def regression_tests():
     check('P26 EV側が既に買っていれば追加しない',
           oc.market_fav_pick(_od, already={('b',)}) is None)
     check('P26 同オッズはキー順で決める（Python と JS で同じ組を選ぶ）',
-          oc.market_fav_pick({('b',): 2.5, ('a',): 2.5})[0] == ('a',))
+          oc.market_fav_pick({('b',): 1.3, ('a',): 1.3})[0] == ('a',))
     check('P26 市場本命枠は既定オン（2026/09/15から）／ボタンで切れる',
           re.search(r'MARKET_FAV:\s*true', _ap) is not None
           and "v === null ? !!CFG.MARKET_FAV : v === '1'" in _ap

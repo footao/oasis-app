@@ -422,6 +422,9 @@ const OasisModel = (() => {
     const unit = +o.stakeUnit, totalUnits = +o.totalUnits, maxUnits = +o.maxUnits;
     const riskCapFrac = (o.riskCapFrac == null ? 0.10 : +o.riskCapFrac);
     const minP = (o.minProb == null ? 0.50 : +o.minProb);
+    // モデルだけが強気で市場が同意しない帯は買わない（実測 0/6・全損）。
+    const skipP = (o.skipP == null ? 0.90 : +o.skipP);
+    const skipOd = (o.skipOd == null ? 10.0 : +o.skipOd);
     const n = names.length;
     const od = [], p = [], unb = [], k0 = [], ok = [];
     for (let i = 0; i < n; i++) {
@@ -432,7 +435,8 @@ const OasisModel = (() => {
       // プールの再計算で k0 を足してはいけない（二重計上で希薄化を過小評価する）。
       k0.push(o.myUnits && o.myUnits[i] != null ? Math.trunc(o.myUnits[i]) : 0);
       // 予測が低い馬は買わない（実測で 50%未満は 25本中1本・回収率78%）。
-      ok.push(Number.isFinite(od[i]) && p[i] >= minP && (od[i] > 1.0 || unb[i]));
+      ok.push(Number.isFinite(od[i]) && p[i] >= minP && (od[i] > 1.0 || unb[i])
+              && !(p[i] >= skipP && od[i] >= skipOd && !unb[i]));
     }
     if (pool == null || pool <= 0 || !ok.some(Boolean)) return [[], null];
     // 未投票の馬（オッズが初期値のまま）は「その馬への投入額 0」。
@@ -646,7 +650,7 @@ const OasisModel = (() => {
   // --- 市場の一番人気の組（Python: market_fav_pick）---
   // EVは見ない。「市場が一番人気にしている組を薄く買う」だけの別枠。
   // 同オッズが並んだときの選び方（キー順）も Python と揃える。
-  function marketFavPick(oddsByKey, minOd, units, already) {
+  function marketFavPick(oddsByKey, minOd, units, already, maxOd) {
     let bk = null, bo = 0;
     for (const [k, v] of oddsByKey) {
       const o = +v;
@@ -655,7 +659,9 @@ const OasisModel = (() => {
     }
     if (bk === null) return null;
     const u = Math.trunc(units == null ? 1 : units);
-    if (bo < (minOd == null ? 2.0 : minOd) || u < 1) return null;
+    // 実測（28本）で採算に乗るのは od1.5以下だけ（〜1.5 回収率110% / 1.5〜2 44% / 2〜3 43%）。
+    if (bo < (minOd == null ? 2.0 : minOd) || bo > (maxOd == null ? 1.5 : maxOd)
+        || u < 1) return null;
     if (already && already.has && already.has(bk)) return null;
     return [bk, bo, u];
   }

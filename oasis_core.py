@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.33.0'
+CORE_VERSION = '3.34.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -87,6 +87,14 @@ WIN_SMALL_FIELD_MAX_UNITS = 20     # MIN_FIELD_TRIFECTA 未満のレースの単
 # 3連単は同期間 178% なので、利益は3連単から出ている。
 # 50% にしたのは 50〜80% の実績が2本しかなく、そこを切る根拠がないため。
 WIN_MIN_PROB = 0.50
+# モデルが高確率と言い、市場がまったく同意しない単勝は買わない。
+# 実測（2026/09/24〜09/28）: モデル90%以上 かつ 購入時オッズ10倍以上 は **0/6**、
+# 投入 507,000 が全損（R2471 90.8%/od39, R2480 95.5%/od23, R2482 94.1%/od41,
+#   R2492 90.0%/od28, R2495 91.8%/od11, R2517 99.4%/od45）。
+# 主張どおりなら6連敗はまず起こらないので、この帯の確率は信用しない。
+# 市場が同意する帯（od1.17〜1.55）は同期間 16/17 なので、そこは触らない。
+WIN_SKIP_P = 0.90        # これ以上の予測確率で
+WIN_SKIP_OD = 10.0       # これ以上のオッズなら見送る
 WIN_STAKE_UNIT      = 1_000    # 単勝は 1口 = 1,000 rrc（購入画面の表記）
 WIN_POOL_QUANTUM    = 1_000    # 単勝プール総額は 1,000 rrc 単位で決まる（全ベットが1口=1000rrcの倍数のため）
 MIN_FIELD_TRIFECTA  = 8        # 2026/06/17: 7頭以下は3連単なし
@@ -988,7 +996,12 @@ MARKET_FAV_MIN_OD = 1.0
 #                 この式・od1.0以上  → 35レース280口 164%（利益額はわずかに上）
 MARKET_FAV_P = 0.50            # 下限（オッズが長い帯はこちらが効く）
 MARKET_FAV_RATIO = 1.3         # 市場の暗黙確率の何倍と見るか
-MARKET_FAV_P_MAX = 0.95        # 上限
+MARKET_FAV_P_MAX = 0.85        # 上限。od1.5以下の実測的中率82%に合わせた（旧 0.95）
+# 実測28本（2026/09/23〜09/28）を od 帯で割ると、採算に乗るのは 1.5以下だけ:
+#     〜1.5   11本 実測82% 回収率110%   実効od1.40×0.82 = 1.15
+#     1.5〜2   9本 実測33% 回収率 44%   実効od1.70×0.33 = 0.57
+#     2〜3     8本 実測25% 回収率 43%   実効od2.22×0.25 = 0.56
+MARKET_FAV_MAX_OD = 1.5        # これより長い一番人気は買わない
 MARKET_FAV_UNITS  = 1          # 下限（最低1口）
 MARKET_FAV_MAX_UNITS = 8       # 上限。25レースの実測では 8口でも回収率188%
 
@@ -1777,6 +1790,8 @@ def export_model_json(bundle, path=None):
         'market_fav_min_od': MARKET_FAV_MIN_OD, 'market_fav_units': MARKET_FAV_UNITS,
         'market_fav_p': MARKET_FAV_P, 'market_fav_max_units': MARKET_FAV_MAX_UNITS,
         'market_fav_ratio': MARKET_FAV_RATIO, 'market_fav_p_max': MARKET_FAV_P_MAX,
+        'market_fav_max_od': MARKET_FAV_MAX_OD,
+        'win_skip_p': WIN_SKIP_P, 'win_skip_od': WIN_SKIP_OD,
         'safe_p_min': SAFE_P_MIN,
         'win_max_total_units': WIN_MAX_TOTAL_UNITS, 'win_max_units': WIN_MAX_UNITS,
         # 下限オッズ判定（JS 側に 1.5 や 0.02 を直書きさせないため一式を渡す）
@@ -2726,7 +2741,7 @@ def allocate_units_stable(cands, P_total, bankroll, kelly_frac, max_risk_frac,
     return res
 
 
-def market_fav_pick(odds_by_key, min_od=None, units=None, already=()):
+def market_fav_pick(odds_by_key, min_od=None, units=None, already=(), max_od=None):
     """市場の一番人気（＝最小オッズ）の組を1点だけ返す。EVは見ない。
 
     odds_by_key: {組キー: 表示オッズ}
@@ -2738,7 +2753,8 @@ def market_fav_pick(odds_by_key, min_od=None, units=None, already=()):
     units = MARKET_FAV_UNITS if units is None else int(units)
     # 同オッズが並んだときに Python と JS で違う組を選ばないよう、キー順で決める
     key, od = min(odds_by_key.items(), key=lambda kv: (float(kv[1]), str(kv[0])))
-    if float(od) < min_od or key in already or units < 1:
+    mx = MARKET_FAV_MAX_OD if max_od is None else float(max_od)
+    if float(od) < min_od or float(od) > mx or key in already or units < 1:
         return None
     return key, float(od), units
 
@@ -2911,7 +2927,7 @@ def estimate_win_pool(before, after, floor=None):
 def win_bet_picks_pool(names, win_p, odds, pool, bankroll, kelly_frac, edge_min,
                        stake_unit=WIN_STAKE_UNIT, total_units=WIN_MAX_TOTAL_UNITS,
                        max_units=WIN_MAX_UNITS, risk_cap_frac=0.10, my_units=None,
-                       unbet=None, min_prob=None):
+                       unbet=None, min_prob=None, skip_p=None, skip_od=None):
     """プール総額が分かっている場合の単勝配分（希薄化を織り込む）。
 
     パリミュチュエルなので、自分が k口 入れると
@@ -2927,6 +2943,10 @@ def win_bet_picks_pool(names, win_p, odds, pool, bankroll, kelly_frac, edge_min,
     mp = WIN_MIN_PROB if min_prob is None else float(min_prob)
     # 予測が低い馬は買わない（実測で 50%未満は 25本中1本・回収率78%）。
     ok = np.isfinite(od) & (p >= mp) & ((od > 1.0) | unb)
+    # モデルだけが強気で市場が同意しない帯は買わない（実測 0/6・全損）。
+    sp = WIN_SKIP_P if skip_p is None else float(skip_p)
+    so = WIN_SKIP_OD if skip_od is None else float(skip_od)
+    ok &= ~((p >= sp) & (od >= so) & ~unb)
     if pool is None or pool <= 0 or not ok.any():
         return [], None
     # 未投票の馬（オッズが初期値のまま）は「その馬への投入額 0」。

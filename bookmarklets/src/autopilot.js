@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.29.0';
+const AP_VER = '1.30.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -609,7 +609,7 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
     const fav = OasisModel.marketFavPick(
       oddsMap, mNum('market_fav_min_od', CFG.MARKET_FAV_MIN_OD),
       Math.min(mNum('market_fav_units', CFG.MARKET_FAV_UNITS), budgetU - used, M.max_units || 20),
-      bought);
+      bought, mNum('market_fav_max_od', 1.5));
     if (fav && (byKey.has(fav[0]) || comboByKey.has(fav[0]))) {
       const c = byKey.get(fav[0]) || comboByKey.get(fav[0]), od = fav[1];
       // モデルの確率（比較用に残すだけ。口数には使わない）
@@ -836,6 +836,7 @@ function analyseWin(sid, pets, winP, measuredPool, budgetLeft) {
                            ownUnits + Math.floor(Math.max(budgetLeft, 0) / WU)),
       maxUnits: M.win_max_units || 100, riskCapFrac: riskFrac(),
       minProb: mNum('win_min_prob', 0.50),
+      skipP: mNum('win_skip_p', 0.90), skipOd: mNum('win_skip_od', 10.0),
       myUnits: mine.map(a => Math.floor(a / WU)), unbet: fl.unbet });
   if (!picks || !picks.length) { log(`R${sid}: 単勝に+EVの馬なし`, '#888'); return none; }
   const out = picks.map(r => {
