@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.33.0';
+const AP_VER = '1.34.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -812,6 +812,9 @@ async function probeWinPool(sid, pets, winP) {
     const R = sr / sw;
     if (R <= 1) continue;
     let P = spent / (R - 1);
+    // NPC の初期金だけでプールは win_pool_seed 以上ある。それを下回る推定は、試し買いの
+    // 前後に他人の賭けが入って比 R が歪んだもの（R2531 で 17,000 と出た）。測り直す。
+    if (P + spent < (M.win_pool_seed || 0)) continue;
     let swErr = 0; for (const w of seenOd.values()) swErr += w;
     const sdR = (STEP / Math.sqrt(12)) * Math.sqrt(2 / swErr);
     let rel = sdR * P / spent;

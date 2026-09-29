@@ -913,6 +913,10 @@ def regression_tests():
           bool(_req) and _req.group(1) == oc.CORE_VERSION,
           f'app {_req.group(1) if _req else "?"} / core {oc.CORE_VERSION}')
 
+    check('P43 単勝プールの実測が初期金を下回ったら捨てる',
+          'if (P + spent < (M.win_pool_seed || 0)) continue;' in _ap,
+          'R2531 で 17,000 と出た（NPC の初期金だけで20万ある）。試し買いの前後に他人の賭けが入ると比が歪む')
+
     check('P41 未成立枠は1レース1口まで',
           oc.DEFAULT_SETTINGS['unformed_max_units'] == 1
           and len(oc.unformed_sleeve_picks({(0, 1, 2): 0.5, (0, 2, 1): 0.4, (1, 0, 2): 0.3},
@@ -1256,8 +1260,8 @@ def regression_tests():
           and 'const BASE = Math.max(pool0 - SEED - CO, 0);' in _ap)
     check('P20 autopilot は下見で全組舐めて CO を確定する',
           'canBuy ? CFG.ODDS_MAX_REQ : combo.length' in _ap
-          and 'if (!queue.length) {' in _ap and 'setCO(found);' in _ap,
-          '本番は上限つき、下見は上限なし')
+          and 'if (!queue.length && out.size) {' in _ap and 'setCO(found);' in _ap,
+          '本番は上限つき、下見は上限なし（オッズが1件も返らなかったスイープでは確定しない＝P39）')
     check('P20 autopilot と bm.js は CO の保存先を共有する',
           "'oasis_co_' + AUTH.guild" in _ap and "COKEY='oasis_co_'+G" in _bm15,
           '購入ページは同一オリジンなのでどちらで測っても効く')
