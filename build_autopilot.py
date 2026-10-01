@@ -39,12 +39,19 @@ def step(n, msg):
     print('-' * 64)
 
 
-def main(log_path='logg'):
+def main(log_path=None):
     import oasis_core as oc
     import minify
 
+    # 学習データは races.jsonl（API から毎レース自動で取っている）が既定。
+    # Discord ログは状態を取り違えていて、9月分は学習を悪化させていた（oasis_core.races_jsonl_frame 参照）。
+    # 引数で logg を渡せば従来どおり Discord ログから学習する。
+    if log_path is None:
+        log_path = 'races.jsonl' if os.path.exists(os.path.join(HERE, 'races.jsonl')) else 'logg'
+    jsonl = str(log_path).lower().endswith('.jsonl')
     step(1, f'モデルを学習して model.json を書き出す（{log_path}）')
-    bundle = oc.train_model(log_path)
+    bundle = oc.train_model(os.path.join(HERE, log_path) if jsonl else log_path,
+                            train_from=oc.JSONL_TRAIN_FROM if jsonl else oc.DEFAULT_TRAIN_FROM)
     if not bundle.get('ok'):
         print('❌ 学習に失敗しました:')
         for m in bundle.get('messages', []):
@@ -55,7 +62,7 @@ def main(log_path='logg'):
     n_races = int(bundle.get('n_races', 0))
     if n_races < MIN_RACES:
         print(f'\n❌ 学習レースが {n_races} 件しかありません（{MIN_RACES}件以上必要）。')
-        print('   logg/ に十分なログが入っているか確認してください。')
+        print('   races.jsonl（または logg/）に十分なデータが入っているか確認してください。')
         return 1
 
     payload = oc.export_model_json(bundle, os.path.join(HERE, 'model.json'))
@@ -92,6 +99,7 @@ def main(log_path='logg'):
 
     step(4, 'Python↔JS の一致検証')
     ok = True
+    unverified = False
     if not os.path.exists(os.path.join(HERE, 'parity_test.py')):
         print('   ⚠ parity_test.py が無いので飛ばしました')
     else:
@@ -107,6 +115,21 @@ def main(log_path='logg'):
             print('      それ以外（Traceback など）は検証スクリプト側の問題です。')
             return 1
 
+    # 金に直結する autopilot のブロック（オッズの取り損ね・CO・2・3着の順番補正）を実際に動かす
+    tp = os.path.join(HERE, 'test_autopilot.js')
+    if os.path.exists(tp):
+        try:
+            r = subprocess.run(['node', tp], capture_output=True, text=True,
+                               encoding='utf-8', errors='replace')
+            last = (r.stdout.strip().splitlines() or [''])[-1]
+            if r.returncode != 0:
+                print('   ❌ autopilot のブロックテストに失敗しました。ここで止めます。')
+                print('   ' + (r.stderr or r.stdout).strip().replace('\n', '\n   ')[:800])
+                return 1
+            print('   ' + last)
+        except FileNotFoundError:
+            unverified = True
+
     step(5, '構文チェック')
     for f, label in [('autopilot.bundle.js', 'バンドル')]:
         p = os.path.join(HERE, f)
@@ -120,11 +143,16 @@ def main(log_path='logg'):
                 ok = False
         except FileNotFoundError:
             print('   ⚠ node が無いので構文チェックを飛ばしました')
+            unverified = True
             break
     print('\n' + '=' * 64)
     if ok:
         print('✅ 完了。次の3つを GitHub に push してください:')
         print('   model.json / autopilot.bundle.js / oasis_autopilot_setup.html')
+        if unverified:
+            # node が無いと Python↔JS の一致も JS の構文も確かめていない。✅ だけ見て安心しないこと。
+            print('   ⚠ ただし node が無いので、JS の構文と Python↔JS の一致は【未検証】です。'
+                  ' https://nodejs.org から入れると自動で検証します。')
     return 0 if ok else 1
 
 
@@ -156,4 +184,4 @@ def _write_setup_page(combined, mod):
 
 
 if __name__ == '__main__':
-    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else 'logg'))
+    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else None))

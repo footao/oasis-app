@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.39.0'
+CORE_VERSION = '3.42.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -117,6 +117,14 @@ WIN_SKIP_RATIO = 12.0          # p × od がこれ以上なら見送る
 #       p=0.755 で1口。実際のスコア差は1.5%しかない。
 # 対策: 1着が同じで2・3着が入れ替わった2組の確率を**平均に揃える**。
 # 別の買い方を足すのではなく確率を直すので、口数配分は既存の経路がそのまま使える。
+# 状態（好調/普通/不調）を特徴量に使うか（2026/10/01 に False）。
+# Discord ログから読んだ状態は、API の状態と 43% しか一致しない（3択の偶然一致とほぼ同じ）。
+# 出走表と結果の突き合わせで取り違えているらしく、学習ラベルが半分壊れていた。
+# その結果、係数が 好調 +0.038 / 不調 +0.031 と両方プラスの不自然な値になっていた（σの3倍）。
+# 前向き検証（9/2〜10/1 の全160レース）: Discord ログで状態を外すと3連単の対数損失 −0.073（−2.0σ）。
+# races.jsonl（API の状態）で学習するなら状態あり/なしは差なし（3連単の対数損失 −0.006±0.017）なので、
+# 単純なほう（なし）にしてある。
+USE_CONDITION = False
 SWAP23_ON = True
 SWAP23_MIN_P = 0.05     # 相方の確率がこれ未満なら、そもそも候補に足さない
 # 2・3着の順番は「市場が同意しないときだけ」モデルの自信を抑える（2026/10/01）。
@@ -141,10 +149,15 @@ MARKET_EDGE_RATIO   = 1.3
 MARKET_MIN_PROB     = 0.03
 
 # --- ゲームのアップデート日（学習ウィンドウの決定に使う）---
-PASSIVE_PATCH_DATE  = '2026/07/27'   # パッシブ2枠化・新スキル17種
 SCORING_PATCH_DATE  = '2026/07/28'   # スコアがタイム基準に変更
 BALANCE_PATCH_DATE  = '2026/03/15'   # 得意系パッシブの倍率下方修正
 DEFAULT_TRAIN_FROM  = SCORING_PATCH_DATE
+# races.jsonl（API 採取）から学習するときの開始日＝装備の時代（2026/08/20〜）。
+# 本番のレースは全部装備ありなので、装備前のレースを混ぜない。
+# 前向き検証（9/2〜10/1 の全160レースを5日ずつ、それより前のデータだけで学習して予測）で
+# 7/28〜 と比べて: 3連単の対数損失 −0.207（−9.1σ）、単勝の対数損失 −0.065（−5.9σ）、
+# 上位3頭（順不同）+7.0pt（+2.6σ）、本命の1着率は差なし。
+JSONL_TRAIN_FROM = '2026/08/20'
 MIN_RACES_FOR_ERA   = 12             # これ未満なら旧式データも併用（時間減衰つき）
 
 DUP_MARK = ' #'                 # 同名馬の内部マーカー
@@ -313,7 +326,6 @@ SPEC_FILE = 'passive_spec.json'      # 学習した数値を貯めるファイ�
 
 DIST_LIST  = ['短距離', 'マイル', '中距離', '長距離']
 TRACK_LIST = ['芝', 'ダート']
-COND_LIST  = ['好調', '普通', '不調']
 
 # ---------------------------------------------------------------------
 # ゲーム内部の着順スコア式（閲覧サイトの result API から逆解析）
@@ -1080,6 +1092,64 @@ def is_excluded_race(schedule_id=None, date=None, time=None):
     return bool(k and k in EXCLUDED_RACES)
 
 
+def races_jsonl_frame(path, spec=None):
+    """races.jsonl（API から毎レース5分後に採取）→ 学習用の1行1頭の DataFrame。
+
+    Discord ログより正確なので、オートパイロットのモデルはこちらから学習する（2026/10/01〜）。
+    Discord ログは状態（好調/不調）を取り違えていて（API と一致 43%）、9月分は学習を悪化させていた。
+    入力は**本番の autopilot に渡すものと同じ形**にそろえる:
+      ステータス  レース時点の speed/power/stamina（装備の加算込み。*_now は今の値なので使わない）
+      装備        倍率だけ掛ける（item_effect_spec。距離・馬場を渡す。先頭限定は1パス目の duty）
+      パッシブ    コード → 名前（PASSIVE_CODE_MAP。autopilot は M.code_map で同じことをしている）
+    """
+    spec = spec or default_spec()
+    rows = []
+    for line in io.open(path, encoding='utf-8', errors='replace'):
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        hs = [h for h in (r.get('horses') or [])
+              if h.get('rank') and h.get('score') and h.get('speed') is not None]
+        if len(hs) < 2 or not r.get('race_date'):
+            continue
+        dist, track = r.get('distance'), r.get('surface')
+        date = str(r['race_date']).replace('-', '/')
+        key = f"{date} {r.get('race_time', '')} R{r.get('schedule_id')}"
+        same = same_species_flags([h.get('name', '') for h in hs],
+                                  [h.get('adult_key') for h in hs])
+        for h, sm in zip(hs, same):
+            mult, scm = {'speed': 1.0, 'power': 1.0, 'stamina': 1.0}, 1.0
+            for it in (h.get('equipment'), h.get('charm')):
+                if not isinstance(it, dict):
+                    continue
+                desc = f"{it.get('effect_label') or ''}：{it.get('effect_description') or ''}"
+                m = item_effect_spec(desc, it.get('effect_key'), spec,
+                                     {'dist': dist, 'track': track})
+                if not m:
+                    continue
+                for k in mult:
+                    mult[k] *= float(m.get(k, 1.0))
+                if '_lead_duty0' in m:
+                    scm = 1.0 + (LEAD_STAMINA_COST - 1.0) * float(m['_lead_duty0'])
+            ps = tuple(PASSIVE_CODE_MAP[c] for c in (h.get('passive_skill'), h.get('passive_skill_2'))
+                       if c and c != 'none' and c in PASSIVE_CODE_MAP)
+            rows.append({
+                'race_key': key, 'date': date, 'dist': dist, 'track': track,
+                'g_cond': r.get('ground'), 'name': h.get('name', ''), 'owner': None,
+                'speed': float(h['speed']) * mult['speed'],
+                'power': float(h['power']) * mult['power'],
+                'stamina': float(h['stamina']) * mult['stamina'],
+                'condition': h.get('condition') or '普通',
+                'passives': ps, 'passive': ps[0] if ps else '',
+                'rank': int(h['rank']), 'score': float(h['score']),
+                'win_odds': h.get('odds'), 'n_field': int(r.get('n_field') or len(hs)),
+                '_d': pd.to_datetime(date, format='%Y/%m/%d'),
+                'stamina_cost_mult': scm, 'same_species': bool(sm),
+            })
+    return pd.DataFrame(rows)
+
+
 def parse_race_log(log_path=None, texts=None, spec=None):
     """ログ（ファイル/フォルダ/グロブ、または文字列のリスト）→ 1行1頭の DataFrame。"""
     all_rows, all_entries = [], {}
@@ -1243,7 +1313,10 @@ def _row_features(speed, power, stamina, condition, passives, dist, track, spec,
     # ×5 は列の桁を『不足/10』時代と揃えるため。リッジは尺度に依存するので、
     # ここを変えると同じ alpha でも正則化の強さが変わってしまう。
     f += [_sur / 10.0, 5.0 * _short / max(_need, 1.0)]
-    f += [1.0 if condition == '好調' else 0.0, 1.0 if condition == '不調' else 0.0]
+    # 状態（好調/不調）は学習に使わない（USE_CONDITION 参照）。列は残して 0 にする＝係数が 0 になり、
+    # JS 側の特徴量の並びも model.json の形も変わらない。
+    f += [1.0 if USE_CONDITION and condition == '好調' else 0.0,
+          1.0 if USE_CONDITION and condition == '不調' else 0.0]
     pset = set(passives or ())
     for p in unspecced_passives(spec):
         has = 1.0 if p in pset else 0.0
@@ -1407,13 +1480,18 @@ def train_model(log_path=None, sigma_override=None, train_from=DEFAULT_TRAIN_FRO
     msgs, warns = [], []
     if spec is None:
         spec = load_passive_spec(spec_path)
-    files = _iter_log_files(log_path)
-    if not files and not texts:
-        return {'ok': False, 'model': None, 'warnings': [],
-                'messages': [f'ログが見つかりません: {log_path}']}
-
-    # 装備の倍率をログから拾うのに spec が要る（効果名 → 実測 duty）
-    df_all = parse_race_log(log_path, texts=texts, spec=spec)
+    # races.jsonl（API 採取）を渡されたらそちらから学習する（races_jsonl_frame 参照）
+    if log_path and str(log_path).lower().endswith('.jsonl') and os.path.isfile(str(log_path)):
+        files = [str(log_path)]
+        df_all = races_jsonl_frame(log_path, spec)
+        msgs.append(f'ℹ 学習データ: {os.path.basename(str(log_path))}（API 採取）')
+    else:
+        files = _iter_log_files(log_path)
+        if not files and not texts:
+            return {'ok': False, 'model': None, 'warnings': [],
+                    'messages': [f'ログが見つかりません: {log_path}']}
+        # 装備の倍率をログから拾うのに spec が要る（効果名 → 実測 duty）
+        df_all = parse_race_log(log_path, texts=texts, spec=spec)
     if len(df_all) == 0:
         return {'ok': False, 'model': None, 'warnings': [],
                 'messages': ['ログを解析できませんでした（中身を確認してください）。'
@@ -1827,6 +1905,7 @@ def export_model_json(bundle, path=None):
         'win_skip_ratio': WIN_SKIP_RATIO,
         'swap23_on': bool(SWAP23_ON), 'swap23_min_p': SWAP23_MIN_P,
         'swap23_cap': SWAP23_CAP, 'swap23_mkt_agree': SWAP23_MKT_AGREE,
+        'use_condition': bool(USE_CONDITION),
         'safe_p_min': SAFE_P_MIN,
         'win_max_total_units': WIN_MAX_TOTAL_UNITS, 'win_max_units': WIN_MAX_UNITS,
         # 下限オッズ判定（JS 側に 1.5 や 0.02 を直書きさせないため一式を渡す）
@@ -3511,7 +3590,9 @@ def analyze(raw_text, bundle, settings=None):
         res['win_summary'] = summ
         res['win_pool_mode'] = ('初期金 %s rrc と仮定（希薄化込み・控えめ）' % f'{WIN_POOL_SEED:,}'
                                 if res.get('win_pool_assumed') else '実測プール（希薄化込み）')
-    elif s.get('win_bets') and mkt_p is not None and res['win_left_units'] > 0:
+    # ⚠ others_ok=False（自分の掛け金が大半）のときは「推奨は出しません」と言った直後なので、
+    #   プール未測定用の旧ロジックに落として推奨を出してはいけない。
+    elif s.get('win_bets') and mkt_p is not None and res['win_left_units'] > 0 and others_ok:
         res['win_pool_mode'] = 'プール未測定（希薄化を織り込めていません）'
         res['win_picks'] = win_bet_picks(
             disp, win_p_bet, odds_eff, s['bankroll'], s['kelly_fraction'],

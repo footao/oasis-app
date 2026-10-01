@@ -209,8 +209,10 @@ const OasisModel = (() => {
     // （Python: _row_features と同じ式。timeline 2,159頭の実測に基づく）
     f['スタミナ不足'] = 5 * bud[1] / Math.max(bud[0], 1);
     const cond = h.condition || '普通';
-    f['好調'] = cond === '好調' ? 1 : 0;
-    f['不調'] = cond === '不調' ? 1 : 0;
+    // 状態は学習で使わない設定のとき 0（Python: USE_CONDITION）。古い model.json はキーが無いので従来どおり。
+    const useCond = M.use_condition !== false;
+    f['好調'] = useCond && cond === '好調' ? 1 : 0;
+    f['不調'] = useCond && cond === '不調' ? 1 : 0;
     const pset = new Set(h.passives || []);
     for (const p of M.unspecced) {
       const has = pset.has(p) ? 1 : 0;
@@ -669,7 +671,7 @@ const OasisModel = (() => {
     if (bk === null) return null;
     const u = Math.trunc(units == null ? 1 : units);
     // 実測（28本）で採算に乗るのは od1.5以下だけ（〜1.5 回収率110% / 1.5〜2 44% / 2〜3 43%）。
-    if (bo < (minOd == null ? 2.0 : minOd) || bo > (maxOd == null ? 1.5 : maxOd)
+    if (bo < (minOd == null ? 1.0 : minOd) || bo > (maxOd == null ? 1.5 : maxOd)
         || u < 1) return null;
     if (already && already.has && already.has(bk)) return null;
     return [bk, bo, u];

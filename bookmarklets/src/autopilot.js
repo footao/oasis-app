@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.35.0';
+const AP_VER = '1.36.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -36,7 +36,6 @@ const CFG = {
   // 下限の目安は「解析秒数の**最悪値** + 3秒」。これを割ると、試し買いの金だけ入って
   // 本命の買い目が締切に間に合わない回が出る（一番損な負け方）。
   LEAD_SEC: 13,
-  WINDOW_SEC: 900,          // 発走何秒前から準備を始めるか
   // 口数は「EVが最大になる配分」を貪欲法で決める（Python の allocate_units_stable と同じ）。
   // 上限はゲームの上限そのまま（3連単20口・単勝100口）。下限は置かない。
   // 実際に何口入るかは分数ケリー・EDGE_MIN・希薄化が決める。
@@ -85,13 +84,12 @@ const CFG = {
   // 3連単プールがこれ未満なら3連単は見送る。既定は model.json の初期プール金
   // （＝賭け0件の状態）。プールがちょうど初期金なら全組が未成立なので、
   // オッズは1件も取りに行かず「未成立スリーブ」として扱う（下の unformed）。
-  MIN_POOL: null,           // null = model.json の trifecta_pool_seed を使う
   UNFORMED_ON: true,        // 未成立組（誰も賭けていない組）にも置くか
   // 市場の一番人気の組を、EVとは別枠で薄く買う（安定枠）。**既定オフ**。
   // 起動しただけなら従来どおりの動作で、パネルのボタンで明示的に入れたときだけ効く。
   // 「見送りの筆頭＝市場の一番人気」が8レース連続で来ているのを測るための枠で、
   // EV最大化ではない。od が短い組は希薄化で元返しになるので下限を置く。
-  MARKET_FAV: true,
+  MARKET_FAV: false,
   // 市場本命の的中率は **min(0.95, max(0.50, 1.3/od))**。モデルの確率は使わない。
   MARKET_FAV_P: 0.50,
   MARKET_FAV_RATIO: 1.3,
@@ -318,9 +316,8 @@ async function loadModel() {
   // Streamlit と同じ値をそのまま使う。0.02 に切り上げていたので、
   // 小さい確率の組だけオートパイロットが取りこぼしていた。
   if (D.min_prob != null) CFG.MIN_PROB = +D.min_prob;
-  if (CFG.UNFORMED_MAX_UNITS == null) CFG.UNFORMED_MAX_UNITS = +(D.unformed_max_units || 10);
+  if (CFG.UNFORMED_MAX_UNITS == null) CFG.UNFORMED_MAX_UNITS = +(D.unformed_max_units ?? 10);
   if (CFG.TRI_MAX_UNITS == null) CFG.TRI_MAX_UNITS = +(M.max_total_units || 20);
-  if (CFG.MIN_POOL == null) CFG.MIN_POOL = M.trifecta_pool_seed || 200000;
   // 「更新されたか分からない」を潰す。trained_at は build_autopilot.py を回した時刻
   // ＝ このバンドルが焼かれた時刻なので、押すたびにここが変われば新しいものを掴んでいる。
   const bt = String(M.trained_at || '').replace('T', ' ').slice(5, 16);
@@ -389,6 +386,9 @@ async function findRace() {
 // PAR=20 は bm.js の実測（api.oasis.red のスループット上限）。上げても速くならない。
 async function fetchOdds(sid, pets, combo, pool, unit, maxReq) {
   const out = new Map();
+  // 取れなかった組（HTTP エラー・通信エラー）。「誰も賭けていない（オッズ無し）」と区別する。
+  // 混ぜると、取り損ねた人気組が実効100倍超の未成立に見えて買ってしまう。
+  out.failed = new Set();
   const SEED = (M.trifecta_pool_seed == null ? 200000 : M.trifecta_pool_seed);
   const CO = getCO();
   const BASE = Math.max(pool - SEED - CO, 0);
@@ -400,8 +400,17 @@ async function fetchOdds(sid, pets, combo, pool, unit, maxReq) {
     const got = await Promise.all(batch.map(async c => {
       const d = await jget(`${API}/api/trifecta/odds?guild=${AUTH.guild}&schedule_id=${sid}`
         + `&first=${pets[c.i].pet_id}&second=${pets[c.j].pet_id}&third=${pets[c.k].pet_id}`);
-      return { c, od: (d && typeof d.odds === 'number') ? d.odds : null };
+      return { c, d, od: (d && typeof d.odds === 'number') ? d.odds : null };
     }));
+    // 失敗した組は1回だけ取り直す（一時的な 429 / タイムアウト対策）
+    for (const g of got) {
+      if (g.d) continue;
+      const c = g.c;
+      const d2 = await jget(`${API}/api/trifecta/odds?guild=${AUTH.guild}&schedule_id=${sid}`
+        + `&first=${pets[c.i].pet_id}&second=${pets[c.j].pet_id}&third=${pets[c.k].pet_id}`);
+      g.d = d2; g.od = (d2 && typeof d2.odds === 'number') ? d2.odds : null;
+      if (!d2) out.failed.add(`${c.i}-${c.j}-${c.k}`);
+    }
     cut += batch.length;
     got.forEach(g => { if (g.od) out.set(`${g.c.i}-${g.c.j}-${g.c.k}`, g.od); });
     // 表示オッズは小数2桁に丸められているので、プール/オッズをそのまま足すと端数が出る。
@@ -410,18 +419,21 @@ async function fetchOdds(sid, pets, combo, pool, unit, maxReq) {
     for (const od of out.values()) seenAmt += Math.round(pool / od / unit) * unit;
     if (BASE > 0 && BASE - seenAmt < unit) break;
     if (cut >= maxReq) {
-      log(`R${sid}: オッズ ${cut}組で打ち切りました（残 ${Math.max(BASE - seenAmt, 0).toLocaleString()} rrc）`,
-          '#ffb74d');
+      // BASE=0 の裏取り（上位20組だけ見る）では毎回ここに来るので、警告は本当に打ち切ったときだけ
+      if (BASE > 0) {
+        log(`R${sid}: オッズ ${cut}組で打ち切りました（残 ${Math.max(BASE - seenAmt, 0).toLocaleString()} rrc）`,
+            '#ffb74d');
+      }
       break;
     }
   }
   // 全組を舐め切ったのに残額がある ＝ その残りは賭け金ではない ＝ キャリーオーバー。
   // 覚えておけば次からは打ち切りが効く。下見の回は時間があるのでここまで来られる。
-  // ⚠ オッズが1件も返らなかったスイープは「誰も賭けていない」証拠にならない
+  // ⚠ オッズが1件も返らなかった・取り損ねた組があるスイープは「誰も賭けていない」証拠にならない
   //   （エンドポイントが落ちていても同じ見え方になる）。ここで CO を書くと、
   //   次のレース以降 BASE が 0 に落ちて**オッズ取得そのものが止まり**、
   //   全組が未成立＝実効100倍超に見える。2026/09/28 21時から実際にそうなった。
-  if (!queue.length && out.size) {
+  if (!queue.length && out.size && !out.failed.size) {
     const found = Math.max(Math.round((pool - SEED - seenAmt) / unit) * unit, 0);
     if (found !== CO) {
       setCO(found);
@@ -485,13 +497,21 @@ async function analyseRace(sid, info, canBuy) {
   if (!triOk) log(`R${sid}: ${n}頭 → 3連単なし（8頭未満）。単勝だけ出します`, '#888');
   // 単勝プールの実測はここで。試し買いでオッズが動くので、
   // **実測後の pets** をそのまま単勝の計算に使う（プールと同じ時点に揃える）。
-  let wpets = pets, wpool = null;
+  let wpets = pets, wpool = null, probe = null;
   if (winOn && CFG.WIN_PROBE && CFG.WIN_PROBE_MAX_UNITS > 0) {
-    const pr = canBuy ? await probeWinPool(sid, pets, winP) : null;
-    if (pr) { wpets = pr.pets; wpool = pr.pool; }
+    // 下限（win_min_prob）を超える馬がいなければ単勝は買わないので、試し買いも無駄（純粋な賭けになる）
+    const anyWin = winP.some(p => p >= mNum('win_min_prob', 0.50));
+    const pr = (canBuy && anyWin) ? await probeWinPool(sid, pets, winP) : null;
+    if (pr) {
+      // API が返す並びが変わっても、3連単・単勝の添字が元の pets とずれないよう pet_id で揃える
+      const byId = new Map((pr.pets || []).map(h => [h.pet_id, h]));
+      wpets = pets.map(h => byId.get(h.pet_id) || h);
+      wpool = pr.pool; probe = pr.probe || null;
+    }
   }
   const winPicks = winOn
-    ? analyseWin(sid, wpets, winP, wpool, raceLeft - (triPicks.cost || 0))
+    ? analyseWin(sid, wpets, winP, wpool,
+                 raceLeft - (triPicks.cost || 0) - (probe ? probe.u * probe.unit : 0))
     : { picks: [], cost: 0 };
   const cost = (triPicks.cost || 0) + (winPicks.cost || 0);
   // 単勝の候補（予測上位5頭）。乖離・下限で見送った理由はオッズと p から後で再現できる。
@@ -499,7 +519,7 @@ async function analyseRace(sid, info, canBuy) {
     .sort((a, b) => b.p - a.p).slice(0, 5);
   const ctx = { sid, dist: dist, track: track, nField: n,
                 poolTri: triPicks.pool || null, poolWin: wpool || null, bank: bankroll(),
-                rej: triPicks.rej || [], cand: triPicks.cand || [], wc: wc };
+                rej: triPicks.rej || [], cand: triPicks.cand || [], wc: wc, probe: probe };
   if (!cost) {
     // 買わなかったレースも、本番の窓の中ならまとめを1行出す（何を見て見送ったかを残す）
     if (canBuy) LAST_NOBET = ctx;
@@ -509,7 +529,7 @@ async function analyseRace(sid, info, canBuy) {
   // 計算のどこかを間違えたときに黙って上限を超えないようにしておく。
   if (cost > raceLeft) { log(`R${sid}: 予算 ${raceLeft.toLocaleString()} rrc を超えるため見送り`, '#ffb74d'); return null; }
   return { sid, pets: wpets, picks: triPicks.picks, win: winPicks.picks, cost,
-           rej: triPicks.rej || [], cand: ctx.cand, wc: wc,
+           rej: triPicks.rej || [], cand: ctx.cand, wc: wc, probe: probe,
            // まとめ（機械可読）に載せる文脈。後から実結果と突き合わせるときに要る。
            dist: dist, track: track, nField: n,
            poolTri: triPicks.pool || null, poolWin: wpool || null, bank: bankroll(),
@@ -527,7 +547,11 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
   const n = pets.length;
   if (n < (M.min_field_trifecta || 8)) { log(`R${sid}: ${n}頭 → 3連単なし`, '#888'); return none; }
   if (unitsLeft < 1) { log(`R${sid}: 予算が残っておらず3連単は見送り`, '#ffb74d'); return none; }
-  const pool0 = ((await jget(`${API}/api/trifecta/pool?guild=${AUTH.guild}&schedule_id=${sid}`)) || {}).pool || 0;
+  const poolJ = await jget(`${API}/api/trifecta/pool?guild=${AUTH.guild}&schedule_id=${sid}`);
+  // 取得失敗を 0 と同じに扱うと BASE=0 → 下の裏取りで正しい CO を消してしまい、
+  // 以降のスイープが締切に間に合わなくなる。プールが分からないなら3連単は見送る。
+  if (!poolJ) { log(`R${sid}: 3連単プールを取得できません → 3連単は見送り`, '#ffb74d'); return none; }
+  const pool0 = poolJ.pool || 0;
   const SEED = (M.trifecta_pool_seed == null ? 200000 : M.trifecta_pool_seed);
   const CO = getCO();
   const BASE = Math.max(pool0 - SEED - CO, 0);
@@ -625,6 +649,7 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
       seenPair.add(k); seenPair.add(sk);
       const partner = comboByKey.get(sk);
       if (!partner) continue;
+      if (oddsRaw.failed && (oddsRaw.failed.has(k) || oddsRaw.failed.has(sk))) continue;  // 市場シェアが分からない
       const odA = odds.get(k), odB = odds.get(sk);
       const pA = pOf.get(k);
       const pB = pOf.has(sk) ? pOf.get(sk)
@@ -714,7 +739,7 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
       const kKelly = Math.floor((D.kelly_fraction || 0.25) * ((fp * od - 1) / (od - 1))
                                 * bankroll() / U_);
       // 見積もりでEVが立たないなら買わない（「最低1口」の下駄で損を確定させない）
-      const k = fp * od <= 1 ? 0 : Math.max(1, Math.min(kEv || 1, Math.max(kKelly, 1), room));
+      const k = fp * od <= 1 ? 0 : (kEv > 0 ? Math.max(1, Math.min(kEv, Math.max(kKelly, 1), room)) : 0);
       const eff = (P + (used + k) * U_) / (P / od + k * U_);
       if (k > 0) {
       picks.push({ c: c, k: k, eff: eff, edge: fp * eff - 1, p: fp, od: od, favMkt: true,
@@ -727,7 +752,11 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
   }
 
   // --- ② 未成立組（誰も賭けていない組）に余りを回す ---
-  if (CFG.UNFORMED_ON && budgetU - used >= 1) {
+  const oddsFailed = (oddsRaw.failed && oddsRaw.failed.size) || 0;
+  if (oddsFailed && CFG.UNFORMED_ON) {
+    log(`R${sid}: オッズを ${oddsFailed}組 取り損ねたので未成立枠は見送り（人気組を未成立と誤認しないため）`, '#ffb74d');
+  }
+  if (CFG.UNFORMED_ON && !oddsFailed && budgetU - used >= 1) {
     const disp = pets.map((h, i) => nameOf(i));
     const odByName = new Map();
     for (const c of combo) {
@@ -783,6 +812,14 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
 // オッズは小数2桁なので丸め誤差は od に反比例する。比 R は**重み od² の加重平均**で取る
 // （分散最小）。1口ずつ買って目標精度に届いた時点で止める。
 // bm.js の同じ処理と式を揃えてある（Python: oasis_core.estimate_win_pool）。
+// 試し買いも実際の単勝購入なので、まとめに1行として残す（精算から漏らさない）。
+// 1口なので希薄化は無視でき、払戻は確定オッズ×口数で精算できる（eff = 買う前のオッズ）。
+function probeRow(tgt, ti, spent, WU, winP, before) {
+  const od = before.get(tgt.pet_id);
+  return { src: 'probe', names: [tgt.display_name || tgt.name], u: Math.round(spent / WU), unit: WU,
+           uq: 0, p: winP[ti], pm: null, praw: null, od: od, eff: od };
+}
+
 async function probeWinPool(sid, pets, winP) {
   if (!isArmed() || !inBuyWindow()) {  // 試し買いは**実際の購入**。
     // 許可（アーム）が無いレース、締切60秒前より手前では走らせない。
@@ -863,14 +900,14 @@ async function probeWinPool(sid, pets, winP) {
   }
   if (!wp) {
     if (spent) log(`R${sid}: 試し買い ${spent.toLocaleString()} rrc したが実測できず → 初期金で計算`, '#ffb74d');
-    return spent ? { pets: cur, pool: null } : null;
+    return spent ? { pets: cur, pool: null, probe: probeRow(tgt, ti, spent, WU, winP, before) } : null;
   }
   log(`R${sid}: ${wp.exact ? '✅ 単勝プールを確定' : '🔬 単勝プールを実測'} `
       + `${wp.pool.toLocaleString()} rrc`
       + `（試し買い ${wp.delta.toLocaleString()} rrc / ${wp.n}頭`
       + (wp.exact ? '' : ` / 精度 ±${(wp.err * 200).toFixed(0)}%`) + `）`, '#81c784');
   ST.probedPool = ST.probedPool || {}; ST.probedPool[sid] = wp.pool; saveState(ST);
-  return { pets: cur, pool: wp.pool };
+  return { pets: cur, pool: wp.pool, probe: probeRow(tgt, ti, spent, WU, winP, before) };
 }
 
 // ---- 単勝（Python: analyze の単勝ブロックと同じ手順）----
@@ -1013,6 +1050,13 @@ async function doBuy() {
       const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                    body: JSON.stringify(body) });
       let d = {}; try { d = await r.json(); } catch (e) {}
+      if (!r.ok && r.status >= 500) {
+        // 502/504 などは処理済みのことがある → 再送も分割もしない（二重購入を避ける）
+        ST.spent += amount;
+        log(`R${pl.sid} ⚠ ${label} HTTP ${r.status}（送信済みか不明・予算からは引きました）`, '#ffb74d');
+        await sleep(400);
+        return 'unknown';
+      }
       if (r.ok && d.status !== 'error') {
         ST.spent += amount; bought++;
         log(`R${pl.sid} ✅ ${label}`, '#81c784');
@@ -1102,7 +1146,8 @@ async function doBuy() {
   //   スコープに無い D を参照して ReferenceError）。だから丸ごと try で囲い、
   //   失敗しても購入フローは必ず最後まで進める。買い目ゼロでも1行は必ず出す。
   emitSummary(pl, done, bought);
-  ST.done[pl.sid] = { t: Date.now(), n: bought };
+  // 送信不明も「買ったかもしれない」に数える。0 にすると、[今すぐ解析] や再注入で同じレースをもう一度買う。
+  ST.done[pl.sid] = { t: Date.now(), n: bought + done.reduce((a, d) => a + (d.uq ? 1 : 0), 0) };
   disarm(`R${pl.sid} の購入が終わったのでアームを解除しました`);
   saveState(ST);
   PENDING = null; $('_pick').style.display = 'none'; buying = false; render();
@@ -1110,6 +1155,7 @@ async function doBuy() {
 
 // ---- 購入まとめ（買わなかったレースでも出す）----
 function emitSummary(pl, done, bought) {
+  if (pl.probe) done = done.concat([pl.probe]);
   try {
     const stake = done.reduce((a, d) => a + d.u * d.unit, 0);
     const t = new Date();
@@ -1128,7 +1174,7 @@ function emitSummary(pl, done, bought) {
              pmin: M.defaults ? M.defaults.min_prob : null,
              safep: SAFE ? safeP() : null, edge: CFG.EDGE_MIN,
              kelly: mNum('kelly_fraction', 0.25) },
-      bets: done.map(d => ({ t: d.src === 'win' ? 'win' : 'tri', src: d.src, n: d.names,
+      bets: done.map(d => ({ t: (d.src === 'win' || d.src === 'probe') ? 'win' : 'tri', src: d.src, n: d.names,
                              u: d.u, unit: d.unit, unsure: d.uq || 0,
                              p: r3(d.p), pm: r3(d.pm), pr: r3(d.praw),
                              od: r3(d.od), eff: r3(d.eff) })),
@@ -1180,8 +1226,6 @@ async function tick(force) {
   if (PENDING) { render(); return; }
   if (!AUTH) { render(); return; }
   const left = (nextRaceTime() - Date.now()) / 1000;
-  // 旧: (left > WINDOW_SEC || left > LEAD_SEC) は LEAD_SEC < WINDOW_SEC なので
-  // 常に `left > LEAD_SEC` に潰れ、WINDOW_SEC が死んでいた。
   // 「締切まで LEAD_SEC 以内」かつ「まだ締切前」の窓でだけ動かす。
   if (!force && (left > CFG.LEAD_SEC || left <= 0)) { render(); return; }
   busy = true;

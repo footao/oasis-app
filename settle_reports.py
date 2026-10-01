@@ -14,6 +14,9 @@
          BOTの払戻通知4件と突き合わせた実測のズレ（2026/09/20）:
              R2399 1.10x / R2408 1.03x / R2410 1.04x / R2420 1.09x → 合計 1.05x
          つまり3連単の回収率は、ここに出る値の約1.05倍が実際の値。
+  未成立枠 eff は「誰も賭けていない」前提の見積りで、実際とは桁違いになりうる
+         （R2529: 見積り136倍 → 実際2.3倍）。的中しても払戻は合計に入れず「未検証」として数だけ出す。
+  試し買い 単勝プールの実測に使った1口（src=probe）。単勝と同じく確定オッズで精算。
 """
 import argparse, io, json, os, re, sys, collections
 
@@ -28,31 +31,42 @@ DEF_RACES = os.path.join(HERE, 'races.jsonl')
 
 
 def load_reports(path):
-    """reports.txt → まとめJSONのリスト。壊れた行・買い目ゼロの回は落とす。"""
+    """reports.txt → まとめJSONのリスト（1レース1件）。
+
+    - 1ブロックに JSON が複数行あれば全部読む（見送りのまとめ＋手動で買ったまとめ、など）
+    - 全く同じ JSON が二重に書かれていたら1回だけ数える
+    - 同じレースの**別々の**まとめは買い目をつなぐ（どちらも本当に買っている）
+    - 組み立てに失敗したまとめ（err）は金が動いているのに買い目が無いので、警告に回す
+    """
     if not os.path.exists(path):
         sys.exit(f'見つかりません: {path}')
     txt = io.open(path, encoding='utf-8', errors='replace').read()
-    out, skipped = [], 0
+    seen, by_sid, errs, unreadable = set(), {}, [], 0
     for b in re.split(r'^===== ', txt, flags=re.M)[1:]:
         head = b.split('\n', 1)[0]
-        m = re.search(r'^\{.*\}$', b, flags=re.M)
-        if not m:
-            skipped += 1
+        lines = re.findall(r'^\{.*\}$', b, flags=re.M)
+        if not lines:
+            unreadable += 1
             continue
-        try:
-            rec = json.loads(m.group(0))
-        except ValueError:
-            skipped += 1
-            continue
-        rec['_when'] = head.split(' race=')[0].strip()
-        out.append(rec)
-    # 同じレースが二重に記録されていたら、買い目の多い方を残す
-    best = {}
-    for r in out:
-        k = r.get('sid')
-        if k not in best or len(r.get('bets') or []) > len(best[k].get('bets') or []):
-            best[k] = r
-    return sorted(best.values(), key=lambda r: r.get('sid') or 0), skipped
+        for ln in lines:
+            if ln in seen:
+                continue
+            seen.add(ln)
+            try:
+                rec = json.loads(ln)
+            except ValueError:
+                unreadable += 1
+                continue
+            if 'err' in rec:
+                errs.append(rec.get('sid'))
+                continue
+            rec['_when'] = head.split(' race=')[0].strip()
+            k = rec.get('sid')
+            if k in by_sid:
+                by_sid[k]['bets'] = (by_sid[k].get('bets') or []) + (rec.get('bets') or [])
+            else:
+                by_sid[k] = rec
+    return sorted(by_sid.values(), key=lambda r: r.get('sid') or 0), unreadable, errs
 
 
 def load_results(path):
@@ -66,7 +80,7 @@ def load_results(path):
         except ValueError:
             continue
         hs = [h for h in (r.get('horses') or []) if h.get('rank')]
-        if len(hs) < 3:
+        if not hs:          # 2頭立てなどでも単勝は精算できるので、1頭でも着順があれば使う
             continue
         hs.sort(key=lambda h: h['rank'])
         res[r.get('schedule_id')] = {
@@ -91,12 +105,15 @@ def settle(rec, q):
             hit = (name == top3[0])
             got = amt * float(od) if (hit and od) else 0.0
         else:
-            hit = (list(b['n']) == top3)
-            got = amt * float(b.get('eff') or 0) if hit else 0.0
+            hit = len(top3) == 3 and list(b['n']) == top3
+            # 未成立枠の eff は「誰も賭けていない」前提の見積りで当てにならない → 払戻は未検証
+            unverified = hit and b.get('src') == 'sleeve'
+            got = amt * float(b.get('eff') or 0) if (hit and not unverified) else 0.0
         ret += got
         lines.append(dict(t=b['t'], src=b.get('src'), n=b['n'], amt=amt,
                           p=b.get('p'), pr=b.get('pr'), od=b.get('od'), eff=b.get('eff'),
-                          hit=bool(hit), ret=round(got)))
+                          hit=bool(hit), ret=round(got),
+                          unverified=bool(b['t'] != 'win' and hit and b.get('src') == 'sleeve')))
     return stake, ret, lines
 
 
@@ -109,10 +126,10 @@ def main():
     ap.add_argument('--detail', action='store_true', help='買い目ごとの明細も出す')
     a = ap.parse_args()
 
-    recs, skipped = load_reports(a.reports)
+    recs, skipped, errs = load_reports(a.reports)
     res = load_results(a.races)
 
-    rows, missing = [], []
+    rows, missing, nobet = [], [], 0
     for r in recs:
         q = res.get(r.get('sid'))
         if not q:
@@ -120,19 +137,26 @@ def main():
             continue
         if a.since and (q['date'] or '') < a.since:
             continue
+        if not r.get('bets'):
+            nobet += 1          # 見送ったレース（まとめはあるが買い目ゼロ）
+            continue
         st, rt, lines = settle(r, q)
         rows.append(dict(sid=r['sid'], date=q['date'], time=q['time'],
                          bank=r.get('bank'), pool3=r.get('pool3'),
                          cfg=r.get('cfg'), stake=st, ret=rt, lines=lines,
                          order=q['order']))
+    if errs:
+        print(f'⚠ まとめの組み立てに失敗したレースが {len(errs)}件あります: {errs[-6:]}'
+              '（購入は済んでいる可能性があるので、BOT の通知で確認してください）')
     if not rows:
         print('精算できるレースがありません。'
-              f'（まとめ {len(recs)}件 / 着順待ち {len(missing)}件 / 買い目ゼロ {skipped}件）')
+              f'（まとめ {len(recs)}件 / 着順待ち {len(missing)}件 / 見送り {nobet}件 / 読めない {skipped}件）')
         return 0
 
     print(f'■ 精算 {len(rows)}レース'
           + (f'（着順がまだ無い {len(missing)}件は除外: {missing[-6:]}）' if missing else '')
-          + (f'（買い目ゼロ {skipped}件）' if skipped else ''))
+          + (f'（見送り {nobet}件）' if nobet else '')
+          + (f'（JSON が読めない {skipped}件）' if skipped else ''))
     print(f'{"日付":<11}{"時刻":>6}{"sid":>6}{"投入":>10}{"払戻":>12}{"収支":>12}'
           f'{"的中":>6}{"プール比":>9}')
     tot = collections.Counter()
@@ -155,7 +179,7 @@ def main():
         tot['rt'] += x['ret']
         if a.detail:
             for l in x['lines']:
-                mark = '的中' if l['hit'] else '  － '
+                mark = ('的中?' if l.get('unverified') else '的中') if l['hit'] else '  － '
                 print(f'      {mark} {l["t"]:<4}{str(l["src"]):<6} {"→".join(l["n"]):<34}'
                       f'{l["amt"]:>9,}rrc  p={l["p"]}  eff={l["eff"]}  払戻 {l["ret"]:>9,}')
 
@@ -168,26 +192,32 @@ def main():
         print(f'  {prefix}{label:<12} 投入 {st:>10,.0f}  払戻 {rt:>11,.0f}  '
               f'回収率 {rt/st*100:>4.0f}%  的中 {tot[key+"_hit"]}/{tot[key+"_n"]}')
 
+    pct = tot["rt"] / tot["st"] * 100 if tot["st"] else 0.0
     print(f'\n  {"合計":<12} 投入 {tot["st"]:>10,.0f}  払戻 {tot["rt"]:>11,.0f}  '
-          f'収支 {tot["rt"]-tot["st"]:>+12,.0f}  回収率 {tot["rt"]/tot["st"]*100:.0f}%')
+          f'収支 {tot["rt"]-tot["st"]:>+12,.0f}  回収率 {pct:.0f}%')
     line('単勝', 't:win')
+    line('試し買い', 's:probe', '└ ')
     line('3連単', 't:tri')
     line('EV枠', 's:ev', '├ ')
     line('市場本命', 's:mfav', '├ ')
-    line('EV枠（2/3ならし）', 's:ev23', '├ ')
+    line('EV枠（順番補正）', 's:ev23', '├ ')
     line('未成立枠', 's:sleeve', '└ ')
+    unv = [l for x in rows for l in x['lines'] if l.get('unverified')]
+    if unv:
+        print(f'    ⚠ 未成立枠の的中 {len(unv)}本は払戻を合計に入れていません（見積りが当てにならないため）。'
+              '実額は BOT の通知で確認してください')
 
-    # 2・3着のならし（SWAP23）の効果。pr（ならす前の確率）が入っている買い目だけを見る。
+    # 2・3着の順番補正（SWAP23）の効果。pr（補正前の確率）が入っている買い目だけを見る。
     sw = [l for x in rows for l in x['lines'] if l.get('pr') is not None or l['src'] == 'ev23']
     if sw:
         st = sum(l['amt'] for l in sw); rt = sum(l['ret'] for l in sw)
         hit = sum(1 for l in sw if l['hit'])
         added = [l for l in sw if l['src'] == 'ev23']
         ast = sum(l['amt'] for l in added); art = sum(l['ret'] for l in added)
-        print(f'\n  2・3着のならし: 対象 {len(sw)}本  投入 {st:,.0f}  払戻 {rt:,.0f}  '
-              f'回収率 {rt/st*100:.0f}%  的中 {hit}/{len(sw)}')
+        print(f'\n  2・3着の順番補正: 対象 {len(sw)}本  投入 {st:,.0f}  払戻 {rt:,.0f}  '
+              f'回収率 {rt/st*100 if st else 0:.0f}%  的中 {hit}/{len(sw)}')
         if added:
-            print(f'    うち「ならしで足した組」{len(added)}本  投入 {ast:,.0f}  払戻 {art:,.0f}  '
+            print(f'    うち「補正で足した組」{len(added)}本  投入 {ast:,.0f}  払戻 {art:,.0f}  '
                   f'回収率 {art/ast*100 if ast else 0:.0f}%  的中 '
                   f'{sum(1 for l in added if l["hit"])}/{len(added)}')
 

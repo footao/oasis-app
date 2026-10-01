@@ -917,6 +917,28 @@ def regression_tests():
           'if (P + spent < (M.win_pool_seed || 0)) continue;' in _ap,
           'R2531 で 17,000 と出た（NPC の初期金だけで20万ある）。試し買いの前後に他人の賭けが入ると比が歪む')
 
+    # 2026/10/01 全体レビューで見つかった問題（失敗したら必ず金か報告を失う種類のもの）
+    check('P45 取り損ねたオッズを「誰も賭けていない」と混同しない',
+          'out.failed = new Set();' in _ap and 'if (!d2) out.failed.add(' in _ap
+          and 'if (CFG.UNFORMED_ON && !oddsFailed && budgetU - used >= 1) {' in _ap,
+          '429 やタイムアウトで取れなかった人気組が、実効100倍超の未成立に見えて買われる')
+    check('P45 3連単プールが取れないときは CO を消さずに見送る',
+          "if (!poolJ) { log(`R${sid}: 3連単プールを取得できません → 3連単は見送り`, '#ffb74d'); return none; }" in _ap,
+          '0 と同じに扱うと正しいキャリーオーバーを消し、以降のスイープが締切に間に合わない')
+    check('P45 5xx と送信不明は再送しない・再実行で二重に買わない',
+          'if (!r.ok && r.status >= 500) {' in _ap
+          and 'n: bought + done.reduce((a, d) => a + (d.uq ? 1 : 0), 0)' in _ap,
+          'ゲートウェイエラーは処理済みのことがある。done.n=0 だと [今すぐ解析] で同じレースをまた買う')
+    check('P45 試し買い後の馬の並びを pet_id で元に揃える',
+          'wpets = pets.map(h => byId.get(h.pet_id) || h);' in _ap,
+          'API の並びが変わると3連単・単勝の添字が別の馬を指す')
+    check('P45 試し買いをまとめと予算に入れる',
+          "src: 'probe'" in _ap and '(probe ? probe.u * probe.unit : 0)' in _ap
+          and "winP.some(p => p >= mNum('win_min_prob', 0.50))" in _ap,
+          '試し買い（最大5千）が精算から漏れ、レース予算も超えていた。下限を通る馬がいなければ試さない')
+    check('P45 設定値 0 を既定値で上書きしない（未成立枠を 0 で切れる）',
+          '+(D.unformed_max_units ?? 10);' in _ap)
+
     check('P44 賭け方を全部残す（3連単は上位20組、単勝は上位5頭）',
           'const candLog = combo.slice(0, 20).map(' in _ap
           and 'cand: (pl.cand || []).map(' in _ap and 'wc: (pl.wc || []).map(' in _ap,
@@ -951,7 +973,7 @@ def regression_tests():
           'unbet はオッズが下限に張り付いているだけなので、p × od に意味がない')
 
     check('P39 オッズが1件も返らないスイープからキャリーオーバーを確定しない',
-          'if (!queue.length && out.size) {' in _ap,
+          'if (!queue.length && out.size && !out.failed.size) {' in _ap,
           'エンドポイントが落ちていても「誰も賭けていない」と同じ見え方になる。'
           '書いてしまうと次のレース以降オッズ取得そのものが止まる')
     check('P39 「賭け0件」は上位1バッチを実測して裏を取る',
@@ -1108,12 +1130,12 @@ def regression_tests():
           oc.market_fav_pick(_od, already={('b',)}) is None)
     check('P26 同オッズはキー順で決める（Python と JS で同じ組を選ぶ）',
           oc.market_fav_pick({('b',): 1.3, ('a',): 1.3})[0] == ('a',))
-    check('P26 市場本命枠は既定オン（2026/09/15から）／ボタンで切れる',
-          re.search(r'MARKET_FAV:\s*true', _ap) is not None
+    check('P26 市場本命枠は既定オフ（2026/09/29から）／ボタンで入れられる',
+          re.search(r'MARKET_FAV:\s*false', _ap) is not None
           and "v === null ? !!CFG.MARKET_FAV : v === '1'" in _ap
           and "$('_mf').onclick" in _ap,
-          '52レースの精算で 両方オン 149%/勝率69%/DD -261,540 ＞ 両方オフ 123%/44%/-1,214,730。'
-          '片方だけなら安牌の方（市場本命だけオンは1点勝負なのでばらつきが大きい）')
+          '9/12〜9/29 の実払戻で od≤1.5 は11件・回収率90%、od>1.5 は17件・37%。'
+          'オーナー判断で OFF。新しい端末やストレージ消去で勝手に ON に戻らないよう既定もオフ')
     # 2026/09/21: 市場本命枠が cands（モデル確率25%以上）から選んでいたため、
     # モデルと市場が割れたレースで市場の一番人気が見えていなかった（R2436）。
     check('P26 市場本命枠はモデルで絞る前の全組オッズから選ぶ',
@@ -1212,7 +1234,7 @@ def regression_tests():
     # まとめは人が読む形ではなく、後から機械で集計する形（見出し1行＋JSON 1行）。
     check('P31 購入まとめは機械可読（JSON 1行）で出る',
           'JSON.stringify(rec)' in _ap and 'const rec = {' in _ap
-          and "bets: done.map(d => ({ t: d.src === 'win' ? 'win' : 'tri'" in _ap,
+          and "bets: done.map(d => ({ t: (d.src === 'win' || d.src === 'probe') ? 'win' : 'tri'" in _ap,
           'EV は p・eff・口数から後で計算できるので持たせない')
     check('P31 後から突き合わせるのに要る文脈を載せている',
           all(k in _ap for k in ('pool3:', 'poolW:', 'bank:', 'sig:', 'cfg: { safe:',
@@ -1270,7 +1292,7 @@ def regression_tests():
           and 'const BASE = Math.max(pool0 - SEED - CO, 0);' in _ap)
     check('P20 autopilot は下見で全組舐めて CO を確定する',
           'canBuy ? CFG.ODDS_MAX_REQ : combo.length' in _ap
-          and 'if (!queue.length && out.size) {' in _ap and 'setCO(found);' in _ap,
+          and 'if (!queue.length && out.size && !out.failed.size) {' in _ap and 'setCO(found);' in _ap,
           '本番は上限つき、下見は上限なし（オッズが1件も返らなかったスイープでは確定しない＝P39）')
     check('P20 autopilot と bm.js は CO の保存先を共有する',
           "'oasis_co_' + AUTH.guild" in _ap and "COKEY='oasis_co_'+G" in _bm15,
