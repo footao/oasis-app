@@ -917,6 +917,15 @@ def regression_tests():
           'if (P + spent < (M.win_pool_seed || 0)) continue;' in _ap,
           'R2531 で 17,000 と出た（NPC の初期金だけで20万ある）。試し買いの前後に他人の賭けが入ると比が歪む')
 
+    check('P44 賭け方を全部残す（3連単は上位20組、単勝は上位5頭）',
+          'const candLog = combo.slice(0, 20).map(' in _ap
+          and 'cand: (pl.cand || []).map(' in _ap and 'wc: (pl.wc || []).map(' in _ap,
+          '本番の候補で後から正確に再生するため。オッズはレース確定後に API から消える')
+    check('P44 買わなかったレースもまとめを1行出す',
+          'function emitSummary(pl, done, bought)' in _ap
+          and 'emitSummary(LAST_NOBET, [], 0);' in _ap and 'if (canBuy) LAST_NOBET = ctx;' in _ap,
+          'R2531 はまとめが空でパネルのログしか残らず、何を見て見送ったか追えなかった')
+
     check('P41 未成立枠は1レース1口まで',
           oc.DEFAULT_SETTINGS['unformed_max_units'] == 1
           and len(oc.unformed_sleeve_picks({(0, 1, 2): 0.5, (0, 2, 1): 0.4, (1, 0, 2): 0.3},
@@ -951,11 +960,12 @@ def regression_tests():
           'CO は guild ごとに残り続けるので、古い値があると永久に未成立扱いになる。'
           '未成立＝実効100倍超なので、間違う向きが最悪（最も強気に倒れる）')
 
-    check('P37 2着と3着の順序をならす（確率を平均に揃える）',
-          oc.SWAP23_ON is True
+    check('P37 2着と3着の順番は市場が同意しないときだけ抑える',
+          oc.SWAP23_ON is True and oc.SWAP23_CAP == 0.60 and oc.SWAP23_MKT_AGREE == 0.55
           and "const swKey = c => `${c.i}-${c.k}-${c.j}`;" in _ap
-          and 'pOf.set(k, m); pOf.set(sk, m);' in _ap
-          and "mNum('swap23_on'" in _ap,
+          and 'if (mPref >= agree || sPref <= cap) continue;' in _ap
+          and 'pOf.set(k, m); pOf.set(sk, m);' not in _ap
+          and "mNum('swap23_on'" in _ap and "mNum('swap23_cap'" in _ap,
           '9月141レースで 2→3着のスコア差は中央 1.56% ＝ σ(1.27%)と同程度。'
           '実ベット44レースの外し17件のうち12件が「3頭は当てて順序違い」だった')
     check('P37 相方が候補に無ければ足す（確率の下限つき）',

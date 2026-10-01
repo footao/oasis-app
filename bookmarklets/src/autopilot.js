@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.34.0';
+const AP_VER = '1.35.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -494,12 +494,22 @@ async function analyseRace(sid, info, canBuy) {
     ? analyseWin(sid, wpets, winP, wpool, raceLeft - (triPicks.cost || 0))
     : { picks: [], cost: 0 };
   const cost = (triPicks.cost || 0) + (winPicks.cost || 0);
-  if (!cost) return null;
+  // 単勝の候補（予測上位5頭）。乖離・下限で見送った理由はオッズと p から後で再現できる。
+  const wc = wpets.map((h, i) => ({ n: h.display_name || h.name, p: winP[i], od: +h.odds || null }))
+    .sort((a, b) => b.p - a.p).slice(0, 5);
+  const ctx = { sid, dist: dist, track: track, nField: n,
+                poolTri: triPicks.pool || null, poolWin: wpool || null, bank: bankroll(),
+                rej: triPicks.rej || [], cand: triPicks.cand || [], wc: wc };
+  if (!cost) {
+    // 買わなかったレースも、本番の窓の中ならまとめを1行出す（何を見て見送ったかを残す）
+    if (canBuy) LAST_NOBET = ctx;
+    return null;
+  }
   // 念のための最後の関門。上の口数上限で既に収まっているはずだが、
   // 計算のどこかを間違えたときに黙って上限を超えないようにしておく。
   if (cost > raceLeft) { log(`R${sid}: 予算 ${raceLeft.toLocaleString()} rrc を超えるため見送り`, '#ffb74d'); return null; }
   return { sid, pets: wpets, picks: triPicks.picks, win: winPicks.picks, cost,
-           rej: triPicks.rej || [],
+           rej: triPicks.rej || [], cand: ctx.cand, wc: wc,
            // まとめ（機械可読）に載せる文脈。後から実結果と突き合わせるときに要る。
            dist: dist, track: track, nField: n,
            poolTri: triPicks.pool || null, poolWin: wpool || null, bank: bankroll(),
@@ -593,47 +603,61 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
     cands.push({ key: k, p: pBet, od: od, eff1: eff1, edge1: edge1,
                  names: [c.i, c.j, c.k].map(nameOf) });
   }
-  // --- 2着と3着の順序をならす ---
-  // 実測（9月141レース）: 2→3着のスコア差の中央値 1.56% ＝ σ(1.27%) と同程度。
-  // 順序はほぼコイン投げなのに、モデルは片方に確率を寄せる（R2492 で 0.95 対 0.755、
-  // 実際のスコア差は1.5%）。1着が同じで2・3着が入れ替わった組の確率を平均に揃える。
+  // --- 2着と3着の順序：市場が同意しないときだけモデルの自信を抑える ---
+  // 実測（8頭以上249レース。実際に1〜3着に入った3頭で、2・3着の順番を照合）:
+  //   モデルの好み比 5倍以上: モデルは 92% と言うが実際は 80%（−3.7σ）
+  //   好みに市場が同意しているときは、モデルの読みは当たる（87〜89%）。
+  //   同意していないときは、モデルの自信に関係なく五分〜65%しか当たらない。
+  // そこで「好み側の市場シェア < swap23_mkt_agree」のときだけ、好みを swap23_cap まで抑える。
+  // 市場シェアは入れ替えた2組の**3連単オッズ**から出す（単勝オッズは1着以外の参考にならない）。
+  // 接戦の組は触らない。旧版は全組を半々に揃えていて、人気側の p を下げて EV をマイナスにし、
+  // 不人気側だけを買う「裏返し」になっていた（R2544: 着順どおりの組を捨てて外れ）。
+  const mk = new Map();                        // key → その組の市場シェア（まとめに残す）
   if (mNum('swap23_on', 1)) {
     const swKey = c => `${c.i}-${c.k}-${c.j}`;
-    const pRaw = new Map();                    // 平均する前の値（まとめに残す）
-    const add = [];
+    const comboByKey = new Map(combo.map(c => [key3(c), c]));
+    const cap = mNum('swap23_cap', 0.60), agree = mNum('swap23_mkt_agree', 0.55);
+    const pRaw = new Map(), add = [], seenPair = new Set();
     for (const c of combo) {
       const k = key3(c);
-      if (!byKey.has(k)) continue;
+      if (!byKey.has(k) || seenPair.has(k)) continue;
       const sk = swKey(c);
-      if (byKey.has(sk)) {
-        // 両方が候補にいる → 確率を平均に揃える（1回だけ）
-        if (!pRaw.has(k)) {
-          const a = pOf.get(k), b = pOf.get(sk), m = (a + b) / 2;
-          pRaw.set(k, a); pRaw.set(sk, b);
-          pOf.set(k, m); pOf.set(sk, m);
+      seenPair.add(k); seenPair.add(sk);
+      const partner = comboByKey.get(sk);
+      if (!partner) continue;
+      const odA = odds.get(k), odB = odds.get(sk);
+      const pA = pOf.get(k);
+      const pB = pOf.has(sk) ? pOf.get(sk)
+        : lam * partner.p + (1 - lam) * (odB ? (1 / (oddsRaw.get(sk) || odB)) / norm : 0);
+      const sum = pA + pB;
+      if (!(sum > 0)) continue;
+      // オッズが付いていない組は誰も買っていない＝市場シェア0
+      const qA = odA ? 1 / odA : 0, qB = odB ? 1 / odB : 0;
+      const mA = (qA + qB) > 0 ? qA / (qA + qB) : 0.5;
+      mk.set(k, mA); mk.set(sk, 1 - mA);
+      const prefA = pA >= pB, sPref = Math.max(pA, pB) / sum;
+      const mPref = prefA ? mA : 1 - mA;
+      if (mPref >= agree || sPref <= cap) continue;   // 市場が同意 or もともと抑えた範囲内
+      const nA = (prefA ? cap : 1 - cap) * sum, nB = sum - nA;
+      pRaw.set(k, pA); pOf.set(k, nA);
+      if (byKey.has(sk)) { pRaw.set(sk, pB); pOf.set(sk, nB); }
+      else if (odB && odB > 1 && nB >= mNum('swap23_min_p', 0.05)) {
+        // 相方が候補に無い（安牌の足切りなど）→ 補正後の確率で候補に足す。口数は配分が決める
+        const eff1 = (P + U_) / (P / odB + U_);
+        if (eff1 <= CFG.MAX_SANE_ODDS) {
+          pRaw.set(sk, pB); pOf.set(sk, nB); byKey.set(sk, partner);
+          add.push({ key: sk, p: nB, od: odB, eff1: eff1, edge1: nB * eff1 - 1, swap23: true,
+                     names: [partner.i, partner.j, partner.k].map(nameOf) });
         }
-      } else {
-        // 相方が候補に無い → オッズが付いていれば足す（確率は平均で）
-        const od = odds.get(sk);
-        const partner = combo.find(x => key3(x) === sk);
-        if (!od || od <= 1 || !partner) continue;
-        const pb = lam * partner.p + (1 - lam) * ((1 / (oddsRaw.get(sk) || od)) / norm);
-        if (pb < mNum('swap23_min_p', 0.05)) continue;
-        const m = (pOf.get(k) + pb) / 2;
-        const eff1 = (P + U_) / (P / od + U_);
-        if (eff1 > CFG.MAX_SANE_ODDS) continue;
-        pRaw.set(k, pOf.get(k)); pRaw.set(sk, pb);
-        pOf.set(k, m); pOf.set(sk, m);
-        byKey.set(sk, partner);
-        add.push({ key: sk, p: m, od: od, eff1: eff1, edge1: m * eff1 - 1, swap23: true,
-                   names: [partner.i, partner.j, partner.k].map(nameOf) });
       }
     }
-    for (const c of cands) if (pRaw.has(c.key)) { c.pRaw = pRaw.get(c.key); c.p = pOf.get(c.key); }
-    for (const a of add) cands.push(a);
+    for (const c of cands) if (pRaw.has(c.key)) {
+      c.pRaw = pRaw.get(c.key); c.p = pOf.get(c.key); c.edge1 = c.p * c.eff1 - 1; c.swap23 = true;
+    }
+    for (const x of add) { x.pRaw = pRaw.get(x.key); cands.push(x); }
     if (pRaw.size) {
-      log(`R${sid}: 2・3着の順序をならしました（${add.length}組を追加 / `
-          + `${pRaw.size}組の確率を平均に）`, '#888');
+      log(`R${sid}: 市場が同意しない2・3着の順番を ${Math.round(cap * 100)}:${Math.round((1 - cap) * 100)} まで抑えました`
+          + `（${pRaw.size}組・うち${add.length}組を候補に追加）`, '#888');
     }
   }
 
@@ -726,9 +750,17 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
       used += k;
     }
   }
+  // 賭け方を後から正確に再生できるように、モデル確率の上位20組を全部残す
+  // （安牌で足切りした組・オッズの無い組も含む）。オッズはレース確定後に API から消える。
+  const candLog = combo.slice(0, 20).map(c => {
+    const k = key3(c), a = alloc.get(k);
+    return { n: [c.i, c.j, c.k].map(nameOf), p: c.p, pa: pOf.has(k) ? pOf.get(k) : null,
+             od: odds.get(k) || null, mk: mk.has(k) ? mk.get(k) : null,
+             u: (a && a[0]) || 0 };
+  });
   if (!picks.length) {
     log(`R${sid}: エッジ${(CFG.EDGE_MIN * 100) | 0}%以上の点なし → 3連単は見送り`, '#888');
-    return none;
+    return { picks: [], cost: 0, cand: candLog, pool: P };
   }
   picks.sort((a, b) => b.edge - a.edge);
   // 買わなかった候補のうち**的中率が高い順**に3件だけ残す。
@@ -740,7 +772,7 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
                  why: c.edge1 < CFG.EDGE_MIN
                    ? `エッジ${(c.edge1 * 100).toFixed(0)}%<${(CFG.EDGE_MIN * 100) | 0}%`
                    : '予算・口数の上限' }));
-  return { picks: picks, cost: used * U_, rej: rej, pool: P };
+  return { picks: picks, cost: used * U_, rej: rej, pool: P, cand: candLog };
 }
 
 // ---- 単勝プールの実測（試し買い）----
@@ -1069,6 +1101,15 @@ async function doBuy() {
   //   報告だけ消えて buying が true のまま固まる（2026/09/15 に実際に起きた：
   //   スコープに無い D を参照して ReferenceError）。だから丸ごと try で囲い、
   //   失敗しても購入フローは必ず最後まで進める。買い目ゼロでも1行は必ず出す。
+  emitSummary(pl, done, bought);
+  ST.done[pl.sid] = { t: Date.now(), n: bought };
+  disarm(`R${pl.sid} の購入が終わったのでアームを解除しました`);
+  saveState(ST);
+  PENDING = null; $('_pick').style.display = 'none'; buying = false; render();
+}
+
+// ---- 購入まとめ（買わなかったレースでも出す）----
+function emitSummary(pl, done, bought) {
   try {
     const stake = done.reduce((a, d) => a + d.u * d.unit, 0);
     const t = new Date();
@@ -1093,6 +1134,11 @@ async function doBuy() {
                              od: r3(d.od), eff: r3(d.eff) })),
       rej: (pl.rej || []).map(r => ({ n: r.names, p: r3(r.p), od: r3(r.od), eff: r3(r.eff),
                                       edge: r3(r.edge), w: r.why })),
+      // 賭け方の全記録: 3連単はモデル確率の上位20組（p=モデル, pa=補正後, mk=市場シェア, u=買った口数）、
+      // 単勝は予測上位5頭。Discord 側は1900字で切れるが reports.txt には全文が残る。
+      cand: (pl.cand || []).map(c => ({ n: c.n, p: r3(c.p), pa: r3(c.pa), od: r3(c.od),
+                                        mk: r3(c.mk), u: c.u })),
+      wc: (pl.wc || []).map(c => ({ n: c.n, p: r3(c.p), od: r3(c.od) })),
     };
     // 送信不明は見出しにも出す。JSON の unsure だけだと、貼られた人が気づけない。
     const unsureAll = done.reduce((a, d) => a + (d.uq || 0), 0);
@@ -1110,14 +1156,11 @@ async function doBuy() {
     ST.sum = (ST.sum || []).concat([l]).slice(-20);
     try { saveState(ST); } catch (e2) {}
   }
-  ST.done[pl.sid] = { t: Date.now(), n: bought };
-  disarm(`R${pl.sid} の購入が終わったのでアームを解除しました`);
-  saveState(ST);
-  PENDING = null; $('_pick').style.display = 'none'; buying = false; render();
 }
 
 // ---- メインループ ----
 let busy = false, stopped = false, errors = 0;
+let LAST_NOBET = null;   // 窓の中で買わなかったレースの文脈（まとめ用）
 async function tick(force) {
   if (stopped || busy) { render(); return; }
   // 🛒 を押さないまま締切を過ぎた買い目は捨てる。放置すると PENDING が残り続け、
@@ -1165,7 +1208,12 @@ async function tick(force) {
       }
       // 下見で見送っても done にはしない（窓の中で取り直す機会を残す）。
       if (pl) pl.took = took;   // 購入まとめに出す（LEAD_SEC を詰めすぎていないかの実測）
-      if (pl) showPending(pl); else if (canBuy) ST.done[r.sid] = { t: Date.now(), n: 0 };
+      if (pl) showPending(pl);
+      else if (canBuy) {
+        ST.done[r.sid] = { t: Date.now(), n: 0 };
+        if (LAST_NOBET && LAST_NOBET.sid === r.sid) { LAST_NOBET.took = took; emitSummary(LAST_NOBET, [], 0); }
+        LAST_NOBET = null;
+      }
       saveState(ST);
     }
     errors = 0;

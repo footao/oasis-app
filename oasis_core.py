@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.38.0'
+CORE_VERSION = '3.39.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -119,6 +119,14 @@ WIN_SKIP_RATIO = 12.0          # p × od がこれ以上なら見送る
 # 別の買い方を足すのではなく確率を直すので、口数配分は既存の経路がそのまま使える。
 SWAP23_ON = True
 SWAP23_MIN_P = 0.05     # 相方の確率がこれ未満なら、そもそも候補に足さない
+# 2・3着の順番は「市場が同意しないときだけ」モデルの自信を抑える（2026/10/01）。
+# 実測（8頭以上249レース、着順に入った3頭で2・3着の順番を照合）:
+#   好みに市場が同意 → モデルの読みは当たる（87〜89%）。触らない
+#   市場が中立〜反対 → モデルの自信に関係なく五分〜65%（比2〜5倍で−2.6σ、5倍以上で−4.5σ）
+# 旧版は全組を半々に揃えていて、人気側を EV マイナスにして不人気側だけを買っていた（R2544）。
+# 市場シェアは入れ替えた2組の3連単オッズで判定する（単勝オッズは1着以外の参考にならない）。
+SWAP23_CAP = 0.60          # 市場が同意しないとき、好み側をこの割合まで抑える
+SWAP23_MKT_AGREE = 0.55    # 好み側の3連単の市場シェアがこれ以上なら「同意」
 WIN_STAKE_UNIT      = 1_000    # 単勝は 1口 = 1,000 rrc（購入画面の表記）
 WIN_POOL_QUANTUM    = 1_000    # 単勝プール総額は 1,000 rrc 単位で決まる（全ベットが1口=1000rrcの倍数のため）
 MIN_FIELD_TRIFECTA  = 8        # 2026/06/17: 7頭以下は3連単なし
@@ -1818,6 +1826,7 @@ def export_model_json(bundle, path=None):
         'win_skip_p': WIN_SKIP_P, 'win_skip_od': WIN_SKIP_OD,
         'win_skip_ratio': WIN_SKIP_RATIO,
         'swap23_on': bool(SWAP23_ON), 'swap23_min_p': SWAP23_MIN_P,
+        'swap23_cap': SWAP23_CAP, 'swap23_mkt_agree': SWAP23_MKT_AGREE,
         'safe_p_min': SAFE_P_MIN,
         'win_max_total_units': WIN_MAX_TOTAL_UNITS, 'win_max_units': WIN_MAX_UNITS,
         # 下限オッズ判定（JS 側に 1.5 や 0.02 を直書きさせないため一式を渡す）
