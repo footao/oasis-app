@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.43.0'
+CORE_VERSION = '3.46.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -105,7 +105,14 @@ WIN_SKIP_OD = 10.0       # これ以上のオッズなら見送る
 # 12未満をまとめると63件・114.9%。上の WIN_SKIP_P/OD は p が閾値なので
 # p<0.90 の乖離特大（R2459 p0.88/od58、R2494 p0.51/od42、R2530 p0.62/od45.7）を
 # 取りこぼしていた。乖離で切るとその3件も止まる。
-WIN_SKIP_RATIO = 12.0          # p × od がこれ以上なら見送る
+# 2026/10/02 に 12 → 1.5。単勝84件（〜R2568）で、モデルが「勝つ」と言った本数を数えると
+#   乖離 1.5未満 35件: モデル予想 33.4本 / 市場予想 26.9本 / 実際 33本 → モデルが正しい（回収119%）
+#   乖離 1.5以上 49件: モデル予想 24.3本 / 市場予想  6.2本 / 実際  8本 → 市場が正しい
+# 割れたときはモデルの自信に意味が無い。しかも 99口入れると自分の金で実効オッズが
+# 18.9倍→5.1倍（R2568 ういえれ）まで潰れるので、市場どおりの確率では必ず赤字になる。
+# 9/22 以降の乖離1.5以上は 31件・6本・−1,010,485。旧 12 で残っていた黒字は
+# 9/20 の2本（R2408 うぬ・R2410 リウたん）だけで、それ以降の 6〜12 帯は 0/5。
+WIN_SKIP_RATIO = 1.5           # p × od がこれ以上なら見送る
 
 # --- 2着と3着の順序をならす（2026/09/29）---
 # 9月141レースで、着順が隣り合う馬のスコア差の中央値は
@@ -405,6 +412,20 @@ def internal_stat_weights(dist):
     base = w[0] if w[0] else 1.0
     return {'SP': w[0], 'PW': w[1], 'ST': w[2],
             'norm': [round(x / base, 3) for x in w]}
+
+def internal_rating(speed, power, stamina, dist):
+    """内部式のレーティング R = Σ 実効重み × 実効ステ（加法形）。log(R) を特徴量に使う。"""
+    w = internal_stat_weights(dist)
+    return max(w['SP'] * speed + w['PW'] * power + w['ST'] * stamina, 1.0)
+
+
+def _stat_part(coef, d, speed, power, stamina):
+    """予測値のうちステータス由来の部分（切片なし）: b_R·log(R) + Σ b_lin·stat/100。"""
+    return (coef.get(f'{d}:log(R)', 0.0) * math.log(internal_rating(speed, power, stamina, d))
+            + coef.get(f'{d}:lin(SP)', 0.0) * speed / 100.0
+            + coef.get(f'{d}:lin(PW)', 0.0) * power / 100.0
+            + coef.get(f'{d}:lin(ST)', 0.0) * stamina / 100.0)
+
 
 # 適性スキル → (照合する列, 照合する値)
 APTITUDE_MATCH = {
@@ -1260,7 +1281,13 @@ def feature_names(spec):
         # ゲームの実結果APIから、内部速度が Σ(フェーズ重み×距離係数×実効ステ) の
         # 加法形であることを確認済み。log単独だと中〜長距離でスタミナを過小評価するため、
         # 線形項を併用する（新式34レースの検証で held-out スピアマン 0.898→0.926）。
-        names += [f'{d}:切片', f'{d}:log(SP)', f'{d}:log(PW)', f'{d}:log(ST)',
+        # 2026/10/02: log は**ステータスごと**ではなく内部レーティング R の log 1本にした。
+        #   ステータスごとの log(SP) は「34→53」を「120→187」と同じ比で効かせてしまう。
+        #   中距離のパワー型どうし（SP 33〜53）でスピード差を6.8%分と読み、
+        #   R2568 で ういえれ を52%本命にした（実際は5着。内部式 R ではにのと同等以下）。
+        #   前向き検証168レース: 単勝LL 0.756→0.624（−2.3σ）、本命1着 76.2→83.3%、
+        #   3連単LL 2.092→1.665（−4.0σ）、上位3頭 69.3→73.3%。
+        names += [f'{d}:切片', f'{d}:log(R)',
                   f'{d}:lin(SP)', f'{d}:lin(PW)', f'{d}:lin(ST)']
     # スタミナ収支（2列）。「余り＝無駄」と「不足＝減速」を別々の列にすることで、
     # 必要量のところでスタミナの価値が折れる形を表現できる。
@@ -1295,15 +1322,13 @@ def passive_from_code(code):
 
 def _row_features(speed, power, stamina, condition, passives, dist, track, spec, ctx=None):
     e = effective_stats(speed, power, stamina, passives, dist, track, spec, ctx)
-    sp = math.log(max(e['speed'], 1.0))
-    pw = math.log(max(e['power'], 1.0))
-    st = math.log(max(e['stamina'], 1.0))
+    lr = math.log(internal_rating(e['speed'], e['power'], e['stamina'], dist))
     # 線形項は 1/100 スケール（log項と桁を揃え、正則化の効きを均す）
     lsp, lpw, lst = e['speed'] / 100.0, e['power'] / 100.0, e['stamina'] / 100.0
     f = []
     for d in DIST_LIST:
         m = 1.0 if dist == d else 0.0
-        f += [m, m * sp, m * pw, m * st, m * lsp, m * lpw, m * lst]
+        f += [m, m * lr, m * lsp, m * lpw, m * lst]
     _need, _short, _sur = stamina_budget(e, dist, (ctx or {}).get('stamina_cost_mult', 1.0))
     # 不足は**必要量に対する割合**で入れる。同じ「不足5」でも、必要量28の短距離では
     # レースの2割を空っぽで走ることになり、必要量85の長距離では6%で済む。
@@ -1767,12 +1792,6 @@ def passive_effects(bundle, dist=None, track=None, same_species=True):
     cnt = bundle.get('passive_counts', {})
     d = dist or '中距離'
     t = track or '芝'
-    b_sp = coef.get(f'{d}:log(SP)', 0.0)
-    b_pw = coef.get(f'{d}:log(PW)', 0.0)
-    b_st = coef.get(f'{d}:log(ST)', 0.0)
-    l_sp = coef.get(f'{d}:lin(SP)', 0.0)
-    l_pw = coef.get(f'{d}:lin(PW)', 0.0)
-    l_st = coef.get(f'{d}:lin(ST)', 0.0)
     ref = (100.0, 100.0, 100.0)
     out = []
     for p in PASSIVE_NAMES:
@@ -1780,12 +1799,8 @@ def passive_effects(bundle, dist=None, track=None, same_species=True):
         src = sp_.get('source')
         if sp_.get('mult'):
             e = effective_stats(*ref, (p,), d, t, spec, {'same_species': same_species})
-            eff = (b_sp * math.log(e['speed'] / ref[0])
-                   + b_pw * math.log(e['power'] / ref[1])
-                   + b_st * math.log(e['stamina'] / ref[2])
-                   + l_sp * (e['speed'] - ref[0]) / 100.0
-                   + l_pw * (e['power'] - ref[1]) / 100.0
-                   + l_st * (e['stamina'] - ref[2]) / 100.0)
+            eff = (_stat_part(coef, d, e['speed'], e['power'], e['stamina'])
+                   - _stat_part(coef, d, *ref))
             kind = 'game' if src == 'game' else 'inferred'
         elif sp_.get('scope') == 'variance':
             eff = 0.0
@@ -1813,7 +1828,8 @@ def model_formula(bundle):
     """学習済みモデルの「予測スコア式」を表形式で返す。
 
     予測値（レース内で中心化した相対log）:
-      pred = 距離ごとに [ 切片 + b_log·log(実効stat) + b_lin·(実効stat/100) ] を合算
+      pred = 距離ごとに [ 切片 + b_R·log(内部R) + b_lin·(実効stat/100) ] を合算
+             （内部R = Σ 実効重み×実効stat。2026/10/02 にステータス別 log から変更）
              ＋ 好調/不調の係数 ＋ スペック未知パッシブの係数
     実効stat にはスペック済みパッシブの倍率が畳み込まれている。
     """
@@ -1824,9 +1840,7 @@ def model_formula(bundle):
         rows.append({
             'dist': d,
             'intercept': float(coef.get(f'{d}:切片', 0.0)),
-            'log_SP': float(coef.get(f'{d}:log(SP)', 0.0)),
-            'log_PW': float(coef.get(f'{d}:log(PW)', 0.0)),
-            'log_ST': float(coef.get(f'{d}:log(ST)', 0.0)),
+            'log_R': float(coef.get(f'{d}:log(R)', 0.0)),
             'lin_SP': float(coef.get(f'{d}:lin(SP)', 0.0)),
             'lin_PW': float(coef.get(f'{d}:lin(PW)', 0.0)),
             'lin_ST': float(coef.get(f'{d}:lin(ST)', 0.0)),
@@ -1861,6 +1875,10 @@ def export_model_json(bundle, path=None):
         'n_races': int(bundle.get('n_races', 0)),
         'date_min': bundle.get('date_min'), 'date_max': bundle.get('date_max'),
         'race_spearman': float(bundle.get('race_spearman') or 0),
+        'top1_acc': float(bundle.get('top1_acc') or 0),
+        # Streamlit が model.json を読むとき「未学習パッシブ/状態」の警告に使う
+        'passive_counts': {str(k): int(v) for k, v in (bundle.get('passive_counts') or {}).items()},
+        'train_conditions': sorted(str(c) for c in (bundle.get('train_conditions') or ())),
         # 名前→係数。JS側は名前で引くので順序に依存しない。
         'coef': {n: round(c, 10) for n, c in zip(names, coef)},
         'intercept': float(getattr(bundle['model'], 'intercept_', 0.0)),
@@ -1880,6 +1898,8 @@ def export_model_json(bundle, path=None):
         'stamina_cost_law': {d: dict(v) for d, v in STAMINA_COST_LAW.items()},
         'phase_early': list(INTERNAL_PHASE_WEIGHTS['序盤']),
         'dist_balance': {d: list(v) for d, v in INTERNAL_DIST_BALANCE.items()},
+        # log(R) 特徴量の重み（internal_stat_weights）。JS はこれで R を作る
+        'internal_w': {d: [internal_stat_weights(d)[k] for k in ('SP', 'PW', 'ST')] for d in DIST_LIST},
         'odds_floor': ODDS_FLOOR, 'stake_unit': STAKE_UNIT,
         'lead_duty_a': LEAD_DUTY_A, 'lead_duty_b': LEAD_DUTY_B,
         'lead_stamina_cost': LEAD_STAMINA_COST,
@@ -1920,6 +1940,55 @@ def export_model_json(bundle, path=None):
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(payload, f, ensure_ascii=False, separators=(',', ':'))
     return payload
+
+
+class _LinearModel:
+    """model.json の係数で predict するだけの最小モデル（学習済み Ridge の代わり）。"""
+    def __init__(self, coef, intercept):
+        self.coef_ = np.asarray(coef, dtype=float)
+        self.intercept_ = float(intercept)
+
+    def predict(self, X):
+        return np.asarray(X, dtype=float) @ self.coef_ + self.intercept_
+
+
+def load_model_json(path='model.json'):
+    """export_model_json の逆。bot と**同じ係数・同じσ**の bundle を作る（2026/10/02）。
+
+    Streamlit Cloud には races.jsonl が無い（.gitignore）ので、そこで学習すると
+    Discord ログの旧方式になり bot と予測がズレる。PC の build_autopilot.py が
+    races.jsonl から作った model.json をそのまま読めば、bot と同じ予測になる。
+    """
+    with open(path, encoding='utf-8') as f:
+        M = json.load(f)
+    spec = default_spec()
+    for k, v in (M.get('spec') or {}).items():      # bot が使った倍率・範囲で上書き
+        if k in spec:
+            spec[k] = {**spec[k], **v}
+    names = feature_names(spec)
+    coef = M.get('coef') or {}
+    missing = [n for n in names if n not in coef]
+    msgs = [f"ℹ bot と同じモデル（model.json・{M.get('n_races')}レース "
+            f"{M.get('date_min')}〜{M.get('date_max')}・作成 {M.get('trained_at')}）"]
+    warns = []
+    if M.get('core_version') != CORE_VERSION:
+        warns.append(f"⚠ model.json は core {M.get('core_version')} で作られています"
+                     f"（この画面は {CORE_VERSION}）。PC で build_autopilot.py を実行して push してください。")
+    if missing:
+        warns.append(f"⚠ model.json に無い特徴量 {len(missing)}個 は 0 として扱います: "
+                     + ', '.join(missing[:5]))
+    return {
+        'ok': True, 'model': _LinearModel([coef.get(n, 0.0) for n in names], M.get('intercept', 0.0)),
+        'spec': spec, 'feature_names': names,
+        'race_sigma': float(M['race_sigma']), 'tri_sigma': float(M.get('tri_sigma') or M['race_sigma']),
+        'race_spearman': float(M.get('race_spearman') or 0), 'top1_acc': float(M.get('top1_acc') or 0),
+        'n_races': int(M.get('n_races') or 0), 'date_min': M.get('date_min'), 'date_max': M.get('date_max'),
+        'mode': 'model.json', 'alpha': '-', 'files': [os.path.basename(str(path))],
+        'cv_rows': [], 'calibration': None, 'calibration_tri': None,
+        'passive_counts': dict(M.get('passive_counts') or {}),
+        'train_conditions': set(M.get('train_conditions') or ('好調', '普通', '不調')),
+        'messages': msgs, 'warnings': warns,
+    }
 
 
 def passive_coef_table(spec=None):
@@ -3928,12 +3997,11 @@ def _contributions(bundle, horses, dist, track):
     パッシブは実効ステータスに畳み込まれているので、素ステータスとの差分で寄与を出す。"""
     coef = dict(zip(bundle['feature_names'], bundle['model'].coef_))
     spec = bundle.get('spec') or default_spec()
-    b_sp = coef.get(f'{dist}:log(SP)', 0.0)
-    b_pw = coef.get(f'{dist}:log(PW)', 0.0)
-    b_st = coef.get(f'{dist}:log(ST)', 0.0)
+    b_r = coef.get(f'{dist}:log(R)', 0.0)
     l_sp = coef.get(f'{dist}:lin(SP)', 0.0)
     l_pw = coef.get(f'{dist}:lin(PW)', 0.0)
     l_st = coef.get(f'{dist}:lin(ST)', 0.0)
+    w = internal_stat_weights(dist)
     same = same_species_flags([h.get('name', '') for h in horses],
                               [h.get('species') for h in horses])
     out = []
@@ -3941,28 +4009,26 @@ def _contributions(bundle, horses, dist, track):
         ctx = {'same_species': same[hi]}
         e = effective_stats(h['speed'], h['power'], h['stamina'],
                             h.get('passives', ()), dist, track, spec, ctx)
-        sp = math.log(max(float(h['speed']), 1.0))
-        pw = math.log(max(float(h['power']), 1.0))
-        st = math.log(max(float(h['stamina']), 1.0))
-        lsp0, lpw0, lst0 = float(h['speed']) / 100.0, float(h['power']) / 100.0, float(h['stamina']) / 100.0
-        c_sp = b_sp * sp + l_sp * lsp0
-        c_pw = b_pw * pw + l_pw * lpw0
-        c_st = b_st * st + l_st * lst0
+        s0, p0, t0 = float(h['speed']), float(h['power']), float(h['stamina'])
+        # log(R) は3つのステータスの和の log なので、R に占める割合で各ステに配る（合計は一致）
+        R0 = internal_rating(s0, p0, t0, dist)
+        lr = b_r * math.log(R0)
+        c_sp = lr * w['SP'] * s0 / R0 + l_sp * s0 / 100.0
+        c_pw = lr * w['PW'] * p0 / R0 + l_pw * p0 / 100.0
+        c_st = lr * w['ST'] * t0 / R0 + l_st * t0 / 100.0
         b_sur, b_sh = coef.get('スタミナ余り', 0.0), coef.get('スタミナ不足', 0.0)
-        e0 = {'speed': float(h['speed']), 'power': float(h['power']),
-              'stamina': float(h['stamina'])}
+        e0 = {'speed': s0, 'power': p0, 'stamina': t0}
 
         def _bud(ee):
             _, sh_, su_ = stamina_budget(ee, dist)
             return (b_sur * su_ + b_sh * sh_) / 10.0
+
+        def _gain(ee):   # 素のステータスからの増分（ステータス部分＋スタミナ収支）
+            return (_bud(ee) - _bud(e0)
+                    + _stat_part(coef, dist, ee['speed'], ee['power'], ee['stamina'])
+                    - _stat_part(coef, dist, s0, p0, t0))
         c_st += _bud(e0)
-        c_spec = (_bud(e) - _bud(e0)
-                  + b_sp * (math.log(e['speed']) - sp)
-                  + b_pw * (math.log(e['power']) - pw)
-                  + b_st * (math.log(e['stamina']) - st)
-                  + l_sp * (e['speed'] - float(h['speed'])) / 100.0
-                  + l_pw * (e['power'] - float(h['power'])) / 100.0
-                  + l_st * (e['stamina'] - float(h['stamina'])) / 100.0)
+        c_spec = _gain(e)
         cond = h.get('condition', '普通')
         c_cond = coef.get('好調', 0.0) if cond == '好調' else (
             coef.get('不調', 0.0) if cond == '不調' else 0.0)
@@ -3972,13 +4038,7 @@ def _contributions(bundle, horses, dist, track):
             if sp_ and sp_.get('mult'):
                 e1 = effective_stats(h['speed'], h['power'], h['stamina'], (p,),
                                      dist, track, spec, ctx)
-                v = (_bud(e1) - _bud(e0)
-                     + b_sp * (math.log(e1['speed']) - sp)
-                     + b_pw * (math.log(e1['power']) - pw)
-                     + b_st * (math.log(e1['stamina']) - st)
-                     + l_sp * (e1['speed'] - float(h['speed'])) / 100.0
-                     + l_pw * (e1['power'] - float(h['power'])) / 100.0
-                     + l_st * (e1['stamina'] - float(h['stamina'])) / 100.0)
+                v = _gain(e1)
             elif sp_ and sp_.get('scope') == 'variance':
                 v = 0.0
             elif PASSIVE_CATALOG.get(p) == 'aptitude':

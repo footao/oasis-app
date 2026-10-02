@@ -934,7 +934,7 @@ def regression_tests():
           'API の並びが変わると3連単・単勝の添字が別の馬を指す')
     check('P45 試し買いをまとめと予算に入れる',
           "src: 'probe'" in _ap and '(probe ? probe.u * probe.unit : 0)' in _ap
-          and "winP.some(p => p >= mNum('win_min_prob', 0.50))" in _ap,
+          and 'const anyWin = winP.some((p, i) => {' in _ap and 'p * od >= sr' in _ap,
           '試し買い（最大5千）が精算から漏れ、レース予算も超えていた。下限を通る馬がいなければ試さない')
     check('P45 設定値 0 を既定値で上書きしない（未成立枠を 0 で切れる）',
           '+(D.unformed_max_units ?? 10);' in _ap)
@@ -956,17 +956,19 @@ def regression_tests():
           '実結果24件で1本・回収率9.6%。宝くじとして最小額だけ残す（JS は model.json の defaults から読む）')
 
     check('P40 市場との乖離が大きすぎる単勝は買わない',
-          oc.WIN_SKIP_RATIO == 12.0
+          oc.WIN_SKIP_RATIO == 1.5
           and 'p[i] * od[i] >= skipRatio' in _model_js
           and "skipRatio: mNum('win_skip_ratio'" in _ap,
-          '乖離12以上は 0/9・全損。12未満だけなら 63件で回収率114.9%')
+          '乖離1.5以上は49件でモデル予想24.3本・市場予想6.2本・実際8本（市場が正しい）')
     check('P40 p が低くても乖離が大きければ止まる（旧 p 閾値の穴）',
           not oc.win_bet_picks_pool(['a'], [0.62], [45.7], 10**6, 10**6, 0.25, 0.0,
                                     my_units=[0])[0]
+          and not oc.win_bet_picks_pool(['u'], [0.523], [18.87], 10**6, 10**6, 0.25, 0.0,
+                                        my_units=[0])[0]
           and any(r['name'] == 'b' for r in oc.win_bet_picks_pool(
-              ['b'], [0.71], [6.55], 10**6, 10**6, 0.25, 0.0, my_units=[0])[0]),
-          'R2530 の せん（p0.62 / od45.7 / 乖離28.3）は WIN_SKIP_P=0.90 では止まらなかった。'
-          'R2519 の 招き猫（p0.71 / od6.55 / 乖離4.6）は的中しているので切らない')
+              ['b'], [0.71], [1.8], 10**6, 10**6, 0.25, 0.0, my_units=[0])[0]),
+          'R2530 の せん（p0.62 / od45.7）と R2568 の ういえれ（p0.52 / od18.9 / 乖離9.9）は止める。'
+          '市場が同意する本命（乖離1.5未満）は買う')
     check('P40 未投票の馬は乖離の対象外（オッズが実在しない）',
           bool(oc.win_bet_picks_pool(['a'], [0.62], [1.5], 10**6, 10**6, 0.25, 0.0,
                                      my_units=[0], unbet=[True])[0]),
@@ -1036,7 +1038,7 @@ def regression_tests():
     check('P34 下限は呼び出し側で変えられる（Streamlit の検証用）',
           any(r['name'] == 'b' for r in oc.win_bet_picks_pool(
               ['a', 'b'], [0.9, 0.3], [1.5, 8.0], 1_000_000, 1_000_000, 0.25, 0.0,
-              my_units=[0, 0], min_prob=0.0)[0]),
+              my_units=[0, 0], min_prob=0.0, skip_ratio=0)[0]),
           'min_prob=0 を渡せば従来どおり。過去データの再評価に要る')
 
     check('P33 少頭数レースは単勝の合計上限を絞る',
@@ -1341,6 +1343,19 @@ def regression_tests():
           set(['item_scope', 'item_key_alias', 'trifecta_seed_bug_active', 'defaults',
                'win_pool_seed', 'win_max_total_units'])
           <= set(oc.export_model_json(_b7).keys()))
+    # --- P46: Streamlit は model.json を読むだけで bot と同じ予測になる ---
+    import tempfile
+    with tempfile.TemporaryDirectory() as _td:
+        _mjp = os.path.join(_td, 'model.json')
+        oc.export_model_json(_b7, _mjp)
+        _lb = oc.load_model_json(_mjp)
+    _hs43 = [dict(name=f'h{i}', speed=150 + 7 * i, power=60 - 3 * i, stamina=50 + i,
+                  condition='普通', passives=('スピードスター',) if i % 2 else ())
+             for i in range(6)]
+    _d43 = float(np.max(np.abs(oc.predict_base(_b7, _hs43, '中距離', '芝')
+                               - oc.predict_base(_lb, _hs43, '中距離', '芝'))))
+    check('P46 model.json を読んだ bundle は学習した bundle と同じ予測・同じσ',
+          _d43 < 1e-8 and _lb['race_sigma'] == _b7['race_sigma'], f'最大差 {_d43:.1e}')
 
     # --- P21: スタミナ不足は「必要量に対する割合」で効かせる ---
     # 同じ不足5でも、必要量29の短距離ではレースの17%を空っぽで走ることになり、
@@ -1583,7 +1598,7 @@ def regression_tests():
     # 害しかない（オートパイロットがそのまま送って弾かれる）ので、作らないこと。
     _rows19 = '\n'.join(
         'マイル,芝,,馬%d,a%d,%d,50,48,普通,スピードスター,マイル得意,%.2f,0'
-        % (i, i, 150 - i * 6, 2.0 + i) for i in range(7))
+        % (i, i, 150 - i * 6, 1.3 + i) for i in range(7))
     _t19 = ('guild=1\nschedule_id=19\npool=0\n\n=== 出走馬一覧 ===\n%s\n%s\n'
             % (_hdr7, _rows19))
     _r19 = oc.analyze(_t19, _b7, {'dist': 'マイル', 'track': '芝',

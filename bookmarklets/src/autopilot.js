@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.36.0';
+const AP_VER = '1.38.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -500,7 +500,13 @@ async function analyseRace(sid, info, canBuy) {
   let wpets = pets, wpool = null, probe = null;
   if (winOn && CFG.WIN_PROBE && CFG.WIN_PROBE_MAX_UNITS > 0) {
     // 下限（win_min_prob）を超える馬がいなければ単勝は買わないので、試し買いも無駄（純粋な賭けになる）
-    const anyWin = winP.some(p => p >= mNum('win_min_prob', 0.50));
+    // 乖離（p × オッズ）で見送る馬だけなら試し買いもしない（R2568: 見送るべき馬に1口入れていた）
+    const minP = mNum('win_min_prob', 0.50), sr = mNum('win_skip_ratio', 1.5);
+    const fl = M.unbet_odds == null ? 1.5 : M.unbet_odds;
+    const anyWin = winP.some((p, i) => {
+      const od = +pets[i].odds;
+      return p >= minP && !(sr > 0 && Number.isFinite(od) && od !== fl && p * od >= sr);
+    });
     const pr = (canBuy && anyWin) ? await probeWinPool(sid, pets, winP) : null;
     if (pr) {
       // API が返す並びが変わっても、3連単・単勝の添字が元の pets とずれないよう pet_id で揃える
@@ -971,7 +977,7 @@ function analyseWin(sid, pets, winP, measuredPool, budgetLeft) {
                            ownUnits + Math.floor(Math.max(budgetLeft, 0) / WU)),
       maxUnits: M.win_max_units || 100, riskCapFrac: riskFrac(),
       minProb: mNum('win_min_prob', 0.50),
-      skipP: mNum('win_skip_p', 0.90), skipOd: mNum('win_skip_od', 10.0), skipRatio: mNum('win_skip_ratio', 12.0),
+      skipP: mNum('win_skip_p', 0.90), skipOd: mNum('win_skip_od', 10.0), skipRatio: mNum('win_skip_ratio', 1.5),
       myUnits: mine.map(a => Math.floor(a / WU)), unbet: fl.unbet });
   if (!picks || !picks.length) { log(`R${sid}: 単勝に+EVの馬なし`, '#888'); return none; }
   const out = picks.map(r => {

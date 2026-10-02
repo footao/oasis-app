@@ -117,12 +117,12 @@ st.set_page_config(page_title="Oasis 予測 v2", page_icon="🐎", layout="wide"
 #  片方だけ更新すると「AttributeError（内容は伏せられます）」になって
 #  原因が分からなくなるので、起動時に分かる形で止める。
 # ---------------------------------------------------------------
-REQUIRED_CORE = "3.43.0"
+REQUIRED_CORE = "3.46.0"
 _NEEDED = [
     "CORE_VERSION", "WIN_MAX_TOTAL_UNITS", "WIN_STAKE_UNIT", "UNBET_ODDS",
     "MAX_TOTAL_UNITS", "SIGMA_SAFETY", "DIST_LIST", "TRACK_LIST",
     "SCORING_PATCH_DATE", "DEFAULT_TRAIN_FROM", "SPEC_FILE",
-    "train_model", "analyze", "BetLog", "passive_effects",
+    "train_model", "load_model_json", "analyze", "BetLog", "passive_effects",
     "estimate_win_pool", "win_bet_picks_pool", "load_passive_spec",
     "BetLogReadError", "model_formula", "passive_coef_table",
     "internal_stat_weights", "INTERNAL_PHASE_WEIGHTS", "INTERNAL_DIST_BALANCE",
@@ -200,6 +200,15 @@ def _train_cached(source_key, sigma_override, train_from, sigma_safety, _texts, 
                           train_from=train_from,
                           spec_path=_spec_path(),
                           sigma_safety=sigma_safety)
+
+_MJ_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model.json")
+
+
+@st.cache_resource(show_spinner=False)
+def _load_mj_cached(mtime_ns, size):
+    """model.json が変わった（push された）ときだけ読み直す。"""
+    return oc.load_model_json(_MJ_PATH)
+
 
 def _embed_html(html, height=0):
     """HTML+JS を埋め込む。st.components.v1.html は 2026-06-01 で廃止予定なので、
@@ -311,15 +320,18 @@ with st.sidebar:
     st.subheader("1) モデル学習")
 
     drive_src = _get_drive_source()
+    SRC_MJ = "🤖 bot と同じモデル（model.json）"
     SRC_REPO, SRC_DRIVE, SRC_UP = "📁 リポジトリ内のファイル", "☁ Google ドライブ", "⬆ アップロード"
-    src_opts = [SRC_REPO] + ([SRC_DRIVE] if drive_src is not None else []) + [SRC_UP]
+    src_opts = [SRC_MJ, SRC_REPO] + ([SRC_DRIVE] if drive_src is not None else []) + [SRC_UP]
     src_mode = st.radio("ログの取得元", src_opts, index=0, horizontal=False,
-                        help="既定はリポジトリ内（GitHubに置いたファイル）です。"
-                             "ドライブは secrets に [gdrive] を設定すると選べます。")
+                        help="既定は bot と同じ model.json（PC の build_autopilot.py が races.jsonl から"
+                             "作ったもの）。学習はしません。ログから学習し直したいときだけ他を選んでください。")
 
     log_texts, source_key, log_path, src_label = [], None, "", ""
 
-    if src_mode == SRC_UP:
+    if src_mode == SRC_MJ:
+        src_label = "🤖 " + ("model.json" if os.path.isfile(_MJ_PATH) else "❌ model.json が見つかりません")
+    elif src_mode == SRC_UP:
         uploaded = st.file_uploader(
             "ログファイルを選ぶ", type=["txt", "md"], accept_multiple_files=True,
             help="Discordエクスポートの .txt。複数選択できます。")
@@ -395,7 +407,13 @@ with st.sidebar:
         _drive_fingerprint.clear()
 
     bundle = None
-    if (auto or retrain) and (log_texts or log_path):
+    if src_mode == SRC_MJ:
+        try:
+            _st_mj = os.stat(_MJ_PATH)
+            bundle = _load_mj_cached(_st_mj.st_mtime_ns, _st_mj.st_size)
+        except Exception as e:
+            st.error(f"model.json を読めませんでした: {e}")
+    elif (auto or retrain) and (log_texts or log_path):
         try:
             bundle = _train_cached(source_key, sigma_override, train_from.strip()
                                    or oc.DEFAULT_TRAIN_FROM, sigma_safety,
@@ -938,14 +956,13 @@ with tab_model:
             mf = oc.model_formula(bundle)
             st.markdown(
                 "予測値（レース内で中心化した相対 log スコア）は、距離ごとに次を合算します。\n\n"
-                "> pred ＝ 切片 ＋ **b_log**·log(実効stat) ＋ **b_lin**·(実効stat/100) "
+                "> pred ＝ 切片 ＋ **b_R**·log(内部R) ＋ **b_lin**·(実効stat/100) "
                 "＋ 状態係数 ＋ 未取得パッシブの係数\n\n"
-                "実効stat にはスペック済みパッシブの倍率が畳み込まれています。"
-                "log 項は「比率で効く」頑健な土台、線形項は内部式の加法構造（特に長距離のスタミナ）を捉えます。")
+                "内部R ＝ Σ 実効重み×実効stat（下の内部式比）。実効stat にはスペック済みパッシブの倍率が畳み込まれています。"
+                "log(R) は「総合力の比で効く」土台、線形項はステータスごとの上乗せを捉えます。")
             st.dataframe(pd.DataFrame([{
                 "距離": r["dist"], "切片": round(r["intercept"], 3),
-                "log(SP)": round(r["log_SP"], 3), "log(PW)": round(r["log_PW"], 3),
-                "log(ST)": round(r["log_ST"], 3), "lin(SP)": round(r["lin_SP"], 3),
+                "log(内部R)": round(r["log_R"], 3), "lin(SP)": round(r["lin_SP"], 3),
                 "lin(PW)": round(r["lin_PW"], 3), "lin(ST)": round(r["lin_ST"], 3),
                 "内部式比(SP:PW:ST)":
                     f"1 : {r['internal_norm'][1]:.2f} : {r['internal_norm'][2]:.2f}",

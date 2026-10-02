@@ -193,17 +193,17 @@ const OasisModel = (() => {
   // --- 1頭ぶんの特徴量（Python: _row_features）を {名前: 値} で返す ---
   function rowFeatures(h, dist, track, M, ctx) {
     const e = effectiveStats(h.speed, h.power, h.stamina, h.passives, dist, track, M, ctx);
-    const lg = { SP: Math.log(Math.max(e.speed, 1)), PW: Math.log(Math.max(e.power, 1)),
-                 ST: Math.log(Math.max(e.stamina, 1)) };
+    // log は内部レーティング R = Σ 実効重み×実効ステ の1本（Python: internal_rating）。
+    // ステータス別の log は低い値の差を拡大しすぎる（R2568）。
+    const w = (M.internal_w || {})[dist] || [1, 1, 1];
+    const lr = Math.log(Math.max(w[0] * e.speed + w[1] * e.power + w[2] * e.stamina, 1));
     const ln = { SP: e.speed / 100, PW: e.power / 100, ST: e.stamina / 100 };
     const f = {};
     for (const d of M.dist_list) {
       const m = (dist === d) ? 1 : 0;
       f[`${d}:切片`] = m;
-      for (const s of ['SP', 'PW', 'ST']) {
-        f[`${d}:log(${s})`] = m * lg[s];
-        f[`${d}:lin(${s})`] = m * ln[s];
-      }
+      f[`${d}:log(R)`] = m * lr;
+      for (const s of ['SP', 'PW', 'ST']) f[`${d}:lin(${s})`] = m * ln[s];
     }
     const bud = staminaBudget(e, dist, M, (ctx && ctx.stamina_cost_mult) || 1);
     f['スタミナ余り'] = bud[2] / 10;
@@ -437,7 +437,7 @@ const OasisModel = (() => {
     const skipP = (o.skipP == null ? 0.90 : +o.skipP);
     const skipOd = (o.skipOd == null ? 10.0 : +o.skipOd);
     // 乖離 = p × od。実結果72件で 12以上は 0/9・全損。p 閾値が取りこぼす帯を止める。
-    const skipRatio = (o.skipRatio == null ? 12.0 : +o.skipRatio);
+    const skipRatio = (o.skipRatio == null ? 1.5 : +o.skipRatio);
     const n = names.length;
     const od = [], p = [], unb = [], k0 = [], ok = [];
     for (let i = 0; i < n; i++) {
