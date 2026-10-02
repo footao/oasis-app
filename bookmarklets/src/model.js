@@ -62,7 +62,10 @@ const OasisModel = (() => {
     const push  = () => { if (skipped) skipped.push(label || item.name || '?'); return null; };
     const scopeTbl = M.item_scope || {};
     const alias = (M.item_key_alias || {})[String(item.effect_key || '').replace(/^(?:gear|charm|item)_/, '')];
-    const c = scopeTbl[label] || scopeTbl[alias || ''];
+    // 未登録でも「常時」と書いてあれば範囲の誤読は起きないので常時で掛ける
+    // （Python は未登録を説明文から推測して掛けるので、少なくともここは揃える）。
+    // R2566: 未登録の『無窮潮流（スタミナ常時+18.1%）』を捨てて勝ち馬を p≈0 と読んだ。
+    const c = scopeTbl[label] || scopeTbl[alias || ''] || (/常時/.test(desc) ? { scope: 'always' } : null);
     if (!c) return push();
     if (c.scope === 'variance') {
       const m = desc.match(/約?(半分|\d+(?:\.\d+)?)[%％]?/);
