@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.38.0';
+const AP_VER = '1.41.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -501,7 +501,7 @@ async function analyseRace(sid, info, canBuy) {
   if (winOn && CFG.WIN_PROBE && CFG.WIN_PROBE_MAX_UNITS > 0) {
     // 下限（win_min_prob）を超える馬がいなければ単勝は買わないので、試し買いも無駄（純粋な賭けになる）
     // 乖離（p × オッズ）で見送る馬だけなら試し買いもしない（R2568: 見送るべき馬に1口入れていた）
-    const minP = mNum('win_min_prob', 0.50), sr = mNum('win_skip_ratio', 1.5);
+    const minP = mNum('win_min_prob', 0.50), sr = mNum('win_skip_ratio', 3.0);
     const fl = M.unbet_odds == null ? 1.5 : M.unbet_odds;
     const anyWin = winP.some((p, i) => {
       const od = +pets[i].odds;
@@ -946,7 +946,10 @@ function analyseWin(sid, pets, winP, measuredPool, budgetLeft) {
     log(`R${sid}: 単勝プールの大半が自分の掛け金 → どう買っても期待値マイナス。単勝なし`, '#ffb74d');
     return none;
   }
-  const smallField = pets.length < (M.min_field_trifecta || 8);
+  // 少頭数の上限は M.win_small_field_hours の時刻だけ（23時の上位レースが荒れる）。キーが無い古い model.json は全時刻。
+  const sfHours = M.win_small_field_hours;
+  const smallField = pets.length < (M.min_field_trifecta || 8)
+    && (!Array.isArray(sfHours) || !sfHours.length || sfHours.includes(nextRaceTime().getHours()));
   const winTotalCap = smallField
     ? Math.min(M.win_max_total_units || 100, mNum('win_small_field_max_units', 20))
     : (M.win_max_total_units || 100);
@@ -977,7 +980,7 @@ function analyseWin(sid, pets, winP, measuredPool, budgetLeft) {
                            ownUnits + Math.floor(Math.max(budgetLeft, 0) / WU)),
       maxUnits: M.win_max_units || 100, riskCapFrac: riskFrac(),
       minProb: mNum('win_min_prob', 0.50),
-      skipP: mNum('win_skip_p', 0.90), skipOd: mNum('win_skip_od', 10.0), skipRatio: mNum('win_skip_ratio', 1.5),
+      skipP: mNum('win_skip_p', 0.90), skipOd: mNum('win_skip_od', 10.0), skipRatio: mNum('win_skip_ratio', 3.0),
       myUnits: mine.map(a => Math.floor(a / WU)), unbet: fl.unbet });
   if (!picks || !picks.length) { log(`R${sid}: 単勝に+EVの馬なし`, '#888'); return none; }
   const out = picks.map(r => {

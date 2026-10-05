@@ -956,19 +956,19 @@ def regression_tests():
           '実結果24件で1本・回収率9.6%。宝くじとして最小額だけ残す（JS は model.json の defaults から読む）')
 
     check('P40 市場との乖離が大きすぎる単勝は買わない',
-          oc.WIN_SKIP_RATIO == 1.5
+          oc.WIN_SKIP_RATIO == 0
           and 'p[i] * od[i] >= skipRatio' in _model_js
           and "skipRatio: mNum('win_skip_ratio'" in _ap,
-          '乖離1.5以上は49件でモデル予想24.3本・市場予想6.2本・実際8本（市場が正しい）')
-    check('P40 p が低くても乖離が大きければ止まる（旧 p 閾値の穴）',
+          '試験運用で 0（見送りなし）。乖離はレポートに出して人が確認する。戻すなら 3.0')
+    check('P40 乖離で止める仕組みは skip_ratio を入れれば効く（今は試験で 0）',
           not oc.win_bet_picks_pool(['a'], [0.62], [45.7], 10**6, 10**6, 0.25, 0.0,
-                                    my_units=[0])[0]
+                                    my_units=[0], skip_ratio=3.0)[0]
           and not oc.win_bet_picks_pool(['u'], [0.523], [18.87], 10**6, 10**6, 0.25, 0.0,
-                                        my_units=[0])[0]
+                                        my_units=[0], skip_ratio=3.0)[0]
           and any(r['name'] == 'b' for r in oc.win_bet_picks_pool(
               ['b'], [0.71], [1.8], 10**6, 10**6, 0.25, 0.0, my_units=[0])[0]),
           'R2530 の せん（p0.62 / od45.7）と R2568 の ういえれ（p0.52 / od18.9 / 乖離9.9）は止める。'
-          '市場が同意する本命（乖離1.5未満）は買う')
+          '市場が同意する本命（乖離3未満）は買う')
     check('P40 未投票の馬は乖離の対象外（オッズが実在しない）',
           bool(oc.win_bet_picks_pool(['a'], [0.62], [1.5], 10**6, 10**6, 0.25, 0.0,
                                      my_units=[0], unbet=[True])[0]),
@@ -1043,10 +1043,11 @@ def regression_tests():
 
     check('P33 少頭数レースは単勝の合計上限を絞る',
           oc.WIN_SMALL_FIELD_MAX_UNITS < oc.WIN_MAX_TOTAL_UNITS
-          and 'const smallField = pets.length < (M.min_field_trifecta || 8);' in _ap
+          and 'const smallField = pets.length < (M.min_field_trifecta || 8)' in _ap
+          and 'sfHours.includes(nextRaceTime().getHours())' in _ap and oc.WIN_SMALL_FIELD_HOURS == (23,)
           and "mNum('win_small_field_max_units'" in _ap
           and 'totalUnits: Math.min(winTotalCap,' in _ap,
-          f'{oc.MIN_FIELD_TRIFECTA}頭未満は {oc.WIN_SMALL_FIELD_MAX_UNITS}口まで'
+          f'23時の{oc.MIN_FIELD_TRIFECTA}頭未満は {oc.WIN_SMALL_FIELD_MAX_UNITS}口まで'
           f'（通常 {oc.WIN_MAX_TOTAL_UNITS}口）。9月実測で 8頭以上の単勝 回収率121% / '
           '8頭未満 56%。0にしないのは少頭数の較正を測り続けるため')
     check('P33 上限は model.json 経由で JS に渡る',

@@ -437,7 +437,7 @@ const OasisModel = (() => {
     const skipP = (o.skipP == null ? 0.90 : +o.skipP);
     const skipOd = (o.skipOd == null ? 10.0 : +o.skipOd);
     // 乖離 = p × od。実結果72件で 12以上は 0/9・全損。p 閾値が取りこぼす帯を止める。
-    const skipRatio = (o.skipRatio == null ? 1.5 : +o.skipRatio);
+    const skipRatio = (o.skipRatio == null ? 3.0 : +o.skipRatio);
     const n = names.length;
     const od = [], p = [], unb = [], k0 = [], ok = [];
     for (let i = 0; i < n; i++) {
