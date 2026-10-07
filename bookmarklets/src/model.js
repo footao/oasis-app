@@ -821,6 +821,7 @@ const OasisModel = (() => {
     // 位置効果を持つ馬と種類（Python: has）
     const hasP = prof.map(x => SIM_POS.map((_, j) => x.p_m[j].some(v => v !== 1) || x.p_c[j] !== 1));
     const anyP = hasP.some(a => a.some(Boolean));
+    const pid = horses.map(h => +h.pet_id || 0);
     // 区間ごとの消費倍率と、その区間から最後までの和（見込みの余りに使う）
     const cmS = prof.map(x => segPh.map(pi => x.cost[pi]));
     const remS = cmS.map(a => { const r = new Array(nseg); let acc = 0; for (let k = nseg - 1; k >= 0; k--) { acc += a[k]; r[k] = acc; } return r; });
@@ -834,6 +835,8 @@ const OasisModel = (() => {
     const NS = nSim || S.n_sim || 8000;
     const win = new Float64Array(H), combo = new Map(), T = new Float64Array(H);
     const C = new Float64Array(H), ON = new Uint8Array(H), Sv = new Float64Array(H), S0 = new Float64Array(H), DT = new Float64Array(H);
+    const HZ = new Float64Array(H).fill(1);
+    const inRace = !!(S.horse_sd && S.horse_in_race);   // 調子のぶれをレース中の速さに掛ける（Python と同じ）
     const mul = [1, 1, 1];
     for (let it = 0; it < NS; it++) {
       for (let h = 0; h < H; h++) {
@@ -843,11 +846,17 @@ const OasisModel = (() => {
         Sv[h] = ON[h] ? Math.floor(x.s0 * x.g_m[2]) : x.s0;
         S0[h] = Math.max(Sv[h], 1);
         T[h] = 0; DT[h] = 1;
+        if (inRace) HZ[h] = Math.exp(S.horse_sd * randn());
       }
       for (let k = 0; k < nseg; k++) {
         const pi = segPh[k];
-        let t1 = Infinity, t2 = Infinity;                       // 先頭と2番手のタイム
-        if (anyP) for (let h = 0; h < H; h++) { const v = T[h]; if (v < t1) { t2 = t1; t1 = v; } else if (v < t2) t2 = v; }
+        // 先頭と2番手（同じ位置なら pet_id の小さい馬が前。スタート直後は全頭 0m なので pet_id 順）
+        let i1 = -1, i2 = -1;
+        const ahead = (a, b) => T[a] < T[b] || (T[a] === T[b] && pid[a] < pid[b]);
+        if (anyP) for (let h = 0; h < H; h++) {
+          if (i1 < 0 || ahead(h, i1)) { i2 = i1; i1 = h; } else if (i2 < 0 || ahead(h, i2)) i2 = h;
+        }
+        const t1 = i1 >= 0 ? T[i1] : Infinity, t2 = i2 >= 0 ? T[i2] : Infinity;
         for (let h = 0; h < H; h++) {
           const x = prof[h];
           for (let j = 0; j < 3; j++) mul[j] = ON[h] ? x.g_m[j] : 1;
@@ -857,7 +866,7 @@ const OasisModel = (() => {
             const spd = S.seg_m / DT[h];
             let near = Infinity;
             for (let o = 0; o < H; o++) if (o !== h) near = Math.min(near, Math.abs(T[o] - T[h]));
-            const lead = T[h] === t1 && T[h] < t2;
+            const lead = h === i1;
             const cond = [near * spd <= S.duel_m, !lead && (T[h] - t1) * spd <= S.duel_m,
                           lead, lead && (t2 - T[h]) * spd >= S.solo_m];
             for (let q = 0; q < SIM_POS.length; q++) if (hasP[h][q] && cond[q]) {
@@ -869,13 +878,13 @@ const OasisModel = (() => {
           const rv = Math.pow(Math.max(st[0] * w[0] * mul[0] + st[1] * w[1] * mul[1] + st[2] * w[2] * mul[2] + w[3], 1), S.v_exp);
           // 疲労補正は「この先を走り切ったときの見込みの余り ÷ 初期スタミナ」で引く（Python と同じ）
           const f = Math.pow(fat((Sv[h] - C[h] * remS[h][k]) / S0[h]), S.f_exp);
-          DT[h] = 1 / (rv * f * (1 + S.seg_noise * randn()));
+          DT[h] = HZ[h] / (rv * f * (1 + S.seg_noise * randn()));
           Sv[h] -= C[h] * cmS[h][k] * cmul;
         }
         for (let h = 0; h < H; h++) T[h] += DT[h];      // 全頭の区間が終わってから進める（Python と同じ）
       }
       // 1レース1頭ごとの調子のぶれ（区間の乱数だけだと自信過剰になる）
-      if (S.horse_sd) for (let h = 0; h < H; h++) T[h] *= Math.exp(S.horse_sd * randn());
+      if (S.horse_sd && !inRace) for (let h = 0; h < H; h++) T[h] *= Math.exp(S.horse_sd * randn());
       let a = -1, b = -1, c3 = -1;            // タイムの小さい順に上位3頭
       for (let i = 0; i < H; i++) {
         const v = T[i];

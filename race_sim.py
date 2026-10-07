@@ -45,7 +45,12 @@ PH_TL = ('early', 'middle', 'late')
 NSEG = {'短距離': (3, 4, 3), 'マイル': (4, 6, 5), '中距離': (6, 8, 6), '長距離': (7, 10, 8)}
 V_EXP, F_EXP = 0.8709, 0.9136
 SEG_NOISE = 0.0119
-HORSE_SD = 0.006       # 1頭ごとのレースのぶれ（前向き検証194レースで 0.004〜0.008 を比べて最良）
+# 1頭ごとの調子のぶれはレース中の速さに掛ける（ゴールタイムにだけ掛けると、レース中は全馬が実際より
+# 固まって走り、競り合い・先頭の判定がずれる）。前向き197R（採取ミス除く・先頭判定込み）:
+#   ゴールに 0.006: 単勝LL 0.266 / 3連単LL 1.005 → レース中に 0.004: 0.243 / 0.948（0.006 で 0.256/0.981、0.008 で悪化）
+#   較正: 予測95%以上 101R 予測99.0% 実際99.0%
+HORSE_IN_RACE = True
+HORSE_SD = 0.004       # 1頭ごとのレースのぶれ（前向き検証194レースで 0.004〜0.008 を比べて最良）
 LOWST_LABELS = {'血走り', '骨砕き', '紅蓮点火', '深淵反転', '禍福転倒'}
 LEAD_LABELS = {'首位の呪い', '王冠過給', '先導祈願'}
 LEAD_DUTY = 0.079                 # 先頭の間（平均 duty で全区間に均す）
@@ -65,10 +70,14 @@ COST_PASSIVES = {'省エネ走法': (None, 0.92), 'ロングスパート': ('終
 #   lead  先頭の間（首位の呪い・王冠過給・先導祈願）       先頭 100% / 2位以下 0〜7%
 #   solo  先頭で2位と50m以上（独走態勢）
 POS_KINDS = ('duel', 'king', 'lead', 'solo')
-# 前向き194レース（対 競り合いだけ）: +王殺し 3連単LL −0.025±0.023（有意でない）/ +先頭 +0.030±0.022（悪化）。
-# 競り合い以外は位置で判定すると「並んで走る→発動→離れない」の正のフィードバックが実際より強く出る
-# （R2628: 王殺しのにのが lv に付いていき、lv の競り合いが終盤まで続いて lv 60%）。均したままにする。
-POS_DYNAMIC = {'duel'}
+# 先頭の判定: 同じ位置（スタート直後は全頭 0m）なら pet_id の小さい馬が前（start_rank が434レース全部で
+# pet_id 順・首位の呪いの1区間目の発動 98/98 一致）。これを入れると「先頭の間」は効く:
+#   前向き197レース（採取ミス除く・対 競り合いだけ）: 単勝LL 0.354→0.266（−0.088±0.058）/ 3連単LL −0.005±0.010
+#   23時 32R: 単勝LL 0.790→0.240・本命1着 81%→91%（スタートで先頭を取った首位の呪いの逃げ切りを読める）
+# 王殺しは 単勝LL +0.007±0.004 / 3連単LL −0.027±0.025 とどっちつかずなので均したまま
+# （R2628: 王殺しのにのが lv に付いていき、lv の競り合いが終盤まで続いて lv 60% になる）。
+# 調子のぶれをレース中に入れた後でも 単勝LL +0.005±0.007 / 3連単LL −0.045±0.039・本命1着 92%→91% で、まだ決め手なし。
+POS_DYNAMIC = {'duel', 'lead', 'solo'}
 POS_LABELS = {'競り合い', '天嵐決闘', '王殺し', '星界破砕', '首位の呪い', '王冠過給', '先導祈願'}   # 一致検証の見本選び用
 # 均すときの duty（消費量 c0 の計算は従来どおりこれで均す）
 POS_DUTY = {'duel': 0.655, 'king': 0.175, 'lead': LEAD_DUTY, 'solo': 0.05}
@@ -272,7 +281,7 @@ class RaceSim:
                     if k in m:
                         st[pi, j] *= m[k]
             g = pf['gamble']
-            rows.append(dict(h=h, st=st, c0=need / n, cost=list(pf['cost']), s0=math.floor(e['stamina']),
+            rows.append(dict(h=h, pid=int(h.get('pet_id') or 0), st=st, c0=need / n, cost=list(pf['cost']), s0=math.floor(e['stamina']),
                              g_p=g[0] if g else 0.0,
                              g_m=[float(g[1].get(k, 1.0)) for k in ('speed', 'power', 'stamina')] if g else [1.0] * 3,
                              p_m=[[float(pf['pos'][kd][0].get(k, 1.0)) for k in ('speed', 'power', 'stamina')]
@@ -386,6 +395,7 @@ class RaceSim:
                 'cost_mu': self.cost_mu, 'cost_sd': self.cost_sd,
                 'fqx': [float(x) for x in self.FQX], 'fqy': [float(x) for x in self.FQY],
                 'v_exp': V_EXP, 'f_exp': F_EXP, 'seg_noise': SEG_NOISE, 'horse_sd': self.horse_sd,
+                'horse_in_race': HORSE_IN_RACE,
                 'n_sim': self.n_sim, 'lowst_labels': sorted(LOWST_LABELS), 'lead_labels': sorted(LEAD_LABELS),
                 'lead_duty': LEAD_DUTY, 'lowst_duty': LOWST_DUTY,
                 'cost_passives': {k: [v[0], v[1]] for k, v in COST_PASSIVES.items()}, 'gamble': GAMBLE,
@@ -414,6 +424,7 @@ class RaceSim:
         pc = np.array([x['p_c'] for x in rows])                              # H×種類
         has = [(j, ((pm[:, j] != 1.0).any(1) | (pc[:, j] != 1.0))[None, :]) for j in range(len(POS_KINDS))]
         has = [(j, m) for j, m in has if m.any()]
+        pid = np.array([x['pid'] for x in rows])
         on = rng.random((NS, H)) < np.array([x['g_p'] for x in rows])[None, :]   # 勝負師の抽選
         s = np.array([x['s0'] for x in rows], float)[None, :].repeat(NS, 0)
         s1 = np.array([math.floor(x['s0'] * x['g_m'][2]) for x in rows], float)[None, :].repeat(NS, 0)
@@ -421,16 +432,19 @@ class RaceSim:
         S0 = np.maximum(s.copy(), 1.0)
         T = np.zeros((NS, H))
         dt = np.ones((NS, H))
+        hz = np.exp(self.horse_sd * rng.standard_normal((NS, H))) if (self.horse_sd and HORSE_IN_RACE) else 1.0
         for k, pi in enumerate(ph_of):
             f = np.interp((s - c * rem[None, :, k]) / S0, self.FQX, self.FQY)
             mult = np.where(on[:, :, None], gm[None, :, :], 1.0)            # NS×H×3
             cmul = np.ones((NS, H))
-            if has:   # 位置効果: 区間の始めの位置で判定（時間差 × 自分の速さで m に直す。全頭同時スタートは同着）
+            if has:   # 位置効果: 区間の始めの位置で判定（時間差 × 自分の速さで m に直す）
                 spd = SEG_M / dt
-                srt = np.sort(T, 1)
-                lead_t = srt[:, :1]
-                second = srt[:, 1:2] if H > 1 else np.full((NS, 1), np.inf)
-                is_lead = (T == lead_t) & (T < second)                         # 単独の先頭
+                # 同じ位置（スタート直後は全頭 0m）なら pet_id の小さい馬が前と判定される
+                # （timeline の start_rank が 434レース全部で pet_id 順と一致。首位の呪いの1区間目の発動も 98/98 一致）
+                o = np.lexsort((np.broadcast_to(pid, (NS, H)), T), axis=1)
+                lead_t = np.take_along_axis(T, o[:, :1], 1)
+                second = np.take_along_axis(T, o[:, 1:2], 1) if H > 1 else np.full((NS, 1), np.inf)
+                is_lead = np.arange(H)[None, :] == o[:, :1]
                 behind = np.where(is_lead, second - T, 0.0)                    # 先頭のときの2位との差
                 if H > 1:
                     o = np.argsort(T, 1)
@@ -450,10 +464,10 @@ class RaceSim:
                     cmul = cmul * np.where(a_, pc[None, :, j], 1.0)
             rr = np.maximum(np.einsum('nhj,hj->nh', mult, st[:, pi, :] * self.W[(d, pi)][0][None, :])
                             + self.W[(d, pi)][1], 1.0)
-            dt = 1.0 / (rr ** V_EXP * f ** F_EXP * (1 + SEG_NOISE * rng.standard_normal((NS, H))))
+            dt = hz / (rr ** V_EXP * f ** F_EXP * (1 + SEG_NOISE * rng.standard_normal((NS, H))))
             T += dt
             s = s - c * cm[None, :, k] * cmul
-        if self.horse_sd:      # 1レース1頭ごとの調子のぶれ（区間の乱数だけでは自信過剰になる）
+        if self.horse_sd and not HORSE_IN_RACE:      # 1レース1頭ごとの調子のぶれ（区間の乱数だけでは自信過剰になる）
             T *= np.exp(self.horse_sd * rng.standard_normal((NS, H)))
         order = np.argsort(T, 1)
         win = np.bincount(order[:, 0], minlength=H) / NS
@@ -473,5 +487,10 @@ if __name__ == '__main__':      # 動作確認: 最後の日より前で学習 �
     sim = RaceSim(n_sim=2000).fit([r for r in raw if r['race_date'] < last['race_date']])
     win, tri, names = sim.predict(last, seed=1)
     assert len(win) == len(names) and abs(win.sum() - 1) < 1e-9 and abs(sum(tri.values()) - 1) < 1e-9
+    # 先頭の判定（同じ位置なら pet_id の小さい馬が前）: R2257 はスタートで先頭を取った首位の呪いのおいらが逃げ切った
+    r2257 = next((r for r in raw if r['schedule_id'] == 2257), None)
+    if r2257:
+        w2, _, n2 = sim.predict(r2257, seed=1)
+        assert n2[int(np.argmax(w2))] == 'おいら', dict(zip(n2, w2.round(2)))
     print(f"R{last['schedule_id']} OK:", ', '.join(f'{n} {p:.0%}' for n, p in
                                                      sorted(zip(names, win), key=lambda t: -t[1])[:3]))

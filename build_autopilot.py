@@ -190,7 +190,7 @@ def _write_sim_fixture(sim, races, race_sim):
         r2 = dict(r, horses=hs)
         sim.n_sim = 40000
         win, _, _ = sim.predict(r2, seed=7)
-        js_h = [{'name': h.get('name', ''), 'species': h.get('adult_key'),
+        js_h = [{'name': h.get('name', ''), 'species': h.get('adult_key'), 'pet_id': h.get('pet_id'),
                  'speed': h['speed'], 'power': h['power'], 'stamina': h['stamina'],
                  'passives': [oc.PASSIVE_CODE_MAP[c] for c in (h.get('passive_skill'), h.get('passive_skill_2'))
                               if c and c != 'none' and c in oc.PASSIVE_CODE_MAP],

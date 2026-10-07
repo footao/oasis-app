@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.46.0';
+const AP_VER = '1.49.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -493,7 +493,7 @@ async function analyseRace(sid, info, canBuy) {
   let winP = ridgeWin, combo = ridgeCombo, model = 'ridge';
   if (CFG.USE_SIM && M.sim && M.sim.w && M.sim.w[dist]) {
     const sr = OasisModel.simRace(pets.map((h, i) => ({
-      name: h.display_name || h.name, species: h.adult_key || null,
+      name: h.display_name || h.name, species: h.adult_key || null, pet_id: h.pet_id,
       speed: h.speed, power: h.power, stamina: h.stamina,
       passives: horses[i].passives, equipment: h.equipment, charm: h.charm,
     })), dist, track, M, M.sim.n_sim, sid);
@@ -973,6 +973,7 @@ function analyseWin(sid, pets, winP, measuredPool, budgetLeft) {
   // 少頭数の上限は M.win_small_field_hours の時刻だけ（23時の上位レースが荒れる）。キーが無い古い model.json は全時刻。
   const sfHours = M.win_small_field_hours;
   const smallField = pets.length < (M.min_field_trifecta || 8)
+    && mNum('win_small_field_max_units', 20) < (M.win_max_total_units || 100)   // 100 なら絞らない
     && (!Array.isArray(sfHours) || !sfHours.length || sfHours.includes(nextRaceTime().getHours()));
   const winTotalCap = smallField
     ? Math.min(M.win_max_total_units || 100, mNum('win_small_field_max_units', 20))

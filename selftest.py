@@ -1041,15 +1041,15 @@ def regression_tests():
               my_units=[0, 0], min_prob=0.0, skip_ratio=0)[0]),
           'min_prob=0 を渡せば従来どおり。過去データの再評価に要る')
 
-    check('P33 少頭数レースは単勝の合計上限を絞る',
-          oc.WIN_SMALL_FIELD_MAX_UNITS < oc.WIN_MAX_TOTAL_UNITS
+    check('P33 少頭数レースの単勝上限（2026/10/07 から絞らない＝100口）',
+          oc.WIN_SMALL_FIELD_MAX_UNITS == oc.WIN_MAX_TOTAL_UNITS
+          and "mNum('win_small_field_max_units', 20) < (M.win_max_total_units || 100)" in _ap
           and 'const smallField = pets.length < (M.min_field_trifecta || 8)' in _ap
           and 'sfHours.includes(nextRaceTime().getHours())' in _ap and oc.WIN_SMALL_FIELD_HOURS == (23,)
           and "mNum('win_small_field_max_units'" in _ap
           and 'totalUnits: Math.min(winTotalCap,' in _ap,
-          f'23時の{oc.MIN_FIELD_TRIFECTA}頭未満は {oc.WIN_SMALL_FIELD_MAX_UNITS}口まで'
-          f'（通常 {oc.WIN_MAX_TOTAL_UNITS}口）。9月実測で 8頭以上の単勝 回収率121% / '
-          '8頭未満 56%。0にしないのは少頭数の較正を測り続けるため')
+          f'23時の{oc.MIN_FIELD_TRIFECTA}頭未満も {oc.WIN_SMALL_FIELD_MAX_UNITS}口まで（通常と同じ）。'
+          'シミュ＋先頭判定で23時 本命1着 91%。戻すときは WIN_SMALL_FIELD_MAX_UNITS を 20 に')
     check('P33 上限は model.json 経由で JS に渡る',
           'win_small_field_max_units' in json.load(open(os.path.join(
               os.path.dirname(os.path.abspath(__file__)), 'model.json'), encoding='utf-8')),
