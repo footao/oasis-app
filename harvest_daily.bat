@@ -18,4 +18,7 @@ cd /d "%REPO%" || exit /b 1
 echo(>> harvest.log
 echo ===== %DATE% %TIME% =====>> harvest.log
 "%PY%" harvest_results.py --guild %GUILD% --user %USER_ID% --forward --count 30 --stop-after-misses 30 >> harvest.log 2>&1
-exit /b %ERRORLEVEL%
+set RC=%ERRORLEVEL%
+rem 影の運用: シミュレータの予想を記録して bot と比べる（買い方には使わない）。結果は shadow_report.txt
+"%PY%" shadow_sim.py >> shadow.log 2>&1
+exit /b %RC%

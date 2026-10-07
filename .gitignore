@@ -22,3 +22,8 @@ _parity_*.json
 # 匿名化前のログのバックアップ（実名が入っている）
 *.bak
 _handoff/
+
+# 影の運用（シミュレータ）の記録。馬名を含む
+shadow.jsonl
+shadow.log
+shadow_report.txt
