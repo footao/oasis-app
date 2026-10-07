@@ -686,10 +686,31 @@ const OasisModel = (() => {
   // 序盤/中盤/終盤だけの効果はその区間にだけ、それ以外の状況限定はカタログの平均 duty で均す。
   // 係数（rating の式・消費のぶれ・失速の表）は model.json の sim。
   const SIM_PH = ['序盤', '中盤', '終盤'];
+  const SIM_CONS = /スタミナ消費量[^。]*?(\d+(?:\.\d+)?)[%％](増加|減少)/;
+  const SIM_POS = ['duel', 'king', 'lead', 'solo'];
+  const simPosKind = t => t.includes('先頭から20m以内') ? 'king' : t.includes('20m以内') ? 'duel'
+    : t.includes('2位と50m以上') ? 'solo' : t.includes('先頭の間') ? 'lead' : null;
+  // Python: race_sim.horse_profile と同じ計算。
   function simProfile(h, dist, track, M, same) {
     const S = M.sim, ns = S.nseg[dist], n = ns[0] + ns[1] + ns[2];
     const base = { speed: +h.speed, power: +h.power, stamina: +h.stamina };
-    const fx = [];
+    const fx = [], cost = [1, 1, 1];
+    let gamble = null;
+    // 位置で決まる効果（20m以内にライバル・先頭から20m以内の2位以下・先頭の間・2位と50m以上）
+    const pos = {}; for (const k of SIM_POS) pos[k] = [{}, 1];
+    const dyn = new Set(S.pos_kinds || []);
+    const addPos = (kind, m, cm) => {
+      for (const k of Object.keys(m)) pos[kind][0][k] = (pos[kind][0][k] == null ? 1 : pos[kind][0][k]) * m[k];
+      pos[kind][1] *= cm;
+    };
+    const posCost = (m, desc) => {
+      let cm = 1;
+      const mm = desc.match(SIM_CONS);
+      if (mm) { const x = parseFloat(mm[1]) / 100; cm = mm[2] === '減少' ? 1 - x : 1 + x; delete m.stamina; }
+      if (desc.includes('スタミナ消費も増加')) cm *= S.lead_cost_up;
+      return cm;
+    };
+    const avgCost = (kind, cm) => { for (let pi = 0; pi < 3; pi++) cost[pi] *= 1 + (cm - 1) * S.pos_duty[kind]; };
     const clamp01 = d => Math.min(Math.max(d, 0), 1);
     const avg = (m, duty) => { for (const k of Object.keys(m)) if (k in base) base[k] *= 1 + (m[k] - 1) * clamp01(duty); };
     const phase = (m, arg, duty) => {
@@ -697,23 +718,63 @@ const OasisModel = (() => {
       if (pi < 0) { avg(m, duty); return; }
       const frac = ns[pi] / n, mm = {};
       for (const k of Object.keys(m)) mm[k] = 1 + (m[k] - 1) * Math.min(1, duty / frac);
-      fx.push(['phase', pi, mm]);
+      fx.push([pi, mm]);
+    };
+    const lowL = new Set(S.lowst_labels || []), leadL = new Set(S.lead_labels || []);
+    const put = (m, sc, arg, duty, label) => {
+      if (lowL.has(label)) avg(m, S.lowst_duty);
+      else if (leadL.has(label) || sc === 'lead') {
+        const mm = {}; for (const k of Object.keys(m)) if (k !== 'stamina') mm[k] = m[k];
+        avg(mm, S.lead_duty);
+      }
+      else if (sc === 'tail300') phase(m, '終盤', 3 / n);
+      else if (sc === 'phase' || (sc === 'conditional' && SIM_PH.includes(arg))) phase(m, arg, duty);
+      else if (sc === 'aptitude') { if (arg === dist || arg === track) avg(m, 1); }
+      else if (sc === 'learned' || sc === 'same_species' || sc === 'variance') return;
+      else avg(m, sc !== 'always' ? duty : 1);
     };
     for (const p of (h.passives || [])) {
       const sp = M.spec[p] || {};
-      const m = sp.mult || {};
+      const m = Object.assign({}, sp.mult || {});
       if (!Object.keys(m).length) continue;
       const sc = sp.scope;
       if (sc === 'aptitude' && sp.scope_arg !== dist && sp.scope_arg !== track) continue;
       if (sc === 'same_species' && !same) continue;
-      if (sc === 'phase') phase(m, sp.scope_arg, sp.duty == null ? 1 : +sp.duty);
-      else avg(m, (sc === 'always' || sc === 'aptitude' || sc === 'same_species') ? 1 : (sp.duty == null ? 1 : +sp.duty));
+      if (p === S.gamble) { gamble = [sp.duty == null ? 0.05 : +sp.duty, m]; continue; }
+      const pp = (S.pos_passives || {})[p];
+      if (pp) {
+        const mm = Object.assign({}, pp.mult);
+        if (dyn.has(pp.kind)) { addPos(pp.kind, mm, pp.cost); continue; }
+        avgCost(pp.kind, pp.cost);
+        for (const k of Object.keys(m)) if (!(k in mm)) delete m[k];
+        if (!Object.keys(m).length) continue;
+      }
+      const cp = (S.cost_passives || {})[p];
+      if (cp) {
+        const pis = cp[0] ? [SIM_PH.indexOf(cp[0])] : [0, 1, 2];
+        for (const pi of pis) cost[pi] *= cp[1];
+        delete m.stamina;
+        if (!Object.keys(m).length) continue;
+      }
+      if (sc === 'always' || sc === 'aptitude' || sc === 'same_species') avg(m, 1);
+      else put(m, sc, sp.scope_arg, sp.duty == null ? 1 : +sp.duty, p);
     }
-    const lowL = new Set(S.lowst_labels || []), leadL = new Set(S.lead_labels || []);
     for (const it of [h.equipment, h.charm]) {
       if (!it || typeof it !== 'object') continue;
       const label = String(it.effect_label || '').trim(), desc = String(it.effect_description || '');
       const m = pctMults(desc);
+      const kind = simPosKind(desc);
+      const cm = kind ? null : desc.match(SIM_CONS);
+      if (kind) {
+        const pcm = posCost(m, desc);
+        if (dyn.has(kind)) { addPos(kind, m, pcm); continue; }
+        avgCost(kind, pcm);
+      }
+      if (cm) {                      // 「スタミナ消費量が常時N%減少」は消費の倍率（スタミナを盛らない）
+        const x = parseFloat(cm[1]) / 100;
+        for (let pi = 0; pi < 3; pi++) cost[pi] *= cm[2] === '減少' ? 1 - x : 1 + x;
+        delete m.stamina;
+      }
       if (!Object.keys(m).length) continue;
       const c = (M.item_scope || {})[label];
       let sc, arg, duty;
@@ -726,36 +787,22 @@ const OasisModel = (() => {
         else if (desc.includes('常時')) { sc = 'always'; arg = null; duty = 1; }
         else continue;
       }
-      if (sc === 'variance') continue;
-      if (lowL.has(label)) fx.push(['lowst', null, m]);
-      else if (leadL.has(label) || sc === 'lead') {
-        const mm = {}; for (const k of Object.keys(m)) if (k !== 'stamina') mm[k] = m[k];
-        fx.push(['lead', null, mm]);
-      }
-      else if (sc === 'tail300') fx.push(['tail300', null, m]);
-      else if (sc === 'phase') phase(m, arg, duty);
-      else if (sc === 'aptitude') { if (arg === dist || arg === track) avg(m, 1); }
-      else if (sc === 'learned' || sc === 'same_species') continue;
-      else avg(m, sc !== 'always' ? duty : 1);
+      put(m, sc, arg, duty, label);
     }
     for (const k of Object.keys(base)) base[k] = Math.max(base[k], 1);
     // 消費量は区間効果を区間の割合で均した実効ステから（Python: stamina_budget と同じ式）
     const e = Object.assign({}, base);
-    for (const [kind, arg, m] of fx) if (kind === 'phase') for (const k of Object.keys(m)) e[k] *= 1 + (m[k] - 1) * ns[arg] / n;
+    for (const [pi, m] of fx) for (const k of Object.keys(m)) e[k] *= 1 + (m[k] - 1) * ns[pi] / n;
+    for (const kd of SIM_POS) for (const k of Object.keys(pos[kd][0]))       // 消費は従来どおり平均で
+      if (k !== 'stamina') e[k] *= 1 + (pos[kd][0][k] - 1) * S.pos_duty[kd];
     const need = staminaBudget(e, dist, M, 1)[0];
     const KS = ['speed', 'power', 'stamina'];
     const st = [0, 1, 2].map(() => KS.map(k => base[k]));
-    for (const [kind, arg, m] of fx) {
-      KS.forEach((k, j) => {
-        if (!(k in m)) return;
-        if (kind === 'phase') st[arg][j] *= m[k];
-        else {
-          const d = kind === 'tail300' ? 3 / n : (S.avg_duty || {})[kind];
-          for (let pi = 0; pi < 3; pi++) st[pi][j] *= 1 + (m[k] - 1) * d;
-        }
-      });
-    }
-    return { st: st, c0: need / n, s0: Math.floor(e.stamina) };
+    for (const [pi, m] of fx) KS.forEach((k, j) => { if (k in m) st[pi][j] *= m[k]; });
+    return { st: st, c0: need / n, cost: cost, s0: Math.floor(e.stamina),
+             g_p: gamble ? gamble[0] : 0, g_m: KS.map(k => gamble ? (gamble[1][k] == null ? 1 : +gamble[1][k]) : 1),
+             p_m: SIM_POS.map(kd => KS.map(k => pos[kd][0][k] == null ? 1 : pos[kd][0][k])),
+             p_c: SIM_POS.map(kd => pos[kd][1]) };
   }
 
   function simInputs(horses, dist, track, M) {
@@ -769,11 +816,14 @@ const OasisModel = (() => {
     const S = M.sim, ns = S.nseg[dist], H = horses.length;
     const prof = simInputs(horses, dist, track, M);
     const segPh = []; for (let pi = 0; pi < 3; pi++) for (let k = 0; k < ns[pi]; k++) segPh.push(pi);
-    const rv = prof.map(x => [0, 1, 2].map(pi => {
-      const w = S.w[dist][pi];
-      const r = Math.max(x.st[pi][0] * w[0] + x.st[pi][1] * w[1] + x.st[pi][2] * w[2] + w[3], 1);
-      return Math.pow(r, S.v_exp);
-    }));
+    const nseg = segPh.length;
+    const W = S.w[dist];
+    // 位置効果を持つ馬と種類（Python: has）
+    const hasP = prof.map(x => SIM_POS.map((_, j) => x.p_m[j].some(v => v !== 1) || x.p_c[j] !== 1));
+    const anyP = hasP.some(a => a.some(Boolean));
+    // 区間ごとの消費倍率と、その区間から最後までの和（見込みの余りに使う）
+    const cmS = prof.map(x => segPh.map(pi => x.cost[pi]));
+    const remS = cmS.map(a => { const r = new Array(nseg); let acc = 0; for (let k = nseg - 1; k >= 0; k--) { acc += a[k]; r[k] = acc; } return r; });
     const fqx = S.fqx, fqy = S.fqy;
     const fat = q => {                       // np.interp と同じ（端は端の値）
       if (q <= fqx[0]) return fqy[0];
@@ -783,26 +833,55 @@ const OasisModel = (() => {
     const randn = makeRng(seed == null ? 1 : seed);
     const NS = nSim || S.n_sim || 8000;
     const win = new Float64Array(H), combo = new Map(), T = new Float64Array(H);
+    const C = new Float64Array(H), ON = new Uint8Array(H), Sv = new Float64Array(H), S0 = new Float64Array(H), DT = new Float64Array(H);
+    const mul = [1, 1, 1];
     for (let it = 0; it < NS; it++) {
       for (let h = 0; h < H; h++) {
-        const c = prof[h].c0 * Math.exp(S.cost_mu + S.cost_sd * randn());
-        const s0 = Math.max(prof[h].s0, 1), nseg = segPh.length;
-        let s = prof[h].s0, t = 0;
-        for (let k = 0; k < nseg; k++) {
-          // 疲労補正は「この先を走り切ったときの見込みの余り ÷ 初期スタミナ」で引く（Python と同じ）
-          const f = Math.pow(fat((s - c * (nseg - k)) / s0), S.f_exp);
-          t += 1 / (rv[h][segPh[k]] * f * (1 + S.seg_noise * randn()));
-          s -= c;
-        }
-        // 1レース1頭ごとの調子のぶれ（区間の乱数だけだと自信過剰になる）
-        T[h] = S.horse_sd ? t * Math.exp(S.horse_sd * randn()) : t;
+        const x = prof[h];
+        C[h] = x.c0 * Math.exp(S.cost_mu + S.cost_sd * randn());
+        ON[h] = x.g_p > 0 && randn() < S.gamble_z ? 1 : 0;      // 勝負師の抽選（5%）
+        Sv[h] = ON[h] ? Math.floor(x.s0 * x.g_m[2]) : x.s0;
+        S0[h] = Math.max(Sv[h], 1);
+        T[h] = 0; DT[h] = 1;
       }
+      for (let k = 0; k < nseg; k++) {
+        const pi = segPh[k];
+        let t1 = Infinity, t2 = Infinity;                       // 先頭と2番手のタイム
+        if (anyP) for (let h = 0; h < H; h++) { const v = T[h]; if (v < t1) { t2 = t1; t1 = v; } else if (v < t2) t2 = v; }
+        for (let h = 0; h < H; h++) {
+          const x = prof[h];
+          for (let j = 0; j < 3; j++) mul[j] = ON[h] ? x.g_m[j] : 1;
+          let cmul = 1;
+          if (anyP && hasP[h].some(Boolean)) {
+            // 区間の始めの位置で判定（時間差 × 自分の速さで m に直す。Python と同じ近似）
+            const spd = S.seg_m / DT[h];
+            let near = Infinity;
+            for (let o = 0; o < H; o++) if (o !== h) near = Math.min(near, Math.abs(T[o] - T[h]));
+            const lead = T[h] === t1 && T[h] < t2;
+            const cond = [near * spd <= S.duel_m, !lead && (T[h] - t1) * spd <= S.duel_m,
+                          lead, lead && (t2 - T[h]) * spd >= S.solo_m];
+            for (let q = 0; q < SIM_POS.length; q++) if (hasP[h][q] && cond[q]) {
+              for (let j = 0; j < 3; j++) mul[j] *= x.p_m[q][j];
+              cmul *= x.p_c[q];
+            }
+          }
+          const w = W[pi], st = x.st[pi];
+          const rv = Math.pow(Math.max(st[0] * w[0] * mul[0] + st[1] * w[1] * mul[1] + st[2] * w[2] * mul[2] + w[3], 1), S.v_exp);
+          // 疲労補正は「この先を走り切ったときの見込みの余り ÷ 初期スタミナ」で引く（Python と同じ）
+          const f = Math.pow(fat((Sv[h] - C[h] * remS[h][k]) / S0[h]), S.f_exp);
+          DT[h] = 1 / (rv * f * (1 + S.seg_noise * randn()));
+          Sv[h] -= C[h] * cmS[h][k] * cmul;
+        }
+        for (let h = 0; h < H; h++) T[h] += DT[h];      // 全頭の区間が終わってから進める（Python と同じ）
+      }
+      // 1レース1頭ごとの調子のぶれ（区間の乱数だけだと自信過剰になる）
+      if (S.horse_sd) for (let h = 0; h < H; h++) T[h] *= Math.exp(S.horse_sd * randn());
       let a = -1, b = -1, c3 = -1;            // タイムの小さい順に上位3頭
       for (let i = 0; i < H; i++) {
-        const x = T[i];
-        if (a < 0 || x < T[a]) { c3 = b; b = a; a = i; }
-        else if (b < 0 || x < T[b]) { c3 = b; b = i; }
-        else if (c3 < 0 || x < T[c3]) { c3 = i; }
+        const v = T[i];
+        if (a < 0 || v < T[a]) { c3 = b; b = a; a = i; }
+        else if (b < 0 || v < T[b]) { c3 = b; b = i; }
+        else if (c3 < 0 || v < T[c3]) { c3 = i; }
       }
       win[a]++;
       if (H >= 3) { const key = (a * H + b) * H + c3; combo.set(key, (combo.get(key) || 0) + 1); }

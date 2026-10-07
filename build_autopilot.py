@@ -78,7 +78,7 @@ def main(log_path=None):
         payload['sim'] = sim.export()
         print(f'   → シミュレータ  学習{len(raw)}レース / 消費のぶれ σ{sim.cost_sd:.3f}')
         # 見本は直近4レース＋区間効果（序盤/中盤/終盤・残り300m・残スタミナ・先頭・馬場）を持つ馬がいるレース
-        want = race_sim.LOWST_LABELS | race_sim.LEAD_LABELS | {
+        want = race_sim.LOWST_LABELS | race_sim.LEAD_LABELS | race_sim.POS_LABELS | {
             '終焉加速', '幻界終走', '時界超越', '末脚', '中盤加速', 'ロケットスタート', '二の脚', '芝啜り', '泥啜り'}
         seen, extra = set(), []
         for r in reversed(raw[:-4]):

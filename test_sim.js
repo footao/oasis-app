@@ -13,7 +13,11 @@ for (const r of F) {
     const py = r.inputs;
     for (let pi = 0; pi < 3; pi++) for (let j = 0; j < 3; j++)
       worstIn = Math.max(worstIn, Math.abs(x.st[pi][j] - py.st[h][pi][j]) / Math.max(1, py.st[h][pi][j]));
-    worstIn = Math.max(worstIn, Math.abs(x.c0 - py.c0[h]) / Math.max(1e-9, py.c0[h]), Math.abs(x.s0 - py.s0[h]));
+    worstIn = Math.max(worstIn, Math.abs(x.c0 - py.c0[h]) / Math.max(1e-9, py.c0[h]), Math.abs(x.s0 - py.s0[h]),
+                       Math.abs(x.g_p - py.g_p[h]));
+    for (let pi = 0; pi < 3; pi++) worstIn = Math.max(worstIn, Math.abs(x.cost[pi] - py.cost[h][pi]), Math.abs(x.g_m[pi] - py.g_m[h][pi]));
+    for (let q = 0; q < 4; q++) { worstIn = Math.max(worstIn, Math.abs(x.p_c[q] - py.p_c[h][q]));
+      for (let j = 0; j < 3; j++) worstIn = Math.max(worstIn, Math.abs(x.p_m[q][j] - py.p_m[h][q][j])); }
   });
   const w = OasisModel.simRace(r.horses, r.dist, r.track, M, 40000, 11).win;
   w.forEach((p, i) => { worstP = Math.max(worstP, Math.abs(p - r.win[i])); });
