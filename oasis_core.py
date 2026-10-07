@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.49.0'
+CORE_VERSION = '3.50.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -2529,8 +2529,10 @@ def item_scope_table(spec=None):
             duty = float(base.get('duty', 1.0))
         elif duty is None:
             duty = 1.0 if scope == 'always' else 1.0
+        # 区間シミュレータが「中盤だけ」などを引くのに要るので、alias 先の区間も渡す
         out[label] = {'scope': scope, 'duty': float(duty),
-                      'scope_arg': cat.get('scope_arg')}
+                      'scope_arg': cat.get('scope_arg') or ((spec.get(name) or {}).get('scope_arg')
+                                                            if name else None)}
     return out
 
 

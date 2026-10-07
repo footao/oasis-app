@@ -1320,7 +1320,7 @@ def regression_tests():
     # （WIN_ON を切っていても、そのレースで買えるのは単勝だけなので出す）。
     check('P19 autopilot も7頭以下では3連単を作らない',
           'const triOk = n >= (M.min_field_trifecta || 8);' in _ap
-          and 'const combo = triOk ?' in _ap
+          and 'const ridgeCombo = triOk ?' in _ap and 'combo = triOk ? sr.combo : []' in _ap
           and 'const triPicks = triOk ? await analyseTrifecta(' in _ap,
           '組のシミュレーションごと回さない')
     check('P19 autopilot は3連単が無いレースで単勝を強制的に出す',

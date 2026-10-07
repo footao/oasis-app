@@ -680,7 +680,138 @@ const OasisModel = (() => {
     return [bk, bo, u];
   }
 
+  // ===== 区間シミュレータ（Python: race_sim.py。2026/10/07〜 bot の予想はこちら）=====
+  // ゲームと同じく区間ごとに rating → 速度、スタミナを減らし、残りに応じて失速、乱数を入れて
+  // タイムを足し上げる。消費量はレースごとにぶれる（±6%）ので、それも振る。
+  // 序盤/中盤/終盤だけの効果はその区間にだけ、それ以外の状況限定はカタログの平均 duty で均す。
+  // 係数（rating の式・消費のぶれ・失速の表）は model.json の sim。
+  const SIM_PH = ['序盤', '中盤', '終盤'];
+  function simProfile(h, dist, track, M, same) {
+    const S = M.sim, ns = S.nseg[dist], n = ns[0] + ns[1] + ns[2];
+    const base = { speed: +h.speed, power: +h.power, stamina: +h.stamina };
+    const fx = [];
+    const clamp01 = d => Math.min(Math.max(d, 0), 1);
+    const avg = (m, duty) => { for (const k of Object.keys(m)) if (k in base) base[k] *= 1 + (m[k] - 1) * clamp01(duty); };
+    const phase = (m, arg, duty) => {
+      const pi = SIM_PH.indexOf(arg);
+      if (pi < 0) { avg(m, duty); return; }
+      const frac = ns[pi] / n, mm = {};
+      for (const k of Object.keys(m)) mm[k] = 1 + (m[k] - 1) * Math.min(1, duty / frac);
+      fx.push(['phase', pi, mm]);
+    };
+    for (const p of (h.passives || [])) {
+      const sp = M.spec[p] || {};
+      const m = sp.mult || {};
+      if (!Object.keys(m).length) continue;
+      const sc = sp.scope;
+      if (sc === 'aptitude' && sp.scope_arg !== dist && sp.scope_arg !== track) continue;
+      if (sc === 'same_species' && !same) continue;
+      if (sc === 'phase') phase(m, sp.scope_arg, sp.duty == null ? 1 : +sp.duty);
+      else avg(m, (sc === 'always' || sc === 'aptitude' || sc === 'same_species') ? 1 : (sp.duty == null ? 1 : +sp.duty));
+    }
+    const lowL = new Set(S.lowst_labels || []), leadL = new Set(S.lead_labels || []);
+    for (const it of [h.equipment, h.charm]) {
+      if (!it || typeof it !== 'object') continue;
+      const label = String(it.effect_label || '').trim(), desc = String(it.effect_description || '');
+      const m = pctMults(desc);
+      if (!Object.keys(m).length) continue;
+      const c = (M.item_scope || {})[label];
+      let sc, arg, duty;
+      if (c) { sc = c.scope; arg = c.scope_arg; duty = c.duty == null ? 1 : +c.duty; }
+      else {
+        const code = String(it.effect_key || '').replace(/^(?:gear|charm|item)_/, '');
+        const alias = (M.code_map || {})[code] || (M.item_key_alias || {})[code];
+        const a = alias ? (M.spec[alias] || {}) : null;
+        if (a) { sc = a.scope || 'conditional'; arg = a.scope_arg; duty = a.duty == null ? 1 : +a.duty; }
+        else if (desc.includes('常時')) { sc = 'always'; arg = null; duty = 1; }
+        else continue;
+      }
+      if (sc === 'variance') continue;
+      if (lowL.has(label)) fx.push(['lowst', null, m]);
+      else if (leadL.has(label) || sc === 'lead') {
+        const mm = {}; for (const k of Object.keys(m)) if (k !== 'stamina') mm[k] = m[k];
+        fx.push(['lead', null, mm]);
+      }
+      else if (sc === 'tail300') fx.push(['tail300', null, m]);
+      else if (sc === 'phase') phase(m, arg, duty);
+      else if (sc === 'aptitude') { if (arg === dist || arg === track) avg(m, 1); }
+      else if (sc === 'learned' || sc === 'same_species') continue;
+      else avg(m, sc !== 'always' ? duty : 1);
+    }
+    for (const k of Object.keys(base)) base[k] = Math.max(base[k], 1);
+    // 消費量は区間効果を区間の割合で均した実効ステから（Python: stamina_budget と同じ式）
+    const e = Object.assign({}, base);
+    for (const [kind, arg, m] of fx) if (kind === 'phase') for (const k of Object.keys(m)) e[k] *= 1 + (m[k] - 1) * ns[arg] / n;
+    const need = staminaBudget(e, dist, M, 1)[0];
+    const KS = ['speed', 'power', 'stamina'];
+    const st = [0, 1, 2].map(() => KS.map(k => base[k]));
+    for (const [kind, arg, m] of fx) {
+      KS.forEach((k, j) => {
+        if (!(k in m)) return;
+        if (kind === 'phase') st[arg][j] *= m[k];
+        else {
+          const d = kind === 'tail300' ? 3 / n : (S.avg_duty || {})[kind];
+          for (let pi = 0; pi < 3; pi++) st[pi][j] *= 1 + (m[k] - 1) * d;
+        }
+      });
+    }
+    return { st: st, c0: need / n, s0: Math.floor(e.stamina) };
+  }
+
+  function simInputs(horses, dist, track, M) {
+    const same = sameSpeciesFlags(horses);
+    return horses.map((h, i) => simProfile(h, dist, track, M, same[i]));
+  }
+
+  // horses: [{name, species, speed, power, stamina, passives(日本語名), equipment, charm}]
+  // （speed などは API の値そのまま＝装備の加算込み・倍率なし）
+  function simRace(horses, dist, track, M, nSim, seed) {
+    const S = M.sim, ns = S.nseg[dist], H = horses.length;
+    const prof = simInputs(horses, dist, track, M);
+    const segPh = []; for (let pi = 0; pi < 3; pi++) for (let k = 0; k < ns[pi]; k++) segPh.push(pi);
+    const rv = prof.map(x => [0, 1, 2].map(pi => {
+      const w = S.w[dist][pi];
+      const r = Math.max(x.st[pi][0] * w[0] + x.st[pi][1] * w[1] + x.st[pi][2] * w[2] + w[3], 1);
+      return Math.pow(r, S.v_exp);
+    }));
+    const fqx = S.fqx, fqy = S.fqy;
+    const fat = q => {                       // np.interp と同じ（端は端の値）
+      if (q <= fqx[0]) return fqy[0];
+      for (let i = 1; i < fqx.length; i++) if (q <= fqx[i]) return fqy[i - 1] + (fqy[i] - fqy[i - 1]) * (q - fqx[i - 1]) / (fqx[i] - fqx[i - 1]);
+      return fqy[fqy.length - 1];
+    };
+    const randn = makeRng(seed == null ? 1 : seed);
+    const NS = nSim || S.n_sim || 8000;
+    const win = new Float64Array(H), combo = new Map(), T = new Float64Array(H);
+    for (let it = 0; it < NS; it++) {
+      for (let h = 0; h < H; h++) {
+        const c = prof[h].c0 * Math.exp(S.cost_mu + S.cost_sd * randn());
+        let s = prof[h].s0, t = 0;
+        for (let k = 0; k < segPh.length; k++) {
+          const f = Math.pow(fat(s / c), S.f_exp);
+          t += 1 / (rv[h][segPh[k]] * f * (1 + S.seg_noise * randn()));
+          s -= c;
+        }
+        T[h] = t;
+      }
+      let a = -1, b = -1, c3 = -1;            // タイムの小さい順に上位3頭
+      for (let i = 0; i < H; i++) {
+        const x = T[i];
+        if (a < 0 || x < T[a]) { c3 = b; b = a; a = i; }
+        else if (b < 0 || x < T[b]) { c3 = b; b = i; }
+        else if (c3 < 0 || x < T[c3]) { c3 = i; }
+      }
+      win[a]++;
+      if (H >= 3) { const key = (a * H + b) * H + c3; combo.set(key, (combo.get(key) || 0) + 1); }
+    }
+    const comboP = [];
+    for (const [k, v] of combo) comboP.push({ i: Math.floor(k / (H * H)), j: Math.floor(k / H) % H, k: k % H, p: v / NS });
+    comboP.sort((x, y) => y.p - x.p);
+    return { win: Array.from(win, x => x / NS), combo: comboP, inputs: prof };
+  }
+
   return { effectiveStats, sigmaMultiplier, rowFeatures, predictBase, marketFavPick,
+           simInputs, simRace,
            sameSpeciesFlags, simulateTrifecta, horseSigmas, makeRng,
            pctMults, itemMult, applyItems, leadAdjustedBase,
            marketWinProb, diagnoseOddsFloor, winBetPicksPool,

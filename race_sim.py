@@ -9,17 +9,18 @@ ENGINE_NOTES.md で逆算したゲームの仕組みをそのまま組み立て�
 
 区間で発動する効果の扱い:
   phase     序盤/中盤/終盤の区間にだけ掛ける（ロケットスタート・中盤加速・末脚・時界超越など）
-  tail300 / lowst / lead は既定（dynamic='avg'）ではカタログの平均 duty で均す。
-    dynamic=True で「残り300m・残りスタミナ25%（10/06〜30%）以下・シミュ上で先頭」の区間にだけ
-    掛けることもできるが、前向き検証189レースでは均したほうが良かった
-    （単勝LL 0.523 vs 0.547、3連単LL 1.561 vs 1.577。差は1σ未満）。
-  それ以外（競り合い・下位半分など位置関係で決まるもの）は平均の duty で均す。
-前向き検証（9/2〜10/6・189レース、Ridge＝今のモデル）:
+  tail300 / lowst / lead（残り300m・残りスタミナ以下・先頭の間）とそれ以外の状況限定は、
+            カタログの平均 duty で均す。シミュ上で発動した区間にだけ掛ける版も試したが、
+            前向き検証189レースで均したほうが良かった（単勝LL 0.523 vs 0.547）ので消した。
+前向き検証（9/2〜10/6・189レース、Ridge＝従来モデル）:
   本命1着 84.7%→86.2% / 単勝LL 0.567→0.523（−1.6σ） / 3連単LL 1.583→1.561 / 上位3頭 75.3%→79.4%（+1.6σ）
 
-bot の買い方には使っていない。shadow_sim.py が毎レースの予想を記録して、今のモデルと比べる。
+2026/10/07 から bot の予想はこれ（JS: model.js の simRace。係数は model.json の sim）。
+従来の Ridge の予想は比較用に reports の rw/rc に残す。
 """
 import math
+import re
+
 import numpy as np
 import oasis_core as oc
 
@@ -28,10 +29,9 @@ PH_TL = ('early', 'middle', 'late')
 NSEG = {'短距離': (3, 4, 3), 'マイル': (4, 6, 5), '中距離': (6, 8, 6), '長距離': (7, 10, 8)}
 V_EXP, F_EXP = 0.8709, 0.9136
 SEG_NOISE = 0.0119
-LEAD_COST = 1.04                          # 先頭の間はスタミナ消費 ×1.04（ENGINE_NOTES 追記1）
-LOWST_PATCH = '2026-10-06'                # この日から「スタミナ25%以下」→「30%以下」
 LOWST_LABELS = {'血走り', '骨砕き', '紅蓮点火', '深淵反転', '禍福転倒'}
 LEAD_LABELS = {'首位の呪い', '王冠過給', '先導祈願'}
+AVG_DUTY = {'lowst': 0.183, 'lead': 0.079}   # tail300 は 3区間/区間数
 
 
 def _phase_idx(arg):
@@ -96,7 +96,7 @@ def horse_profile(h, dist, track, spec, same_species, scope_tbl=None):
         cat = oc.ITEM_EFFECT_CATALOG.get(label) or {}
         alias = cat.get('alias')
         if not alias and not cat:
-            code = str(it.get('effect_key') or '').replace('gear_', '').replace('charm_', '')
+            code = re.sub(r'^(?:gear|charm|item)_', '', str(it.get('effect_key') or ''))
             alias = oc.PASSIVE_CODE_MAP.get(code) or oc.ITEM_KEY_ALIAS.get(code)
         if alias:
             a = spec.get(alias) or {}
@@ -136,35 +136,43 @@ class RaceSim:
         self.scope_tbl = oc.item_scope_table(self.spec)
         self.n_sim, self.rng = n_sim, np.random.default_rng(seed)
 
-    # ---- 1レースを「馬ごとの配列」にする ----
+    # ---- 1レースを「馬ごとの配列」にする（JS: simInputs と同じ計算）----
     def _race(self, r):
         dist, track = r.get('distance'), r.get('surface')
         if dist not in NSEG:
             return None
+        n = sum(NSEG[dist])
         hs = [h for h in (r.get('horses') or r.get('pets') or []) if h.get('speed') is not None]
         same = oc.same_species_flags([h.get('name', '') for h in hs], [h.get('adult_key') for h in hs])
         rows = []
         for h, sm in zip(hs, same):
-            base, fx, sig, ps = horse_profile(h, dist, track, self.spec, sm, self.scope_tbl)
-            # 消費量は「平均に均した」実効ステから（stamina_budget と同じ式）
+            base, fx, _, _ = horse_profile(h, dist, track, self.spec, sm, self.scope_tbl)
+            # 消費量は「区間効果を区間の割合で均した」実効ステから（stamina_budget と同じ式）
             e = dict(base)
             for kind, arg, m in fx:
                 if kind == 'phase':
-                    frac = NSEG[dist][arg] / sum(NSEG[dist])
                     for k, x in m.items():
-                        e[k] *= 1.0 + (x - 1.0) * frac
+                        e[k] *= 1.0 + (x - 1.0) * NSEG[dist][arg] / n
             need, _, _ = oc.stamina_budget(e, dist)
-            pstats = []
-            for pi in range(3):
-                s = dict(base)
-                for kind, arg, m in fx:
-                    if kind == 'phase' and arg == pi:
-                        for k, x in m.items():
-                            s[k] *= x
-                pstats.append([s['speed'], s['power'], s['stamina']])
-            rows.append(dict(h=h, base=base, fx=fx, sig=sig, pstats=np.array(pstats),
-                             c0=need / sum(NSEG[dist]), s0=math.floor(e['stamina'])))
-        return dict(dist=dist, track=track, rows=rows, date=str(r.get('race_date') or ''))
+            st = np.array([[base['speed'], base['power'], base['stamina']]] * 3)
+            for kind, arg, m in fx:
+                for j, k in enumerate(('speed', 'power', 'stamina')):
+                    if k not in m:
+                        continue
+                    if kind == 'phase':
+                        st[arg, j] *= m[k]
+                    else:          # 残り300m・残スタミナ・先頭は平均 duty で全区間に均す
+                        d = 3.0 / n if kind == 'tail300' else AVG_DUTY[kind]
+                        st[:, j] *= 1.0 + (m[k] - 1.0) * d
+            rows.append(dict(h=h, st=st, c0=need / n, s0=math.floor(e['stamina'])))
+        return dict(dist=dist, track=track, rows=rows)
+
+    def inputs(self, r):
+        """一致検証用: 馬ごとの [フェーズ×ステ] と 1区間の消費・初期スタミナ。"""
+        R = self._race(r)
+        return {'dist': R['dist'], 'names': [x['h'].get('name', '') for x in R['rows']],
+                'st': [x['st'].round(9).tolist() for x in R['rows']],
+                'c0': [round(x['c0'], 9) for x in R['rows']], 's0': [x['s0'] for x in R['rows']]}
 
     # ---- 学習: rating の式・消費のぶれ・失速の表 ----
     def fit(self, races):
@@ -182,7 +190,7 @@ class RaceSim:
                 for pi, ph in enumerate(PH_TL):
                     v = [s['rating'] for s in tl[1:] if s.get('phase') == ph and s.get('rating')]
                     if v:
-                        X[(R['dist'], pi)].append(row['pstats'][pi])
+                        X[(R['dist'], pi)].append(row['st'][pi])
                         Y[(R['dist'], pi)].append(float(np.median(v)))
                 cs = [s['stamina_cost'] for s in tl[1:] if s.get('stamina_cost')]
                 if cs and row['c0'] > 0:
@@ -193,13 +201,12 @@ class RaceSim:
                         fq.append((a / c, f))
         self.W = {}
         for key in X:
-            A = np.array(X[key]); y = np.array(Y[key])
+            A, y = np.array(X[key]), np.array(Y[key])
             if len(y) < 20:
                 self.W[key] = (np.array([1.0, 1.0, 1.0]) / 3, 0.0)
                 continue
-            A1 = np.hstack([A, np.ones((len(A), 1))])
-            w, *_ = np.linalg.lstsq(A1, y, rcond=None)
-            self.W[key] = (w[:3], w[3])
+            w, *_ = np.linalg.lstsq(np.hstack([A, np.ones((len(A), 1))]), y, rcond=None)
+            self.W[key] = (w[:3], float(w[3]))
         self.cost_mu, self.cost_sd = float(np.mean(cr)), float(np.std(cr))
         fq = np.array(fq)
         edges = [-99, -.5, 0, .25, .5, .75, 1, 1.5, 3, 99]
@@ -209,66 +216,36 @@ class RaceSim:
                              for lo, hi in zip(edges[:-1], edges[1:])])
         return self
 
-    # ---- 予測 ----
-    def predict(self, r, dynamic='avg', use_sig=False, seed=None):
-        """→ (勝率[H], 3連単 {(i,j,k): 確率}, 馬名リスト)。
+    def export(self):
+        """model.json の sim（JS の simRace が読む）。"""
+        return {'nseg': {d: list(v) for d, v in NSEG.items()},
+                'w': {d: [[float(x) for x in self.W[(d, pi)][0]] + [float(self.W[(d, pi)][1])]
+                          for pi in range(3)] for d in NSEG},
+                'cost_mu': self.cost_mu, 'cost_sd': self.cost_sd,
+                'fqx': [float(x) for x in self.FQX], 'fqy': [float(x) for x in self.FQY],
+                'v_exp': V_EXP, 'f_exp': F_EXP, 'seg_noise': SEG_NOISE, 'n_sim': self.n_sim,
+                'avg_duty': dict(AVG_DUTY), 'lowst_labels': sorted(LOWST_LABELS),
+                'lead_labels': sorted(LEAD_LABELS)}
 
-        dynamic: 'avg'（既定）= 残り300m・残スタミナ・先頭の効果を平均 duty で均す /
-                 True = シミュレーション上で発動した区間にだけ掛ける / False = それらを入れない
-        use_sig: 安定感などの乱数幅の縮小を区間の乱数に掛けるか（検証で差なし）
-        """
+    # ---- 予測 ----
+    def predict(self, r, seed=None):
+        """→ (勝率[H], 3連単 {(i,j,k): 確率}, 馬名リスト)。"""
         R = self._race(r)
         rows, d = R['rows'], R['dist']
         rng = self.rng if seed is None else np.random.default_rng(seed)   # 比較は同じ乱数で
-        H, NS, ns = len(rows), self.n_sim, NSEG[R['dist']]
-        n = sum(ns)
-        thr = 0.30 if R['date'] >= LOWST_PATCH else 0.25
-        phase_of = np.repeat(np.arange(3), ns)
+        H, NS, ns = len(rows), self.n_sim, NSEG[d]
         c = np.array([x['c0'] for x in rows])[None, :] * np.exp(
             self.cost_mu + self.cost_sd * rng.standard_normal((NS, H)))
-        S0 = np.array([x['s0'] for x in rows], float)[None, :]
-        sig = np.array([x['sig'] if use_sig else 1.0 for x in rows])[None, :]
-        stat = np.stack([x['pstats'] for x in rows])            # H×3フェーズ×3ステ
-        if not dynamic:                                         # 区間効果を均した v1 相当
-            avg = stat.mean(1, keepdims=True)
-            w_ = np.array(ns, float) / n
-            avg = (stat * w_[None, :, None]).sum(1, keepdims=True)
-            stat = np.repeat(avg, 3, 1)
-        dyn = [[(kind, arg, m) for kind, arg, m in x['fx'] if kind != 'phase'] for x in rows]
-        if dynamic == 'avg':          # 比較用: 区間で発動する効果をカタログの平均 duty で均す
-            AVG = {'tail300': 3.0 / n, 'lowst': 0.183, 'lead': 0.079}
-            for hi, effs in enumerate(dyn):
-                for kind, arg, m in effs:
-                    for j, key in enumerate(('speed', 'power', 'stamina')):
-                        if key in m:
-                            stat[hi, :, j] *= 1.0 + (m[key] - 1.0) * AVG[kind]
-            dyn = [[] for _ in rows]
-        T = np.zeros((NS, H)); s = np.repeat(S0, NS, 0).astype(float)
-        for k, pi in enumerate(phase_of):
-            st = np.repeat(stat[None, :, pi, :], NS, 0)          # NS×H×3
-            cost = c.copy()
-            if dynamic:
-                lead = (np.argmin(T, 1) if k else np.argmax(stat[:, pi, 0])[None].repeat(NS))
-                for hi, effs in enumerate(dyn):
-                    for kind, arg, m in effs:
-                        if kind == 'tail300':
-                            on = np.full(NS, k >= n - 3)
-                        elif kind == 'lowst':
-                            on = s[:, hi] <= thr * S0[0, hi]
-                        elif kind == 'lead':
-                            on = lead == hi
-                            cost[on, hi] *= LEAD_COST
-                        else:
-                            continue
-                        for j, key in enumerate(('speed', 'power', 'stamina')):
-                            if key in m:
-                                st[on, hi, j] *= m[key]
-            w, b = self.W[(d, pi)]
-            rating = np.maximum(st @ w + b, 1.0)
-            f = np.interp(s / cost, self.FQX, self.FQY)
-            v = rating ** V_EXP * f ** F_EXP * (1 + SEG_NOISE * sig * rng.standard_normal((NS, H)))
-            T += 1.0 / v
-            s = s - cost
+        s = np.repeat(np.array([x['s0'] for x in rows], float)[None, :], NS, 0)
+        st = np.stack([x['st'] for x in rows])                  # H×3フェーズ×3ステ
+        rating = np.stack([np.maximum(st[:, pi, :] @ self.W[(d, pi)][0] + self.W[(d, pi)][1], 1.0)
+                           for pi in range(3)], 1)             # H×3
+        T = np.zeros((NS, H))
+        for pi in np.repeat(np.arange(3), ns):
+            f = np.interp(s / c, self.FQX, self.FQY)
+            T += 1.0 / (rating[None, :, pi] ** V_EXP * f ** F_EXP
+                        * (1 + SEG_NOISE * rng.standard_normal((NS, H))))
+            s = s - c
         order = np.argsort(T, 1)
         win = np.bincount(order[:, 0], minlength=H) / NS
         tri = {}

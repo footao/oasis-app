@@ -65,9 +65,31 @@ def main(log_path=None):
         print('   races.jsonl（または logg/）に十分なデータが入っているか確認してください。')
         return 1
 
-    payload = oc.export_model_json(bundle, os.path.join(HERE, 'model.json'))
+    payload = oc.export_model_json(bundle)
     print(f'\n   → model.json  学習{n_races}レース / 係数{len(payload["coef"])}個'
           f' / σ単勝 {payload["race_sigma"]:.4f} / σ3連単 {payload["tri_sigma"]:.4f}')
+    # 区間シミュレータ（2026/10/07〜 bot の予想はこちら。Ridge は比較用に記録だけ）
+    if jsonl:
+        import race_sim
+        since = oc.JSONL_TRAIN_FROM.replace('/', '-')
+        raw = [json.loads(l) for l in io.open(os.path.join(HERE, log_path), encoding='utf-8') if l.strip()]
+        raw = [r for r in raw if str(r.get('race_date', '')) >= since and r.get('distance') in race_sim.NSEG]
+        sim = race_sim.RaceSim(n_sim=8000).fit(raw)
+        payload['sim'] = sim.export()
+        print(f'   → シミュレータ  学習{len(raw)}レース / 消費のぶれ σ{sim.cost_sd:.3f}')
+        # 見本は直近4レース＋区間効果（序盤/中盤/終盤・残り300m・残スタミナ・先頭・馬場）を持つ馬がいるレース
+        want = race_sim.LOWST_LABELS | race_sim.LEAD_LABELS | {
+            '終焉加速', '幻界終走', '時界超越', '末脚', '中盤加速', 'ロケットスタート', '二の脚', '芝啜り', '泥啜り'}
+        seen, extra = set(), []
+        for r in reversed(raw[:-4]):
+            labs = {(it or {}).get('effect_label') for h in r['horses'] for it in (h.get('equipment'), h.get('charm'))
+                    if isinstance(it, dict)} & (want - seen)
+            if labs:
+                seen |= labs
+                extra.append(r)
+        _write_sim_fixture(sim, raw[-4:] + extra[:12], race_sim)
+    io.open(os.path.join(HERE, 'model.json'), 'w', encoding='utf-8').write(
+        json.dumps(payload, ensure_ascii=False, separators=(',', ':')))
 
     step(2, 'autopilot.bundle.js を作る（モデル埋め込み）')
     model_js = minify.minify_js(io.open(os.path.join(SRC, 'model.js'), encoding='utf-8').read())
@@ -115,20 +137,23 @@ def main(log_path=None):
             print('      それ以外（Traceback など）は検証スクリプト側の問題です。')
             return 1
 
-    # 金に直結する autopilot のブロック（オッズの取り損ね・CO・2・3着の順番補正）を実際に動かす
-    tp = os.path.join(HERE, 'test_autopilot.js')
-    if os.path.exists(tp):
+    # 金に直結する autopilot のブロック（オッズの取り損ね・CO・2・3着の順番補正）と、
+    # 区間シミュレータの Python↔JS 一致を実際に動かす
+    for tp in (os.path.join(HERE, 'test_autopilot.js'), os.path.join(HERE, 'test_sim.js')):
+        if not os.path.exists(tp):
+            continue
         try:
             r = subprocess.run(['node', tp], capture_output=True, text=True,
                                encoding='utf-8', errors='replace')
             last = (r.stdout.strip().splitlines() or [''])[-1]
             if r.returncode != 0:
-                print('   ❌ autopilot のブロックテストに失敗しました。ここで止めます。')
+                print(f'   ❌ {os.path.basename(tp)} に失敗しました。ここで止めます。')
                 print('   ' + (r.stderr or r.stdout).strip().replace('\n', '\n   ')[:800])
                 return 1
             print('   ' + last)
         except FileNotFoundError:
             unverified = True
+            break
 
     step(5, '構文チェック')
     for f, label in [('autopilot.bundle.js', 'バンドル')]:
@@ -154,6 +179,27 @@ def main(log_path=None):
             print('   ⚠ ただし node が無いので、JS の構文と Python↔JS の一致は【未検証】です。'
                   ' https://nodejs.org から入れると自動で検証します。')
     return 0 if ok else 1
+
+
+def _write_sim_fixture(sim, races, race_sim):
+    """test_sim.js 用の見本: 直近数レースの Python 側の入力と勝率（4万回）。"""
+    import oasis_core as oc
+    out = []
+    for r in races:
+        hs = [h for h in r['horses'] if h.get('speed') is not None]
+        r2 = dict(r, horses=hs)
+        sim.n_sim = 40000
+        win, _, _ = sim.predict(r2, seed=7)
+        js_h = [{'name': h.get('name', ''), 'species': h.get('adult_key'),
+                 'speed': h['speed'], 'power': h['power'], 'stamina': h['stamina'],
+                 'passives': [oc.PASSIVE_CODE_MAP[c] for c in (h.get('passive_skill'), h.get('passive_skill_2'))
+                              if c and c != 'none' and c in oc.PASSIVE_CODE_MAP],
+                 'equipment': h.get('equipment'), 'charm': h.get('charm')} for h in hs]
+        out.append({'sid': r.get('schedule_id'), 'dist': r['distance'], 'track': r.get('surface'),
+                    'horses': js_h, 'inputs': sim.inputs(r2), 'win': [float(x) for x in win]})
+    sim.n_sim = 8000
+    io.open(os.path.join(HERE, '_parity_sim.json'), 'w', encoding='utf-8').write(
+        json.dumps(out, ensure_ascii=False))
 
 
 def _write_setup_page(combined, mod):

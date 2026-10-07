@@ -75,3 +75,38 @@ console.assert(r.cands.length===1 && r.cands[0].pr===null, '取り損ねなら�
 
 
 }
+{
+// analyseRace の予想の部分を実際に動かす: 区間シミュレータで買い、従来モデルを rw/rc に残すこと
+const fs = require('fs'), path = require('path');
+const src = fs.readFileSync(path.join(__dirname, 'bookmarklets', 'src', 'autopilot.js'), 'utf8');
+const fn = src.slice(src.indexOf('async function analyseRace('), src.indexOf('// ---- 3連単 ----'));
+const fxPath = path.join(__dirname, '_parity_sim.json');
+if (fs.existsSync(fxPath)) {
+  const M = JSON.parse(fs.readFileSync(path.join(__dirname, 'model.json'), 'utf8'));
+  const OasisModel = require('./bookmarklets/src/model.js');
+  const F = JSON.parse(fs.readFileSync(fxPath, 'utf8'));
+  const r = F.find(x => x.horses.length >= 8) || F[0];
+  const code = {}; for (const [c, n] of Object.entries(M.code_map)) code[n] = c;
+  const pets = r.horses.map((h, i) => ({ pet_id: i, name: h.name, display_name: h.name, adult_key: h.species,
+    speed: h.speed, power: h.power, stamina: h.stamina, odds: 10,
+    passive_skill: code[h.passives[0]] || 'none', passive_skill_2: code[h.passives[1]] || 'none',
+    equipment: h.equipment, charm: h.charm }));
+  const CFG = { N_SIM: 2000, USE_SIM: true, RACE_BUDGET: 300000, DAILY_BUDGET: 1800000, WIN_ON: true, WIN_PROBE: false };
+  const ST = { spent: 0 }, log = () => {}, esc = s => s, fx = (v, d) => (+v).toFixed(d);
+  const mNum = (k, d) => (M[k] != null ? +M[k] : d), bankroll = () => 2000000;
+  let gotCombo = null, gotWin = null, LAST_NOBET = null;
+  const analyseTrifecta = async (sid, p, combo) => { gotCombo = combo; return { picks: [], cost: 0, cand: [] }; };
+  const analyseWin = (sid, p, winP) => { gotWin = winP; return { picks: [], cost: 0 }; };
+  let analyseRace; eval(fn.replace('async function analyseRace', 'analyseRace = async function'));
+  (async () => {
+    await analyseRace(r.sid, { pets: pets, distance: r.dist, surface: r.track }, true);
+    const c = LAST_NOBET || {};
+    const sim = OasisModel.simRace(r.horses, r.dist, r.track, M, M.sim.n_sim, r.sid).win;
+    console.assert(c.model === 'sim', 'analyseRace は区間シミュレータで予想する');
+    console.assert(gotWin && gotWin.every((p, i) => Math.abs(p - sim[i]) < 1e-12), '単勝の確率はシミュレータのもの');
+    console.assert(gotCombo && gotCombo.length && Math.abs(gotCombo.reduce((a, x) => a + x.p, 0) - 1) < 1e-9, '3連単の確率はシミュレータのもの');
+    console.assert(c.rw && c.rw.length === 5 && c.rc && c.rc.length === 10, '従来モデルの予想を rw/rc に残す');
+    console.log('analyseRace: model', c.model, '/ 従来の本命', c.rw && c.rw[0].n);
+  })().catch(e => { failed++; console.error('❌ analyseRace が落ちた: ' + (e && e.stack || e)); });
+}
+}

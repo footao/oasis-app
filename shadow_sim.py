@@ -67,6 +67,10 @@ def record(sim, r, rep):
         out['bot_win'] = [[w['n'], w['p']] for w in (rep.get('wc') or [])]
         out['bot_tri'] = [[c['n'], c['p']] for c in (rep.get('cand') or [])]
         out['bot_ver'] = f"{rep.get('v')}/{rep.get('c')}"
+        out['bot_model'] = rep.get('m', 'ridge')
+        if rep.get('rw'):        # 10/07〜 bot はシミュレータで買い、従来モデルの予想を rw/rc に残す
+            out['ridge_win'] = [[w['n'], w['p']] for w in rep['rw']]
+            out['ridge_tri'] = [[c['n'], c['p']] for c in (rep.get('rc') or [])]
     return out
 
 
@@ -78,7 +82,7 @@ def metrics(rows, who):
             wl, pw, tl = x['sim_win'], x['sim_p_winner'], x['sim_tri']
             pt = x['sim_p_tri']
         else:
-            wl, tl = x['bot_win'], x['bot_tri']
+            wl, tl = (x['bot_win'], x['bot_tri']) if who == 'bot' else (x['ridge_win'], x['ridge_tri'])
             pw = next((p for n, p in wl if n == w), 0.0)
             pt = next((p for n, p in tl if list(n) == x['result']), 0.0)
         fav.append(int(bool(wl) and wl[0][0] == w))
@@ -95,7 +99,7 @@ def diff_line(label, a, b, fmt):
         return f'{label}: データ不足'
     se = d.std(ddof=1) / math.sqrt(len(d))
     z = d.mean() / se if se > 0 else 0.0
-    return (f'{label}: bot {fmt(np.mean(b))} / シミュ {fmt(np.mean(a))}'
+    return (f'{label}: 従来 {fmt(np.mean(b))} / シミュ {fmt(np.mean(a))}'
             f'（差 {d.mean():+.4f} ± {se:.4f}、{z:+.1f}σ）')
 
 
@@ -134,18 +138,30 @@ def main():
         for x in new:
             f.write(json.dumps(x, ensure_ascii=False) + '\n')
 
-    rows = [x for x in done.values() if x['date'] >= a.since and x.get('bot_win')]
-    rows.sort(key=lambda x: x['sid'])
-    L = [f'影の運用（シミュレータ vs bot の実際の予想） {a.since}〜  追加 {len(new)}レース']
+    pct = lambda v: f'{v * 100:.1f}%'
+    num = lambda v: f'{v:.3f}'
+
+    def table(L, rows, a_who, b_who, a_lab, b_lab):
+        A, B = metrics(rows, a_who), metrics(rows, b_who)
+        L.append(f'比べたレース {len(rows)}（3連単は8頭以上 {len(A["tll"])}）  左={b_lab} / 右={a_lab}')
+        L.append(diff_line('本命1着', A['fav'], B['fav'], pct))
+        L.append(diff_line('単勝の予想誤差（小さいほど良い）', A['wll'], B['wll'], num))
+        L.append(diff_line('3連単の予想誤差（小さいほど良い）', A['tll'], B['tll'], num))
+        L.append(diff_line('3連単本命の3頭が上位3頭', A['s3'], B['s3'], pct))
+
+    allr = sorted((x for x in done.values() if x['date'] >= a.since and x.get('bot_win')),
+                  key=lambda x: x['sid'])
+    live = [x for x in allr if x.get('ridge_win')]          # bot がシミュレータで買った回
+    old = [x for x in allr if not x.get('ridge_win')]       # bot が従来モデルで買っていた回
+    L = [f'シミュレータ vs 従来モデル {a.since}〜  追加 {len(new)}レース']
+    if live:
+        L.append('【本番】bot＝シミュレータ / 従来モデルは記録のみ（bot の表示の「bot」＝シミュレータ）')
+        table(L, live, 'bot', 'ridge', 'シミュ', '従来')
+    if old:
+        L.append('【影の運用】bot＝従来モデル / シミュレータはオフラインで再現')
+        table(L, old, 'sim', 'bot', 'シミュ', '従来')
+    rows = allr
     if rows:
-        S, B = metrics(rows, 'sim'), metrics(rows, 'bot')
-        L.append(f'比べたレース {len(rows)}（3連単は8頭以上 {len(S["tll"])}）')
-        pct = lambda v: f'{v * 100:.1f}%'
-        num = lambda v: f'{v:.3f}'
-        L.append(diff_line('本命1着', S['fav'], B['fav'], pct))
-        L.append(diff_line('単勝の予想誤差（小さいほど良い）', S['wll'], B['wll'], num))
-        L.append(diff_line('3連単の予想誤差（小さいほど良い）', S['tll'], B['tll'], num))
-        L.append(diff_line('3連単本命の3頭が上位3頭', S['s3'], B['s3'], pct))
         last = rows[-1]
         L.append(f"直近 R{last['sid']}: 結果 {' → '.join(last['result'])} / "
                  f"シミュ本命 {last['sim_win'][0][0]}（{last['sim_win'][0][1]:.0%}） / "

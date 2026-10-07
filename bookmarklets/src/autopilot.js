@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.41.0';
+const AP_VER = '1.42.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -63,6 +63,9 @@ const CFG = {
   API_BASES: ['https://api.oasis.red', null],   // null = レースページと同じオリジン
   IMMEDIATE: true,          // 開いた時に受付中のレースがあれば即座に解析する（iOS向け）
   N_SIM: 200000,
+  // 予想に区間シミュレータ（model.json の sim）を使う。false で従来の Ridge に戻る。
+  // どちらの場合も Ridge の予想はまとめの rw/rc に残る（比較用）。
+  USE_SIM: true,
   // 1レースでゲーム上限まで買うと 3連単20口(200,000) + 単勝100口(100,000) = 300,000 rrc。
   // レース単位の上限をそこに置き、1日の上限は別に持つ（既定は6レース分）。
   // 1日の上限をレース1回分にすると、最初のレースで使い切って残りが全部見送りになる。
@@ -477,14 +480,33 @@ async function analyseRace(sid, info, canBuy) {
       + `${fx(nt.d1 * 100, 0)}% に引き直しました`, '#e2b96f');
   }
   // 単勝は race_sigma、3連単は tri_sigma。Python と同じ使い分け。
-  const winP = OasisModel.simulateTrifecta(
+  const ridgeWin = OasisModel.simulateTrifecta(
     base, OasisModel.horseSigmas(horses, M.race_sigma, M), CFG.N_SIM, 42).win;
   // 7頭以下のレースに3連単は無い。組のシミュレーション自体を回さない
   // （Python の analyze も need_combo=tri_ok で同じことをしている）。
   // このレースで買えるのは単勝だけなので、WIN_ON を切っていても単勝は出す。
   const triOk = n >= (M.min_field_trifecta || 8);
-  const combo = triOk ? OasisModel.simulateTrifecta(
+  const ridgeCombo = triOk ? OasisModel.simulateTrifecta(
     base, OasisModel.horseSigmas(horses, M.tri_sigma, M), CFG.N_SIM, 42).combo : [];
+  // 2026/10/07〜 予想は区間シミュレータ（race_sim.py と同じ計算）。Ridge は比較用に記録だけ。
+  // 前向き検証189レース: 単勝LL 0.567→0.523 / 上位3頭 75.3%→79.4% / 本命1着 84.7%→86.2%。
+  let winP = ridgeWin, combo = ridgeCombo, model = 'ridge';
+  if (CFG.USE_SIM && M.sim && M.sim.w && M.sim.w[dist]) {
+    const sr = OasisModel.simRace(pets.map((h, i) => ({
+      name: h.display_name || h.name, species: h.adult_key || null,
+      speed: h.speed, power: h.power, stamina: h.stamina,
+      passives: horses[i].passives, equipment: h.equipment, charm: h.charm,
+    })), dist, track, M, M.sim.n_sim, sid);
+    winP = sr.win; combo = triOk ? sr.combo : []; model = 'sim';
+    const top = a => a.reduce((b, p, i) => (p > a[b] ? i : b), 0);
+    const ts = top(winP), tr = top(ridgeWin), nm = i => esc(pets[i].display_name || pets[i].name);
+    log(`R${sid}: 予想は区間シミュレータ（本命 ${nm(ts)} ${fx(winP[ts] * 100, 0)}%`
+        + ` / 従来モデルの本命 ${nm(tr)} ${fx(ridgeWin[tr] * 100, 0)}%）`, '#888');
+  }
+  // 比較用: 従来モデル（Ridge）の単勝上位5頭と3連単上位10組
+  const nmOf = i => pets[i].display_name || pets[i].name;
+  const rw = ridgeWin.map((p, i) => ({ n: nmOf(i), p: p })).sort((a, b) => b.p - a.p).slice(0, 5);
+  const rc = ridgeCombo.slice(0, 10).map(c => ({ n: [nmOf(c.i), nmOf(c.j), nmOf(c.k)], p: c.p }));
   const winOn = CFG.WIN_ON || !triOk;
 
   const U_ = M.stake_unit || 10000;
@@ -525,7 +547,8 @@ async function analyseRace(sid, info, canBuy) {
     .sort((a, b) => b.p - a.p).slice(0, 5);
   const ctx = { sid, dist: dist, track: track, nField: n,
                 poolTri: triPicks.pool || null, poolWin: wpool || null, bank: bankroll(),
-                rej: triPicks.rej || [], cand: triPicks.cand || [], wc: wc, probe: probe };
+                rej: triPicks.rej || [], cand: triPicks.cand || [], wc: wc, probe: probe,
+                model: model, rw: rw, rc: rc };
   if (!cost) {
     // 買わなかったレースも、本番の窓の中ならまとめを1行出す（何を見て見送ったかを残す）
     if (canBuy) LAST_NOBET = ctx;
@@ -536,6 +559,7 @@ async function analyseRace(sid, info, canBuy) {
   if (cost > raceLeft) { log(`R${sid}: 予算 ${raceLeft.toLocaleString()} rrc を超えるため見送り`, '#ffb74d'); return null; }
   return { sid, pets: wpets, picks: triPicks.picks, win: winPicks.picks, cost,
            rej: triPicks.rej || [], cand: ctx.cand, wc: wc, probe: probe,
+           model: model, rw: rw, rc: rc,
            // まとめ（機械可読）に載せる文脈。後から実結果と突き合わせるときに要る。
            dist: dist, track: track, nField: n,
            poolTri: triPicks.pool || null, poolWin: wpool || null, bank: bankroll(),
@@ -1194,6 +1218,10 @@ function emitSummary(pl, done, bought) {
       cand: (pl.cand || []).map(c => ({ n: c.n, p: r3(c.p), pa: r3(c.pa), od: r3(c.od),
                                         mk: r3(c.mk), u: c.u })),
       wc: (pl.wc || []).map(c => ({ n: c.n, p: r3(c.p), od: r3(c.od) })),
+      // 予想に使ったモデル（sim＝区間シミュレータ / ridge＝従来）と、比較用の従来モデルの予想
+      m: pl.model || 'ridge',
+      rw: (pl.rw || []).map(c => ({ n: c.n, p: r3(c.p) })),
+      rc: (pl.rc || []).map(c => ({ n: c.n, p: r3(c.p) })),
     };
     // 送信不明は見出しにも出す。JSON の unsure だけだと、貼られた人が気づけない。
     const unsureAll = done.reduce((a, d) => a + (d.uq || 0), 0);
