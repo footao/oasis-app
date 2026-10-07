@@ -5,15 +5,18 @@ ENGINE_NOTES.md で逆算したゲームの仕組みをそのまま組み立て�
   rating    = 距離×フェーズごとの線形式（実効 SP/PW/ST、学習データの timeline から当てる）
   スタミナ  初期 floor(実効ST)、区間ごとに一定量ずつ減る。消費量は**レースごとに乱数でぶれる**
             （±6%。ENGINE_NOTES 追記3）。これを1点で決め打ちせず、何千通り振る
-  失速      残りスタミナ/1区間の消費 から fatigue を引く（使い切ると 0.65）
+  失速      見込みの余り（残り − この先の消費）÷ 初期スタミナ から fatigue を引く
+            （余りが多いと最大 +3%、足りないと 0.65 まで）
 
 区間で発動する効果の扱い:
   phase     序盤/中盤/終盤の区間にだけ掛ける（ロケットスタート・中盤加速・末脚・時界超越など）
   tail300 / lowst / lead（残り300m・残りスタミナ以下・先頭の間）とそれ以外の状況限定は、
             カタログの平均 duty で均す。シミュ上で発動した区間にだけ掛ける版も試したが、
             前向き検証189レースで均したほうが良かった（単勝LL 0.523 vs 0.547）ので消した。
-前向き検証（9/2〜10/6・189レース、Ridge＝従来モデル）:
-  本命1着 84.7%→86.2% / 単勝LL 0.567→0.523（−1.6σ） / 3連単LL 1.583→1.561 / 上位3頭 75.3%→79.4%（+1.6σ）
+前向き検証（9/2〜10/7・194レース、Ridge＝従来モデル）:
+  本命1着 84.0%→85.6% / 単勝LL 0.563→0.474 / 3連単LL 1.578→1.501
+  10/07 修正: 疲労補正を「見込みの余り」で引くようにし（余り +0〜3% を拾う）、1頭ごとのぶれ HORSE_SD を入れた。
+  修正前は自信過剰で、R2628 で lv に 95%（3連単 lv→はなこ 91%）を付けて 30万負けた。
 
 2026/10/07 から bot の予想はこれ（JS: model.js の simRace。係数は model.json の sim）。
 従来の Ridge の予想は比較用に reports の rw/rc に残す。
@@ -29,6 +32,7 @@ PH_TL = ('early', 'middle', 'late')
 NSEG = {'短距離': (3, 4, 3), 'マイル': (4, 6, 5), '中距離': (6, 8, 6), '長距離': (7, 10, 8)}
 V_EXP, F_EXP = 0.8709, 0.9136
 SEG_NOISE = 0.0119
+HORSE_SD = 0.008       # 1頭ごとのレースのぶれ（前向き検証194レースで単勝・3連単とも最良）
 LOWST_LABELS = {'血走り', '骨砕き', '紅蓮点火', '深淵反転', '禍福転倒'}
 LEAD_LABELS = {'首位の呪い', '王冠過給', '先導祈願'}
 AVG_DUTY = {'lowst': 0.183, 'lead': 0.079}   # tail300 は 3区間/区間数
@@ -135,6 +139,7 @@ class RaceSim:
         self.spec = spec or oc.default_spec()
         self.scope_tbl = oc.item_scope_table(self.spec)
         self.n_sim, self.rng = n_sim, np.random.default_rng(seed)
+        self.horse_sd = HORSE_SD
 
     # ---- 1レースを「馬ごとの配列」にする（JS: simInputs と同じ計算）----
     def _race(self, r):
@@ -195,10 +200,11 @@ class RaceSim:
                 cs = [s['stamina_cost'] for s in tl[1:] if s.get('stamina_cost')]
                 if cs and row['c0'] > 0:
                     cr.append(math.log(np.mean(cs) / row['c0']))
+                s0, nn = tl[0].get('stamina'), len(tl) - 1
                 for k in range(1, len(tl)):
                     a, c, f = tl[k - 1].get('stamina'), tl[k].get('stamina_cost'), tl[k].get('fatigue_modifier')
-                    if None not in (a, c, f) and c > 0:
-                        fq.append((a / c, f))
+                    if None not in (a, c, f, s0) and c > 0 and s0 > 0:
+                        fq.append(((a - c * (nn - k + 1)) / s0, f))   # この先の消費を引いた見込みの余り / 初期
         self.W = {}
         for key in X:
             A, y = np.array(X[key]), np.array(Y[key])
@@ -208,12 +214,15 @@ class RaceSim:
             w, *_ = np.linalg.lstsq(np.hstack([A, np.ones((len(A), 1))]), y, rcond=None)
             self.W[key] = (w[:3], float(w[3]))
         self.cost_mu, self.cost_sd = float(np.mean(cr)), float(np.std(cr))
+        # 疲労補正は「残りの区間を走り切ったときの見込みの余り ÷ 初期スタミナ」でほぼ決まる
+        # （timeline 39,630区間: 相関0.82。余りが多いほど最大 +3%、足りないと 0.65 まで落ちる）。
+        # 2026/10/07 まで「残り ÷ 1区間の消費」で引いていて、余りの +0〜3% を全部 1.0 に潰していた
+        # （R2628: スタミナ118 のはなこ を 5% と見て、lv に 95% を付けて外した）。
         fq = np.array(fq)
-        edges = [-99, -.5, 0, .25, .5, .75, 1, 1.5, 3, 99]
-        self.FQX = np.array([-1, -.25, .125, .375, .625, .875, 1.25, 2.25, 10])
-        self.FQY = np.array([fq[(fq[:, 0] > lo) & (fq[:, 0] <= hi), 1].mean()
-                             if ((fq[:, 0] > lo) & (fq[:, 0] <= hi)).any() else 0.65
-                             for lo, hi in zip(edges[:-1], edges[1:])])
+        edges = [-9, -1, -.5, -.3, -.2, -.1, -.05, 0, .05, .1, .15, .2, .3, .4, .6, 9]
+        bins = [(fq[:, 0] >= lo) & (fq[:, 0] < hi) for lo, hi in zip(edges[:-1], edges[1:])]
+        self.FQX = np.array([fq[m, 0].mean() for m in bins if m.any()])
+        self.FQY = np.array([fq[m, 1].mean() for m in bins if m.any()])
         return self
 
     def export(self):
@@ -223,7 +232,8 @@ class RaceSim:
                           for pi in range(3)] for d in NSEG},
                 'cost_mu': self.cost_mu, 'cost_sd': self.cost_sd,
                 'fqx': [float(x) for x in self.FQX], 'fqy': [float(x) for x in self.FQY],
-                'v_exp': V_EXP, 'f_exp': F_EXP, 'seg_noise': SEG_NOISE, 'n_sim': self.n_sim,
+                'v_exp': V_EXP, 'f_exp': F_EXP, 'seg_noise': SEG_NOISE, 'horse_sd': self.horse_sd,
+                'n_sim': self.n_sim,
                 'avg_duty': dict(AVG_DUTY), 'lowst_labels': sorted(LOWST_LABELS),
                 'lead_labels': sorted(LEAD_LABELS)}
 
@@ -240,12 +250,14 @@ class RaceSim:
         st = np.stack([x['st'] for x in rows])                  # H×3フェーズ×3ステ
         rating = np.stack([np.maximum(st[:, pi, :] @ self.W[(d, pi)][0] + self.W[(d, pi)][1], 1.0)
                            for pi in range(3)], 1)             # H×3
-        T = np.zeros((NS, H))
-        for pi in np.repeat(np.arange(3), ns):
-            f = np.interp(s / c, self.FQX, self.FQY)
+        T = np.zeros((NS, H)); S0 = np.maximum(s[0:1], 1.0); n = sum(ns)
+        for k, pi in enumerate(np.repeat(np.arange(3), ns)):
+            f = np.interp((s - c * (n - k)) / S0, self.FQX, self.FQY)
             T += 1.0 / (rating[None, :, pi] ** V_EXP * f ** F_EXP
                         * (1 + SEG_NOISE * rng.standard_normal((NS, H))))
             s = s - c
+        if self.horse_sd:      # 1レース1頭ごとの調子のぶれ（区間の乱数だけでは自信過剰になる）
+            T *= np.exp(self.horse_sd * rng.standard_normal((NS, H)))
         order = np.argsort(T, 1)
         win = np.bincount(order[:, 0], minlength=H) / NS
         tri = {}

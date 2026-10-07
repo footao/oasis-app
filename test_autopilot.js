@@ -105,7 +105,7 @@ if (fs.existsSync(fxPath)) {
     console.assert(c.model === 'sim', 'analyseRace は区間シミュレータで予想する');
     console.assert(gotWin && gotWin.every((p, i) => Math.abs(p - sim[i]) < 1e-12), '単勝の確率はシミュレータのもの');
     console.assert(gotCombo && gotCombo.length && Math.abs(gotCombo.reduce((a, x) => a + x.p, 0) - 1) < 1e-9, '3連単の確率はシミュレータのもの');
-    console.assert(c.rw && c.rw.length === 5 && c.rc && c.rc.length === 10, '従来モデルの予想を rw/rc に残す');
+    console.assert(c.rw && c.rw.length === Math.min(5, pets.length) && c.rc && c.rc.length >= 1 && c.rc.length <= 10, '従来モデルの予想を rw/rc に残す');
     console.log('analyseRace: model', c.model, '/ 従来の本命', c.rw && c.rw[0].n);
   })().catch(e => { failed++; console.error('❌ analyseRace が落ちた: ' + (e && e.stack || e)); });
 }

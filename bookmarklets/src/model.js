@@ -786,13 +786,16 @@ const OasisModel = (() => {
     for (let it = 0; it < NS; it++) {
       for (let h = 0; h < H; h++) {
         const c = prof[h].c0 * Math.exp(S.cost_mu + S.cost_sd * randn());
+        const s0 = Math.max(prof[h].s0, 1), nseg = segPh.length;
         let s = prof[h].s0, t = 0;
-        for (let k = 0; k < segPh.length; k++) {
-          const f = Math.pow(fat(s / c), S.f_exp);
+        for (let k = 0; k < nseg; k++) {
+          // 疲労補正は「この先を走り切ったときの見込みの余り ÷ 初期スタミナ」で引く（Python と同じ）
+          const f = Math.pow(fat((s - c * (nseg - k)) / s0), S.f_exp);
           t += 1 / (rv[h][segPh[k]] * f * (1 + S.seg_noise * randn()));
           s -= c;
         }
-        T[h] = t;
+        // 1レース1頭ごとの調子のぶれ（区間の乱数だけだと自信過剰になる）
+        T[h] = S.horse_sd ? t * Math.exp(S.horse_sd * randn()) : t;
       }
       let a = -1, b = -1, c3 = -1;            // タイムの小さい順に上位3頭
       for (let i = 0; i < H; i++) {
