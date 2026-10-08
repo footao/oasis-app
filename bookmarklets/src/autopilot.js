@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.50.0';
+const AP_VER = '1.51.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -36,6 +36,8 @@ const CFG = {
   // 下限の目安は「解析秒数の**最悪値** + 3秒」。これを割ると、試し買いの金だけ入って
   // 本命の買い目が締切に間に合わない回が出る（一番損な負け方）。
   LEAD_SEC: 13,
+  // 買い終わった後、締切この秒数前にオッズを取り直して購入まとめに残す（記録用・購入には使わない）。
+  LATE_SEC: 5,
   // 口数は「EVが最大になる配分」を貪欲法で決める（Python の allocate_units_stable と同じ）。
   // 上限はゲームの上限そのまま（3連単20口・単勝100口）。下限は置かない。
   // 実際に何口入るかは分数ケリー・EDGE_MIN・希薄化が決める。
@@ -1179,12 +1181,46 @@ async function doBuy() {
   //   報告だけ消えて buying が true のまま固まる（2026/09/15 に実際に起きた：
   //   スコープに無い D を参照して ReferenceError）。だから丸ごと try で囲い、
   //   失敗しても購入フローは必ず最後まで進める。買い目ゼロでも1行は必ず出す。
+  pl.late = await lateOdds(pl);
   emitSummary(pl, done, bought);
   // 送信不明も「買ったかもしれない」に数える。0 にすると、[今すぐ解析] や再注入で同じレースをもう一度買う。
   ST.done[pl.sid] = { t: Date.now(), n: bought + done.reduce((a, d) => a + (d.uq ? 1 : 0), 0) };
   disarm(`R${pl.sid} の購入が終わったのでアームを解除しました`);
   saveState(ST);
   PENDING = null; $('_pick').style.display = 'none'; buying = false; render();
+}
+
+// ---- 締切直前のオッズ（記録用）----
+// 買った時点（締切13秒前）のオッズと、締切直前のオッズの差（駆け込みの他人の金・自分の買いの影響）を
+// 後から測るためのもの。買い目には一切使わない。どんな失敗でも null を返し、まとめは必ず出す。
+async function lateOdds(pl) {
+  try {
+    const left = (nextRaceTime() - Date.now()) / 1000;
+    if (left <= 1 || left > CFG.LEAD_SEC + 5) return null;     // 締切済み・窓の外の手動購入は取らない
+    if (left > CFG.LATE_SEC) await sleep((left - CFG.LATE_SEC) * 1000);
+    const nm = h => h.display_name || h.name;
+    const idx = new Map(pl.pets.map((h, i) => [nm(h), i]));
+    // 3連単はオッズが付いていた候補（買った組を含む）を最大10組
+    const tri = (pl.cand || []).filter(c => c.od || c.u).slice(0, 10)
+      .map(c => ({ n: c.n, ix: c.n.map(x => idx.get(x)) })).filter(c => !c.ix.some(x => x == null));
+    const at = (nextRaceTime() - Date.now()) / 1000;
+    const grab = Promise.all([
+      jget(`${API}/api/race/by-id/${AUTH.guild}/${pl.sid}?user=${AUTH.user}`),
+      ...tri.map(c => jget(`${API}/api/trifecta/odds?guild=${AUTH.guild}&schedule_id=${pl.sid}`
+        + `&first=${pl.pets[c.ix[0]].pet_id}&second=${pl.pets[c.ix[1]].pet_id}&third=${pl.pets[c.ix[2]].pet_id}`)),
+    ]);
+    const got = await Promise.race([grab, sleep(4000).then(() => null)]);
+    if (!got) { log(`R${pl.sid}: 締切直前のオッズが4秒で取れませんでした（記録だけなので購入には影響なし）`, '#888'); return null; }
+    const [info, ...tods] = got;
+    const r3 = x => (x == null ? null : Math.round(x * 1000) / 1000);
+    const late = {
+      left: r3(at),
+      w: ((info && info.pets) || []).map(h => ({ n: nm(h), od: typeof h.odds === 'number' ? r3(h.odds) : null })),
+      t: tri.map((c, i) => ({ n: c.n, od: tods[i] && typeof tods[i].odds === 'number' ? r3(tods[i].odds) : null })),
+    };
+    log(`R${pl.sid}: 締切 ${at.toFixed(1)}秒前のオッズを記録しました（単勝${late.w.length}頭・3連単${late.t.length}組）`, '#888');
+    return late;
+  } catch (e) { return null; }
 }
 
 // ---- 購入まとめ（買わなかったレースでも出す）----
@@ -1223,6 +1259,8 @@ function emitSummary(pl, done, bought) {
       m: pl.model || 'ridge',
       rw: (pl.rw || []).map(c => ({ n: c.n, p: r3(c.p) })),
       rc: (pl.rc || []).map(c => ({ n: c.n, p: r3(c.p) })),
+      // 締切直前（LATE_SEC 秒前）に取り直したオッズ（記録用）。取れなかったら null
+      late: pl.late || null,
     };
     // 送信不明は見出しにも出す。JSON の unsure だけだと、貼られた人が気づけない。
     const unsureAll = done.reduce((a, d) => a + (d.uq || 0), 0);

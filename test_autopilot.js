@@ -110,3 +110,25 @@ if (fs.existsSync(fxPath)) {
   })().catch(e => { failed++; console.error('❌ analyseRace が落ちた: ' + (e && e.stack || e)); });
 }
 }
+{
+// lateOdds（締切直前のオッズ・記録用）: 取れたら記録、API が固まったら4秒で null、窓の外は取らない
+const src=require('fs').readFileSync(require('path').join(__dirname,'bookmarklets','src','autopilot.js'),'utf8');
+const a=src.indexOf('async function lateOdds('), b=src.indexOf('// ---- 購入まとめ（買わなかったレースでも出す）');
+const fn=src.slice(a,b);
+(async()=>{
+  const CFG={LEAD_SEC:13, LATE_SEC:5}, AUTH={guild:'g',user:'u'}, API='x', logs=[], log=m=>logs.push(m);
+  let closeAt; const nextRaceTime=()=>closeAt;
+  const sleep=ms=>new Promise(r=>setTimeout(r, Math.min(ms, 50)));   // テストでは待ち時間を縮める
+  const pl={sid:1, pets:[{pet_id:10,name:'A'},{pet_id:11,name:'B'},{pet_id:12,name:'C'}],
+            cand:[{n:['A','B','C'],od:2.5,u:3},{n:['A','C','B'],od:null,u:0}]};
+  let jget=async u=>u.includes('/race/by-id/')?{pets:[{name:'A',odds:1.3},{name:'B',odds:4.1},{name:'C',odds:9}]}:{odds:2.2};
+  let lateOdds; eval(fn.replace('async function lateOdds','lateOdds = async function'));
+  closeAt=Date.now()+8000;
+  let r=await lateOdds(pl);
+  console.assert(r && r.w.length===3 && r.w[0].od===1.3 && r.t.length===1 && r.t[0].od===2.2, 'lateOdds: 単勝3頭・3連単1組（オッズの無い組は取らない）');
+  jget=()=>new Promise(()=>{}); eval(fn.replace('async function lateOdds','lateOdds = async function'));
+  const sleep2=sleep; closeAt=Date.now()+5000;
+  r=await lateOdds(pl); console.assert(r===null, 'lateOdds: API が固まったら null（まとめは必ず出す）');
+  closeAt=Date.now()+600000; r=await lateOdds(pl); console.assert(r===null, 'lateOdds: 窓の外（下見の手動購入）は取らない');
+})();
+}
