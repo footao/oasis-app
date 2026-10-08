@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.53.0'
+CORE_VERSION = '3.54.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -2404,6 +2404,19 @@ ITEM_EFFECT_CATALOG = {
     '先導祈願':       dict(scope='conditional', duty=0.079),  # 先頭の間
     '逆境祈願':       dict(scope='conditional', duty=0.527),  # 下位半分の間
     '禍福転倒':       dict(scope='conditional', duty=0.183),  # 残スタミナ25%以下
+    # ---- oasis 級（2026/10/08 告知の10種）。固有スキル＋追加効果の2つを持つ。----
+    # ここは固有スキル（1つ目の効果）の範囲。追加効果はシミュ側（race_sim / model.js）が文面から読む。
+    # 実戦データが無いので、文面が同じ既存効果の範囲を借りる。
+    '楽園天翔':       dict(scope='tail300', duty=0.200),      # 残り300m（＋消費 −4% 常時）
+    '神樹轟臂':       dict(alias='競り合い'),                 # 20m以内にライバル（＋パワー常時5%）
+    '原海戴冠':       dict(scope='lead', duty=0.079),         # 先頭の間＋消費増（＋スタミナ常時5%）
+    '永劫機律':       dict(alias='中盤加速'),                 # 中盤のパワー（＋乱数幅 −20%）
+    '創世天駆':       dict(scope='conditional', duty=0.101),  # 50m以内に相手がいない（＋序盤のスピード4%）
+    '楽園核共鳴':     dict(scope='always'),                   # 全ステータス常時（＋消費 −3% 常時）
+    '聖輪転生':       dict(scope='conditional', duty=0.527),  # 下位半分の間（＋中盤突入時にスタミナ3%回復）
+    '永劫時律':       dict(alias='中盤加速'),                 # 中盤のスピード（＋乱数幅 −20%）
+    '世界樹循環':     dict(scope='always'),                   # スタミナ常時（＋消費 −4% 常時）
+    '星海反転':       dict(scope='conditional', duty=0.183),  # 残スタミナ30%以下（＋20%以下で一度だけ4%回復）
 }
 # 実測の内訳（races.jsonl の timeline / 1,627頭・26,935区間）:
 #   残スタミナ25%以下      0.183

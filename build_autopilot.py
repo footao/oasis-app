@@ -87,7 +87,13 @@ def main(log_path=None):
             if labs:
                 seen |= labs
                 extra.append(r)
-        _write_sim_fixture(sim, raw[-4:] + extra[:12], race_sim)
+        # oasis 級10種の見本を、直近の8頭以上のレースの馬に着せたもの（まだ実戦データが無いため）
+        import copy
+        demo = copy.deepcopy(next(r for r in reversed(raw) if len(r['horses']) >= 10))
+        for h, (typ, lab, ds) in zip(demo['horses'], race_sim.OASIS_SAMPLES):
+            h['equipment' if typ == 'equipment' else 'charm'] = dict(effect_label=lab, effect_description=ds,
+                                                                     effect_key='unique_oasis_demo')
+        _write_sim_fixture(sim, raw[-4:] + extra[:12] + [demo], race_sim)
     io.open(os.path.join(HERE, 'model.json'), 'w', encoding='utf-8').write(
         json.dumps(payload, ensure_ascii=False, separators=(',', ':')))
 

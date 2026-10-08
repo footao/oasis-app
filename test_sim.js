@@ -16,6 +16,8 @@ for (const r of F) {
     worstIn = Math.max(worstIn, Math.abs(x.c0 - py.c0[h]) / Math.max(1e-9, py.c0[h]), Math.abs(x.s0 - py.s0[h]),
                        Math.abs(x.g_p - py.g_p[h]));
     for (let pi = 0; pi < 3; pi++) worstIn = Math.max(worstIn, Math.abs(x.cost[pi] - py.cost[h][pi]), Math.abs(x.g_m[pi] - py.g_m[h][pi]));
+    worstIn = Math.max(worstIn, Math.abs(x.nz - py.nz[h]), Math.abs(x.rec_low[0] - py.rec_low[h][0]), Math.abs(x.rec_low[1] - py.rec_low[h][1]));
+    for (let q = 0; q < 3; q++) worstIn = Math.max(worstIn, Math.abs(x.rec_ph[q] - py.rec_ph[h][q]));
     for (let q = 0; q < 4; q++) { worstIn = Math.max(worstIn, Math.abs(x.p_c[q] - py.p_c[h][q]));
       for (let j = 0; j < 3; j++) worstIn = Math.max(worstIn, Math.abs(x.p_m[q][j] - py.p_m[h][q][j])); }
   });

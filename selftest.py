@@ -1550,8 +1550,8 @@ def regression_tests():
           _all_ok, ' / '.join(_detail))
 
     # --- P12: 装備図鑑・スキル図鑑（2026/08/23）の30種を効果名で引けること ---
-    check('P12 図鑑の効果は装備16種＋お守り14種＋ユニーク20種の50種',
-          len(oc.ITEM_EFFECT_CATALOG) == 50, f'{len(oc.ITEM_EFFECT_CATALOG)}種')
+    check('P12 図鑑の効果は装備16種＋お守り14種＋ユニーク20種＋oasis級10種の60種',
+          len(oc.ITEM_EFFECT_CATALOG) == 60, f'{len(oc.ITEM_EFFECT_CATALOG)}種')
     check('P12 効果名を説明文の頭から取り出せる',
           oc.item_effect_label('末脚：終盤のパワーが8.2%上昇') == '末脚'
           and oc.item_effect_label('スピードが常時4.4%上昇') is None)

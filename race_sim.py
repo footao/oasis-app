@@ -51,8 +51,8 @@ SEG_NOISE = 0.0119
 #   較正: 予測95%以上 101R 予測99.0% 実際99.0%
 HORSE_IN_RACE = True
 HORSE_SD = 0.004       # 1頭ごとのレースのぶれ（前向き検証194レースで 0.004〜0.008 を比べて最良）
-LOWST_LABELS = {'血走り', '骨砕き', '紅蓮点火', '深淵反転', '禍福転倒'}
-LEAD_LABELS = {'首位の呪い', '王冠過給', '先導祈願'}
+LOWST_LABELS = {'血走り', '骨砕き', '紅蓮点火', '深淵反転', '禍福転倒', '星海反転'}
+LEAD_LABELS = {'首位の呪い', '王冠過給', '先導祈願', '原海戴冠'}
 LEAD_DUTY = 0.079                 # 先頭の間（平均 duty で全区間に均す）
 # 「残りスタミナ30%以下」で発動する効果は平均 duty で全区間に均す。終盤だけに寄せる版
 # （距離別の実測 duty を終盤に掛ける）も試したが、前向き検証で単勝LL +0.025・3連単LL +0.026 と悪化した
@@ -78,7 +78,7 @@ POS_KINDS = ('duel', 'king', 'lead', 'solo')
 # （R2628: 王殺しのにのが lv に付いていき、lv の競り合いが終盤まで続いて lv 60% になる）。
 # 調子のぶれをレース中に入れた後でも 単勝LL +0.005±0.007 / 3連単LL −0.045±0.039・本命1着 92%→91% で、まだ決め手なし。
 POS_DYNAMIC = {'duel', 'lead', 'solo'}
-POS_LABELS = {'競り合い', '天嵐決闘', '王殺し', '星界破砕', '首位の呪い', '王冠過給', '先導祈願'}   # 一致検証の見本選び用
+POS_LABELS = {'競り合い', '天嵐決闘', '王殺し', '星界破砕', '首位の呪い', '王冠過給', '先導祈願', '神樹轟臂', '原海戴冠'}   # 一致検証の見本選び用
 # 均すときの duty（消費量 c0 の計算は従来どおりこれで均す）
 POS_DUTY = {'duel': 0.655, 'king': 0.175, 'lead': LEAD_DUTY, 'solo': 0.05}
 DUEL_M, SOLO_M = 20.0, 50.0
@@ -100,6 +100,48 @@ GAMBLE = '勝負師'                 # 5%の確率で全ステ×1.25。平均に
 _CONS_RE = re.compile(r'スタミナ消費量[^。]*?(\d+(?:\.\d+)?)[%％](増加|減少)')
 
 
+# 2026/10/08〜 oasis 級の装備は「固有スキル＋追加効果」の2つを持つ。説明文を節に分けて1つずつ扱う
+# （API の書式が未確認なので、＋追加効果：/ 改行 / 。のどれで区切られていても拾う）。
+_CLAUSE_RE = re.compile(r'[＋+]?\s*追加効果\s*[：:]|\n|。')
+_NOISE_RE = re.compile(r'乱数幅を(\d+(?:\.\d+)?)[%％]狭める')                        # 区間の乱数（1.19%）に掛ける
+_REC_PH_RE = re.compile(r'(序盤|中盤|終盤)突入時にスタミナを(\d+(?:\.\d+)?)[%％]回復')
+_REC_LOW_RE = re.compile(r'残りスタミナ(\d+(?:\.\d+)?)[%％]以下で一度だけ(\d+(?:\.\d+)?)[%％]回復')
+
+
+# 見本（selftest と JS の一致検証用）。数値は告知の範囲の中から1つ選んだもの。
+OASIS_SAMPLES = [
+    ('equipment', '楽園天翔', '残り300mでスピードが26%上昇＋追加効果：スタミナ消費量が常時4%減少'),
+    ('equipment', '神樹轟臂', '20m以内にライバルがいる間、パワーが25%上昇＋追加効果：パワーが常時5%上昇'),
+    ('equipment', '原海戴冠', '先頭の間、スピードが23%上昇（スタミナ消費も増加）スタミナ消費量が追加で6%増加（上限6%）'
+                             '＋追加効果：スタミナが常時5%上昇'),
+    ('equipment', '永劫機律', '中盤のパワーが24%上昇＋追加効果：レース中の乱数幅を20%狭める'),
+    ('equipment', '創世天駆', '50m以内にライバルがいない間、スピードが24%上昇＋追加効果：序盤のスピードが4%上昇'),
+    ('charm', '楽園核共鳴', '全ステータスが常時9.5%上昇＋追加効果：スタミナ消費量が常時3%減少'),
+    ('charm', '聖輪転生', '下位半分の間、スピードとパワーがそれぞれ16%上昇＋追加効果：中盤突入時にスタミナを3%回復'),
+    ('charm', '永劫時律', '中盤のスピードが24%上昇＋追加効果：レース中の乱数幅を20%狭める'),
+    ('charm', '世界樹循環', 'スタミナが常時19%上昇＋追加効果：スタミナ消費量が常時4%減少'),
+    ('charm', '星海反転', '残りスタミナ30%以下でスピードとパワーがそれぞれ18%上昇＋追加効果：残りスタミナ20%以下で一度だけ4%回復'),
+]
+
+
+def _text_scope(t):
+    """カタログに無い効果（追加効果など）の範囲を文面から決める。→ (scope, arg, duty) か None。"""
+    if '常時' in t:
+        return 'always', None, 1.0
+    if '残り300m' in t:
+        return 'tail300', None, 1.0
+    m = re.search(r'(序盤|中盤|終盤)の', t)
+    if m:
+        return 'phase', m.group(1), 1.0
+    if re.search(r'残りスタミナ\d', t):
+        return 'lowst', None, LOWST_DUTY
+    if '50m以内にライバルがいない' in t:
+        return 'conditional', None, 0.101       # 孤影の疾走と同じ
+    if '下位半分' in t:
+        return 'conditional', None, 0.527       # 逆境祈願と同じ
+    return None
+
+
 def _phase_idx(arg):
     return PH_JA.index(arg) if arg in PH_JA else None
 
@@ -110,6 +152,7 @@ def horse_profile(h, dist, track, spec, same_species, scope_tbl=None):
     n = sum(NSEG[dist])
     base = {'speed': float(h['speed']), 'power': float(h['power']), 'stamina': float(h['stamina'])}
     fx, cost, gamble = [], [1.0, 1.0, 1.0], None
+    nz, rec = 1.0, []                 # 区間の乱数の倍率 / スタミナ回復 [(フェーズ or None, 残り割合の閾値, 回復率)]
     pos = {k: [{}, 1.0, set()] for k in POS_KINDS}      # 種類 → [ステ倍率, 消費倍率, 発動キー]
 
     def add_pos(kind, m, cm, key):
@@ -144,7 +187,7 @@ def horse_profile(h, dist, track, spec, same_species, scope_tbl=None):
         fx.append((pi, {k: 1.0 + (float(x) - 1.0) * min(1.0, duty / frac) for k, x in m.items()}))
 
     def put(m, sc, arg, duty, label=''):
-        if label in LOWST_LABELS:
+        if label in LOWST_LABELS or sc == 'lowst':
             avg(m, LOWST_DUTY)
         elif label in LEAD_LABELS or sc == 'lead':
             avg({k: x for k, x in m.items() if k != 'stamina'}, LEAD_DUTY)
@@ -198,22 +241,18 @@ def horse_profile(h, dist, track, spec, same_species, scope_tbl=None):
         else:
             put(m, sc, sp.get('scope_arg'), float(sp.get('duty', 1.0)), p)
 
-    for it in (h.get('equipment'), h.get('charm')):
-        if not isinstance(it, dict):
-            continue
-        label = (it.get('effect_label') or '').strip()
-        desc = it.get('effect_description') or ''
-        sp = oc.spec_from_description(f'{label}：{desc}') or {}
+    def item_clause(label, desc, key):
+        sp = oc.spec_from_description(f'{label}：{desc}' if label else desc) or {}
         if sp.get('scope') == 'variance':
-            continue
+            return
         m = dict(sp.get('mult') or {})
         kind = _pos_kind(desc)
         cm = None if kind else _CONS_RE.search(desc)
         if kind:
             pcm = pos_cost(m, desc)
             if kind in POS_DYNAMIC:
-                add_pos(kind, m, pcm, str(it.get('effect_key') or ''))
-                continue
+                add_pos(kind, m, pcm, key)
+                return
             for pi in range(3):        # 先導祈願の「先頭の間 消費 −4%」を全区間に掛けていた（〜10/07）
                 cost[pi] *= 1.0 + (pcm - 1.0) * POS_DUTY[kind]
         if cm:                        # 「スタミナ消費量が常時N%減少」は消費の倍率（スタミナを盛らない）
@@ -222,11 +261,11 @@ def horse_profile(h, dist, track, spec, same_species, scope_tbl=None):
                 cost[pi] *= (1.0 - x) if cm.group(2) == '減少' else (1.0 + x)
             m.pop('stamina', None)
         if not m:
-            continue
-        cat = oc.ITEM_EFFECT_CATALOG.get(label) or {}
+            return
+        cat = oc.ITEM_EFFECT_CATALOG.get(label) or {} if label else {}
         alias = cat.get('alias')
-        if not alias and not cat:
-            code = re.sub(r'^(?:gear|charm|item)_', '', str(it.get('effect_key') or ''))
+        if not alias and not cat and key:
+            code = re.sub(r'^(?:gear|charm|item)_', '', key)
             alias = oc.PASSIVE_CODE_MAP.get(code) or oc.ITEM_KEY_ALIAS.get(code)
         if alias:
             a = spec.get(alias) or {}
@@ -234,14 +273,36 @@ def horse_profile(h, dist, track, spec, same_species, scope_tbl=None):
         elif cat:
             sc, arg = cat.get('scope', 'always'), cat.get('scope_arg')
             duty = float(cat['duty']) if cat.get('duty') is not None else 1.0
-        elif '常時' in desc:
-            sc, arg, duty = 'always', None, 1.0
         else:
-            continue
+            ts = _text_scope(desc)
+            if not ts:
+                return
+            sc, arg, duty = ts
         put(m, sc, arg, duty, label)
+
+    for it in (h.get('equipment'), h.get('charm')):
+        if not isinstance(it, dict):
+            continue
+        label = (it.get('effect_label') or '').strip().lstrip('★☆')
+        texts = [t.strip() for t in _CLAUSE_RE.split(str(it.get('effect_description') or '')) if t.strip()]
+        for j, t in enumerate(texts):
+            mm = _NOISE_RE.search(t)
+            if mm:
+                nz *= max(0.0, 1.0 - float(mm.group(1)) / 100.0)
+                continue
+            mm = _REC_PH_RE.search(t)
+            if mm:
+                rec.append((_phase_idx(mm.group(1)), 1.0, float(mm.group(2)) / 100.0))
+                continue
+            mm = _REC_LOW_RE.search(t)
+            if mm:
+                rec.append((None, float(mm.group(1)) / 100.0, float(mm.group(2)) / 100.0))
+                continue
+            # 2つ目以降の節（追加効果）は固有スキル名・effect_key のカタログを使わず、文面で決める
+            item_clause(label if j == 0 else '', t, str(it.get('effect_key') or '') if j == 0 else '')
     for k in base:
         base[k] = max(base[k], 1.0)
-    return dict(base=base, fx=fx, cost=cost, gamble=gamble, pos=pos)
+    return dict(base=base, fx=fx, cost=cost, gamble=gamble, pos=pos, nz=nz, rec=rec)
 
 
 class RaceSim:
@@ -287,7 +348,9 @@ class RaceSim:
                              p_m=[[float(pf['pos'][kd][0].get(k, 1.0)) for k in ('speed', 'power', 'stamina')]
                                   for kd in POS_KINDS],
                              p_c=[float(pf['pos'][kd][1]) for kd in POS_KINDS],
-                             p_key=[pf['pos'][kd][2] for kd in POS_KINDS]))
+                             p_key=[pf['pos'][kd][2] for kd in POS_KINDS],
+                             nz=pf['nz'], rec_ph=[sum(x for q, _, x in pf['rec'] if q == pi) for pi in range(3)],
+                             rec_low=next(([t, x] for q, t, x in pf['rec'] if q is None), [0.0, 0.0])))
         return dict(dist=dist, track=track, rows=rows)
 
     def inputs(self, r):
@@ -297,7 +360,8 @@ class RaceSim:
         return {'dist': R['dist'], 'names': [x['h'].get('name', '') for x in rows],
                 'st': [x['st'].round(9).tolist() for x in rows], 'c0': [round(x['c0'], 9) for x in rows],
                 'cost': [[round(c, 9) for c in x['cost']] for x in rows], 's0': [x['s0'] for x in rows],
-                'g_p': [x['g_p'] for x in rows], 'g_m': [x['g_m'] for x in rows], 'p_m': [x['p_m'] for x in rows], 'p_c': [x['p_c'] for x in rows]}
+                'g_p': [x['g_p'] for x in rows], 'g_m': [x['g_m'] for x in rows], 'p_m': [x['p_m'] for x in rows], 'p_c': [x['p_c'] for x in rows],
+                'nz': [x['nz'] for x in rows], 'rec_ph': [x['rec_ph'] for x in rows], 'rec_low': [x['rec_low'] for x in rows]}
 
     # ---- 学習: rating の式・消費のぶれ・失速の表 ----
     def fit(self, races):
@@ -433,7 +497,17 @@ class RaceSim:
         T = np.zeros((NS, H))
         dt = np.ones((NS, H))
         hz = np.exp(self.horse_sd * rng.standard_normal((NS, H))) if (self.horse_sd and HORSE_IN_RACE) else 1.0
+        nzv = np.array([x['nz'] for x in rows])[None, :]                    # 乱数幅を狭める装備
+        rph = np.array([x['rec_ph'] for x in rows])                           # H×フェーズ: 突入時の回復率
+        rlt, rlx = (np.array([x['rec_low'][i] for x in rows])[None, :] for i in (0, 1))
+        rl_used = np.zeros((NS, H), bool)
         for k, pi in enumerate(ph_of):
+            if k > 0 and ph_of[k - 1] != pi and rph[:, pi].any():          # 「中盤突入時にスタミナを3%回復」
+                s = np.minimum(s + S0 * rph[None, :, pi], S0)
+            if rlx.any():                                                    # 「残りスタミナ20%以下で一度だけ4%回復」
+                hit = ~rl_used & (rlx > 0) & (s <= S0 * rlt)
+                s = np.where(hit, np.minimum(s + S0 * rlx, S0), s)
+                rl_used |= hit
             f = np.interp((s - c * rem[None, :, k]) / S0, self.FQX, self.FQY)
             mult = np.where(on[:, :, None], gm[None, :, :], 1.0)            # NS×H×3
             cmul = np.ones((NS, H))
@@ -464,7 +538,7 @@ class RaceSim:
                     cmul = cmul * np.where(a_, pc[None, :, j], 1.0)
             rr = np.maximum(np.einsum('nhj,hj->nh', mult, st[:, pi, :] * self.W[(d, pi)][0][None, :])
                             + self.W[(d, pi)][1], 1.0)
-            dt = hz / (rr ** V_EXP * f ** F_EXP * (1 + SEG_NOISE * rng.standard_normal((NS, H))))
+            dt = hz / (rr ** V_EXP * f ** F_EXP * (1 + SEG_NOISE * nzv * rng.standard_normal((NS, H))))
             T += dt
             s = s - c * cm[None, :, k] * cmul
         if self.horse_sd and not HORSE_IN_RACE:      # 1レース1頭ごとの調子のぶれ（区間の乱数だけでは自信過剰になる）
@@ -487,6 +561,24 @@ if __name__ == '__main__':      # 動作確認: 最後の日より前で学習 �
     sim = RaceSim(n_sim=2000).fit([r for r in raw if r['race_date'] < last['race_date']])
     win, tri, names = sim.predict(last, seed=1)
     assert len(win) == len(names) and abs(win.sum() - 1) < 1e-9 and abs(sum(tri.values()) - 1) < 1e-9
+    # oasis 級10種: 固有スキルと追加効果がそれぞれ正しい場所に入るか
+    base = dict(speed=100.0, power=100.0, stamina=100.0)
+    def pf(label, desc, d='長距離'):
+        it = dict(effect_label=label, effect_description=desc, effect_key='unique_x')
+        return horse_profile(dict(base, equipment=it), d, '芝', sim.spec, False)
+    S = {lab: pf(lab, ds) for _, lab, ds in OASIS_SAMPLES}
+    ok = lambda a, b: abs(a - b) < 1e-9
+    assert S['楽園天翔']['fx'][0][0] == 2 and ok(S['楽園天翔']['cost'][0], 0.96), S['楽園天翔']
+    assert ok(S['神樹轟臂']['pos']['duel'][0]['power'], 1.25) and ok(S['神樹轟臂']['base']['power'], 105)
+    assert ok(S['原海戴冠']['pos']['lead'][0]['speed'], 1.23) and ok(S['原海戴冠']['pos']['lead'][1], 1.06 * LEAD_COST_UP)
+    assert ok(S['原海戴冠']['base']['stamina'], 105) and 'stamina' not in S['原海戴冠']['pos']['lead'][0]
+    assert S['永劫機律']['fx'] == [(1, {'power': 1.24})] and ok(S['永劫機律']['nz'], 0.8)
+    assert ok(S['創世天駆']['base']['speed'], 100 * (1 + 0.24 * 0.101)) and S['創世天駆']['fx'] == [(0, {'speed': 1.04})]
+    assert ok(S['楽園核共鳴']['base']['power'], 109.5) and ok(S['楽園核共鳴']['cost'][2], 0.97)
+    assert ok(S['聖輪転生']['base']['power'], 100 * (1 + 0.16 * 0.527)) and S['聖輪転生']['rec'] == [(1, 1.0, 0.03)]
+    assert S['永劫時律']['fx'] == [(1, {'speed': 1.24})] and ok(S['永劫時律']['nz'], 0.8)
+    assert ok(S['世界樹循環']['base']['stamina'], 119) and ok(S['世界樹循環']['cost'][1], 0.96)
+    assert ok(S['星海反転']['base']['speed'], 100 * (1 + 0.18 * LOWST_DUTY)) and S['星海反転']['rec'] == [(None, 0.2, 0.04)]
     # 先頭の判定（同じ位置なら pet_id の小さい馬が前）: R2257 はスタートで先頭を取った首位の呪いのおいらが逃げ切った
     r2257 = next((r for r in raw if r['schedule_id'] == 2257), None)
     if r2257:
