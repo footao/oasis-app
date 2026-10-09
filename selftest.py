@@ -1074,10 +1074,10 @@ def regression_tests():
           and "mNum('market_fav_min_od'" in _ap,
           'market_fav_min_od は defaults の下ではなくトップレベルに出ている。'
           'D.market_fav_min_od では拾えず、既定値と同値だったので気づけていなかった')
-    check('P29 安牌の下限は Python 側が正',
-          oc.SAFE_P_MIN == 0.25 and oc.SAFE_P_MIN > oc.DEFAULT_SETTINGS['min_prob'],
-          f'{oc.SAFE_P_MIN}（3連単155件の実測: 15〜25%の帯は 予測20.2%→実測5.0%・回収率48%。'
-          '下限25%なら 167%・27レースで買える。35%でも172%だが買えるレースが23に減る）')
+    check('P29 安牌の下限は Python 側が正（2026/10/09〜 上乗せなし）',
+          oc.SAFE_P_MIN == 0.0 and "mNum('safe_p_min', CFG.SAFE_P_MIN)" in _ap,
+          f'{oc.SAFE_P_MIN}（3連単の下限は min_prob {oc.DEFAULT_SETTINGS["min_prob"]:.0%} だけ。'
+          '区間シミュレータは 10〜30% 帯の較正が合っている: 予測17%→実際18% / 25%→24%）')
 
     _mp = oc.DEFAULT_SETTINGS['min_prob']
     _js_mp = re.search(r'MIN_PROB:\s*([\d.]+)', _ap)

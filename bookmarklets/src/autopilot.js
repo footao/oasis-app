@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.52.0';
+const AP_VER = '1.53.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -105,7 +105,7 @@ const CFG = {
   // 2026/09/15 から既定オン。52レースの精算で 両方オン 回収率149%/勝率69%/最大DD -261,540
   // に対し 両方オフ 123%/44%/-1,214,730。パネルの[安牌][市場本命]で切れる。
   SAFE_MODE: true,
-  SAFE_P_MIN: 0.25,       // model.json の safe_p_min で上書きされる
+  SAFE_P_MIN: 0,          // model.json の safe_p_min で上書きされる（2026/10/09〜 0 = 上乗せなし）
   MARKET_FAV_MIN_OD: 1.0,
   MARKET_FAV_UNITS: 1,
   UNFORMED_MAX_UNITS: null, // null = model.json の unformed_max_units

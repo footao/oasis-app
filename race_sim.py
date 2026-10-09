@@ -612,8 +612,8 @@ class RaceSim:
                 'lead_cost_up': LEAD_COST_UP, 'duel_m': DUEL_M, 'solo_m': SOLO_M, 'seg_m': SEG_M}
 
     # ---- 予測 ----
-    def predict(self, r, seed=None):
-        """→ (勝率[H], 3連単 {(i,j,k): 確率}, 馬名リスト)。"""
+    def predict(self, r, seed=None, detail=False):
+        """→ (勝率[H], 3連単 {(i,j,k): 確率}, 馬名リスト)。detail=True なら答え合わせ用の内訳も返す（race_review.py）。"""
         R = self._race(r)
         rows, d = R['rows'], R['dist']
         rng = self.rng if seed is None else np.random.default_rng(seed)   # 比較は同じ乱数で
@@ -647,6 +647,8 @@ class RaceSim:
         rph = np.array([x['rec_ph'] for x in rows])                           # H×フェーズ: 突入時の回復率
         rlt, rlx = (np.array([x['rec_low'][i] for x in rows])[None, :] for i in (0, 1))
         rl_used = np.zeros((NS, H), bool)
+        if detail:
+            ph_dt, act, fmin = np.zeros((3, NS, H)), [{}, {}, {}], np.full((NS, H), 9.0)
         relv = np.array([x['relief'] for x in rows])[None, :]
         rank_prev = None
         last_drop = np.full((NS, H), -10)
@@ -704,12 +706,17 @@ class RaceSim:
                         'hold2': low_at[2] if pi == 2 else np.zeros((NS, H), bool)}
                 for j, hm in has:
                     a_ = hm & cond[POS_KINDS[j]]
+                    if detail:
+                        act[pi][POS_KINDS[j]] = act[pi].get(POS_KINDS[j], 0) + a_.mean(0)
                     mult = mult * np.where(a_[:, :, None], pm[None, :, j, :], 1.0)
                     cmul = cmul * np.where(a_, pc[None, :, j], 1.0)
             rr = np.maximum(np.einsum('nhj,hj->nh', mult, st[:, pi, :] * self.W[(d, pi)][0][None, :])
                             + self.W[(d, pi)][1], 1.0)
             dt = hz / (rr ** V_EXP * f ** F_EXP * (1 + SEG_NOISE * nzv * rng.standard_normal((NS, H))))
             T += dt
+            if detail:
+                ph_dt[pi] += dt
+                fmin = np.minimum(fmin, f)
             if COST_DYNAMIC:                                                 # 発動中の効果で上がった実効ステぶん消費も増える
                 c = np.clip(rf * np.einsum('nhj,hj->nh', mult, st[:, pi, :] * wc[None, :]), L['lo'], L['hi'])
             elif COST_MODE == 'clampdyn':
@@ -724,7 +731,14 @@ class RaceSim:
         if H >= 3:
             keys, cnt = np.unique(order[:, :3], axis=0, return_counts=True)
             tri = {tuple(map(int, k_)): v_ / NS for k_, v_ in zip(keys, cnt)}
-        return win, tri, [x['h'].get('name', '') for x in rows]
+        names = [x['h'].get('name', '') for x in rows]
+        if detail:
+            info = dict(ph_dt=np.median(ph_dt, 1), s_end=np.median(s, 0), fat_min=np.median(fmin, 0),
+                        act=[{kd: v / ns[pi] for kd, v in a.items()} for pi, a in enumerate(act)],
+                        rating=[[float(max(x['st'][pi] @ self.W[(d, pi)][0] + self.W[(d, pi)][1], 1.0)) for pi in range(3)]
+                                for x in rows], s0=[x['s0'] for x in rows])
+            return win, tri, names, info
+        return win, tri, names
 
 
 if __name__ == '__main__':      # 動作確認: 最後の日より前で学習 → 最後のレースを予想
