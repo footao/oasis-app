@@ -79,7 +79,8 @@ def main(log_path=None):
         print(f'   → シミュレータ  学習{len(raw)}レース / 消費のぶれ σ{sim.cost_sd:.3f}')
         # 見本は直近4レース＋区間効果（序盤/中盤/終盤・残り300m・残スタミナ・先頭・馬場）を持つ馬がいるレース
         want = race_sim.LOWST_LABELS | race_sim.LEAD_LABELS | race_sim.POS_LABELS | {
-            '終焉加速', '幻界終走', '時界超越', '末脚', '中盤加速', 'ロケットスタート', '二の脚', '芝啜り', '泥啜り'}
+            '終焉加速', '幻界終走', '時界超越', '末脚', '中盤加速', 'ロケットスタート', '二の脚', '芝啜り', '泥啜り',
+            '孤影の疾走', '復讐刻印', '追い込み', '亡者の追走', '終星の鎮魂歌', '逆境祈願', '苦痛慣れ', '魂継ぎ', '安定の加護'}
         seen, extra = set(), []
         for r in reversed(raw[:-4]):
             labs = {(it or {}).get('effect_label') for h in r['horses'] for it in (h.get('equipment'), h.get('charm'))
@@ -93,7 +94,12 @@ def main(log_path=None):
         for h, (typ, lab, ds) in zip(demo['horses'], race_sim.OASIS_SAMPLES):
             h['equipment' if typ == 'equipment' else 'charm'] = dict(effect_label=lab, effect_description=ds,
                                                                      effect_key='unique_oasis_demo')
-        _write_sim_fixture(sim, raw[-4:] + extra[:12] + [demo], race_sim)
+        # 説明文で扱いが決まるパッシブ（回復・疲労の軽減・乱数・ロングスパート・順位/追い抜かれ系）の見本
+        demo2 = copy.deepcopy(next(r for r in reversed(raw) if len(r['horses']) >= 10 and r is not demo))
+        for h, code in zip(demo2['horses'], ['second_wind', 'emergency_recovery', 'consistency', 'tenacious', 'long_spurt',
+                                             'closer_stance', 'deep_closer', 'indomitable', 'gambler', 'solo_lead']):
+            h['passive_skill'] = code
+        _write_sim_fixture(sim, raw[-4:] + extra[:12] + [demo, demo2], race_sim)
     io.open(os.path.join(HERE, 'model.json'), 'w', encoding='utf-8').write(
         json.dumps(payload, ensure_ascii=False, separators=(',', ':')))
 

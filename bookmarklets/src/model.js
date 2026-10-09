@@ -687,12 +687,13 @@ const OasisModel = (() => {
   // 係数（rating の式・消費のぶれ・失速の表）は model.json の sim。
   const SIM_PH = ['序盤', '中盤', '終盤'];
   const SIM_CONS = /スタミナ消費量[^。]*?(\d+(?:\.\d+)?)[%％](増加|減少)/;
-  const SIM_POS = ['duel', 'king', 'lead', 'solo'];
+  const SIM_POS = ['duel', 'king', 'lead', 'solo', 'lone', 'low', 'over1', 'over2', 'hold1', 'hold2'];
   // oasis 級の「固有スキル＋追加効果」を節に分ける（Python: _CLAUSE_RE ほか）
   const SIM_CLAUSE = /[＋+]?\s*追加効果\s*[：:]|\n|。/;
   const SIM_NOISE = /乱数幅を(\d+(?:\.\d+)?)[%％]狭める/;
-  const SIM_REC_PH = /(序盤|中盤|終盤)突入時にスタミナを(\d+(?:\.\d+)?)[%％]回復/;
-  const SIM_REC_LOW = /残りスタミナ(\d+(?:\.\d+)?)[%％]以下で一度だけ(\d+(?:\.\d+)?)[%％]回復/;
+  const SIM_REC_PH = /(序盤|中盤|終盤)(?:突入|開始)時に[^。]*?(\d+(?:\.\d+)?)[%％]を?回復/;
+  const SIM_REC_LOW = /残りスタミナが?(\d+(?:\.\d+)?)[%％]以下[^。]*?一度だけ[^。]*?(\d+(?:\.\d+)?)[%％]を?回復/;
+  const SIM_RELIEF = /スタミナ不足による速度低下を(\d+(?:\.\d+)?)[%％]軽減/;
   const simTextScope = (t, S) => {        // Python: _text_scope
     if (t.includes('常時')) return ['always', null, 1];
     if (t.includes('残り300m')) return ['tail300', null, 1];
@@ -703,8 +704,19 @@ const OasisModel = (() => {
     if (t.includes('下位半分')) return ['conditional', null, 0.527];
     return null;
   };
-  const simPosKind = t => t.includes('先頭から20m以内') ? 'king' : t.includes('20m以内') ? 'duel'
-    : t.includes('2位と50m以上') ? 'solo' : t.includes('先頭の間') ? 'lead' : null;
+  const simPosKind = t => {                 // Python: _pos_kind
+    if (t.includes('先頭から20m以内')) return 'king';
+    if (t.includes('50m以内に') && t.includes('いない')) return 'lone';
+    if (t.includes('追い抜かれてから200m')) return 'over2';
+    if (t.includes('追い抜かれた直後の100m')) return 'over1';
+    const m = t.match(/(中盤|終盤)(?:開始時に順位が|で)下位半分/);
+    if (m) return m[1] === '中盤' ? 'hold1' : 'hold2';
+    if (t.includes('下位半分の間')) return 'low';
+    if (t.includes('20m以内')) return 'duel';
+    if (t.includes('2位と50m以上')) return 'solo';
+    if (t.includes('先頭の間')) return 'lead';
+    return null;
+  };
   // Python: race_sim.horse_profile と同じ計算。
   function simProfile(h, dist, track, M, same) {
     const S = M.sim, ns = S.nseg[dist], n = ns[0] + ns[1] + ns[2];
@@ -713,7 +725,10 @@ const OasisModel = (() => {
     let gamble = null;
     // 位置で決まる効果（20m以内にライバル・先頭から20m以内の2位以下・先頭の間・2位と50m以上）
     const pos = {}; for (const k of SIM_POS) pos[k] = [{}, 1];
-    const dyn = new Set(S.pos_kinds || []);
+    const dyn = new Set(S.pos_kinds || []), newPos = new Set(S.new_pos || []);
+    let nz = 1, relief = 1;
+    const recPh = [0, 0, 0];
+    let recLow = null;
     const addPos = (kind, m, cm) => {
       for (const k of Object.keys(m)) pos[kind][0][k] = (pos[kind][0][k] == null ? 1 : pos[kind][0][k]) * m[k];
       pos[kind][1] *= cm;
@@ -750,13 +765,21 @@ const OasisModel = (() => {
     };
     for (const p of (h.passives || [])) {
       const sp = M.spec[p] || {};
+      const sx = (S.pas_special || {})[p];      // 回復・疲労の軽減・乱数（Python: FIX_REC / FIX_RELIEF）
+      if (sx) {
+        if (sx.rec) { if (sx.rec[0] >= 0) recPh[sx.rec[0]] += sx.rec[2]; else if (!recLow) recLow = [sx.rec[1], sx.rec[2]]; }
+        else if (sx.nz != null) nz *= sx.nz;
+        else if (sx.relief != null) relief *= sx.relief;
+        continue;
+      }
       const m = Object.assign({}, sp.mult || {});
       if (!Object.keys(m).length) continue;
       const sc = sp.scope;
       if (sc === 'aptitude' && sp.scope_arg !== dist && sp.scope_arg !== track) continue;
       if (sc === 'same_species' && !same) continue;
       if (p === S.gamble) { gamble = [sp.duty == null ? 0.05 : +sp.duty, m]; continue; }
-      const pp = (S.pos_passives || {})[p];
+      let pp = (S.pos_passives || {})[p];
+      if (pp && newPos.has(pp.kind) && !dyn.has(pp.kind)) pp = null;   // 均すときは従来どおり
       if (pp) {
         const mm = Object.assign({}, pp.mult);
         if (dyn.has(pp.kind)) { addPos(pp.kind, mm, pp.cost); continue; }
@@ -765,6 +788,15 @@ const OasisModel = (() => {
         if (!Object.keys(m).length) continue;
       }
       const cp = (S.cost_passives || {})[p];
+      if (cp && p === 'ロングスパート' && S.fix_ls) {     // レースの半分から（Python と同じ）
+        let cnt = 0; for (let k = ns[0]; k < ns[0] + ns[1]; k++) if (k >= n / 2) cnt++;
+        const fmid = cnt / ns[1];
+        cost[1] *= 1 + (cp[1] - 1) * fmid; cost[2] *= cp[1];
+        const m2 = {}, m1 = {};
+        for (const k of Object.keys(m)) if (k !== 'stamina') { m2[k] = +m[k]; m1[k] = 1 + (m[k] - 1) * fmid; }
+        fx.push([2, m2]); fx.push([1, m1]);
+        continue;
+      }
       if (cp) {
         const pis = cp[0] ? [SIM_PH.indexOf(cp[0])] : [0, 1, 2];
         for (const pi of pis) cost[pi] *= cp[1];
@@ -774,13 +806,11 @@ const OasisModel = (() => {
       if (sc === 'always' || sc === 'aptitude' || sc === 'same_species') avg(m, 1);
       else put(m, sc, sp.scope_arg, sp.duty == null ? 1 : +sp.duty, p);
     }
-    let nz = 1;
-    const recPh = [0, 0, 0];
-    let recLow = null;
     const itemClause = (label, desc, key) => {      // Python: item_clause
       if (/ばらつき|ブレ|乱数幅/.test(desc) && !Object.keys(pctMults(desc)).length) return;
       const m = pctMults(desc);
-      const kind = simPosKind(desc);
+      let kind = simPosKind(desc);
+      if (newPos.has(kind) && !dyn.has(kind)) kind = null;
       const cm = kind ? null : desc.match(SIM_CONS);
       if (kind) {
         const pcm = posCost(m, desc);
@@ -820,6 +850,8 @@ const OasisModel = (() => {
         if (mm) { recPh[SIM_PH.indexOf(mm[1])] += parseFloat(mm[2]) / 100; return; }
         mm = t.match(SIM_REC_LOW);
         if (mm) { if (!recLow) recLow = [parseFloat(mm[1]) / 100, parseFloat(mm[2]) / 100]; return; }
+        mm = t.match(SIM_RELIEF);
+        if (mm) { relief *= 1 - parseFloat(mm[1]) / 100; return; }
         itemClause(j === 0 ? label : '', t, j === 0 ? String(it.effect_key || '') : '');
       });
     }
@@ -836,7 +868,7 @@ const OasisModel = (() => {
     return { st: st, c0: need / n, cost: cost, s0: Math.floor(e.stamina),
              g_p: gamble ? gamble[0] : 0, g_m: KS.map(k => gamble ? (gamble[1][k] == null ? 1 : +gamble[1][k]) : 1),
              p_m: SIM_POS.map(kd => KS.map(k => pos[kd][0][k] == null ? 1 : pos[kd][0][k])),
-             p_c: SIM_POS.map(kd => pos[kd][1]), nz: nz, rec_ph: recPh, rec_low: recLow || [0, 0] };
+             p_c: SIM_POS.map(kd => pos[kd][1]), nz: nz, relief: relief, rec_ph: recPh, rec_low: recLow || [0, 0] };
   }
 
   function simInputs(horses, dist, track, M) {
@@ -856,6 +888,12 @@ const OasisModel = (() => {
     const hasP = prof.map(x => SIM_POS.map((_, j) => x.p_m[j].some(v => v !== 1) || x.p_c[j] !== 1));
     const anyP = hasP.some(a => a.some(Boolean));
     const pid = horses.map(h => +h.pet_id || 0);
+    // 1区間の消費 = clamp(乱数 × c0 × 発動中の実効ステの比, 下限, 上限)（Python: COST_MODE='clampdyn'）
+    const L = (M.stamina_cost_law || {})[dist] || { lo: 0, hi: Infinity };
+    const cMode = S.cost_mode || 'old';
+    const wcv = [0, 1, 2].map(j => M.phase_early[j] * ((M.dist_balance || {})[dist] || [1, 1, 1])[j]);
+    const crw = prof.map(x => x.st.map(st => st[0] * wcv[0] + st[1] * wcv[1] + st[2] * wcv[2]));
+    const clampC = v => Math.min(Math.max(v, L.lo), L.hi);
     // 区間ごとの消費倍率と、その区間から最後までの和（見込みの余りに使う）
     const cmS = prof.map(x => segPh.map(pi => x.cost[pi]));
     const remS = cmS.map(a => { const r = new Array(nseg); let acc = 0; for (let k = nseg - 1; k >= 0; k--) { acc += a[k]; r[k] = acc; } return r; });
@@ -869,13 +907,18 @@ const OasisModel = (() => {
     const NS = nSim || S.n_sim || 8000;
     const win = new Float64Array(H), combo = new Map(), T = new Float64Array(H);
     const C = new Float64Array(H), ON = new Uint8Array(H), Sv = new Float64Array(H), S0 = new Float64Array(H), DT = new Float64Array(H);
-    const HZ = new Float64Array(H).fill(1), RU = new Uint8Array(H);
+    const HZ = new Float64Array(H).fill(1), RU = new Uint8Array(H), RF = new Float64Array(H);
+    const RK = new Int32Array(H), RKP = new Int32Array(H), DROP = new Int32Array(H);
+    const LOW = [new Uint8Array(H), new Uint8Array(H), new Uint8Array(H)];
+    const ord = [...Array(H).keys()];
     const inRace = !!(S.horse_sd && S.horse_in_race);   // 調子のぶれをレース中の速さに掛ける（Python と同じ）
     const mul = [1, 1, 1];
     for (let it = 0; it < NS; it++) {
       for (let h = 0; h < H; h++) {
         const x = prof[h];
-        C[h] = x.c0 * Math.exp(S.cost_mu + S.cost_sd * randn());
+        RF[h] = Math.exp(S.cost_mu + S.cost_sd * randn());
+        C[h] = x.c0 * RF[h];
+        DROP[h] = -10;
         ON[h] = x.g_p > 0 && randn() < S.gamble_z ? 1 : 0;      // 勝負師の抽選（5%）
         Sv[h] = ON[h] ? Math.floor(x.s0 * x.g_m[2]) : x.s0;
         S0[h] = Math.max(Sv[h], 1);
@@ -891,6 +934,15 @@ const OasisModel = (() => {
           if (i1 < 0 || ahead(h, i1)) { i2 = i1; i1 = h; } else if (i2 < 0 || ahead(h, i2)) i2 = h;
         }
         const t1 = i1 >= 0 ? T[i1] : Infinity, t2 = i2 >= 0 ? T[i2] : Infinity;
+        if (anyP) {          // 順位（0 = 先頭・同位置は pet_id 順）・追い抜かれ・フェーズの始めの下位半分（Python と同じ）
+          ord.sort((a, b) => (T[a] - T[b]) || (pid[a] - pid[b]));
+          for (let r = 0; r < H; r++) RK[ord[r]] = r;
+          for (let h = 0; h < H; h++) {
+            if (k > 0 && RK[h] > RKP[h]) DROP[h] = k;
+            RKP[h] = RK[h];
+            if (k === 0 || segPh[k - 1] !== pi) LOW[pi][h] = RK[h] + 1 > H / 2 ? 1 : 0;
+          }
+        }
         for (let h = 0; h < H; h++) {
           const x = prof[h];
           for (let j = 0; j < 3; j++) mul[j] = ON[h] ? x.g_m[j] : 1;
@@ -902,7 +954,9 @@ const OasisModel = (() => {
             for (let o = 0; o < H; o++) if (o !== h) near = Math.min(near, Math.abs(T[o] - T[h]));
             const lead = h === i1;
             const cond = [near * spd <= S.duel_m, !lead && (T[h] - t1) * spd <= S.duel_m,
-                          lead, lead && (t2 - T[h]) * spd >= S.solo_m];
+                          lead, lead && (t2 - T[h]) * spd >= S.solo_m,
+                          near * spd >= S.solo_m, RK[h] + 1 > H / 2, DROP[h] === k, DROP[h] >= k - 1,
+                          pi === 1 && LOW[1][h] === 1, pi === 2 && LOW[2][h] === 1];
             for (let q = 0; q < SIM_POS.length; q++) if (hasP[h][q] && cond[q]) {
               for (let j = 0; j < 3; j++) mul[j] *= x.p_m[q][j];
               cmul *= x.p_c[q];
@@ -916,8 +970,15 @@ const OasisModel = (() => {
           const w = W[pi], st = x.st[pi];
           const rv = Math.pow(Math.max(st[0] * w[0] * mul[0] + st[1] * w[1] * mul[1] + st[2] * w[2] * mul[2] + w[3], 1), S.v_exp);
           // 疲労補正は「この先を走り切ったときの見込みの余り ÷ 初期スタミナ」で引く（Python と同じ）
-          const f = Math.pow(fat((Sv[h] - C[h] * remS[h][k]) / S0[h]), S.f_exp);
+          if (cMode === 'clamp' || cMode === 'clampdyn') C[h] = clampC(RF[h] * x.c0);
+          let f0 = fat((Sv[h] - C[h] * remS[h][k]) / S0[h]);
+          if (f0 < 1) f0 = 1 - (1 - f0) * x.relief;           // 苦痛慣れ・粘り腰
+          const f = Math.pow(f0, S.f_exp);
           DT[h] = HZ[h] / (rv * f * (1 + S.seg_noise * x.nz * randn()));
+          if (cMode === 'clampdyn') {                          // 発動中の効果で上がった実効ステぶん消費も増える
+            const r = (st[0] * wcv[0] * mul[0] + st[1] * wcv[1] * mul[1] + st[2] * wcv[2] * mul[2]) / crw[h][pi];
+            C[h] = clampC(RF[h] * x.c0 * r);
+          }
           Sv[h] -= C[h] * cmS[h][k] * cmul;
         }
         for (let h = 0; h < H; h++) T[h] += DT[h];      // 全頭の区間が終わってから進める（Python と同じ）
