@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.53.0';
+const AP_VER = '1.56.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -500,6 +500,12 @@ async function analyseRace(sid, info, canBuy) {
       passives: horses[i].passives, equipment: h.equipment, charm: h.charm,
     })), dist, track, M, M.sim.n_sim, sid);
     winP = sr.win; combo = triOk ? sr.combo : []; model = 'sim';
+    // 3連単の組の確率を較正（Python: race_sim.TRI_CALIB。順番は変わらない）
+    const tc = M.sim.tri_calib;
+    if (tc) combo = combo.map(c => {
+      const q = Math.min(Math.max(c.p, 1e-4), 1 - 1e-4);
+      return Object.assign({}, c, { p: 1 / (1 + Math.exp(-(tc[0] + tc[1] * Math.log(q / (1 - q))))) });
+    });
     const top = a => a.reduce((b, p, i) => (p > a[b] ? i : b), 0);
     const ts = top(winP), tr = top(ridgeWin), nm = i => esc(pets[i].display_name || pets[i].name);
     log(`R${sid}: 予想は区間シミュレータ（本命 ${nm(ts)} ${fx(winP[ts] * 100, 0)}%`

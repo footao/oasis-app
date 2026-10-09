@@ -693,6 +693,7 @@ const OasisModel = (() => {
   const SIM_NOISE = /乱数幅を(\d+(?:\.\d+)?)[%％]狭める/;
   const SIM_REC_PH = /(序盤|中盤|終盤)(?:突入|開始)時に[^。]*?(\d+(?:\.\d+)?)[%％]を?回復/;
   const SIM_REC_LOW = /残りスタミナが?(\d+(?:\.\d+)?)[%％]以下[^。]*?一度だけ[^。]*?(\d+(?:\.\d+)?)[%％]を?回復/;
+  const SIM_STEVAL = /(序盤|中盤|終盤)のスタミナ評価が(\d+(?:\.\d+)?)[%％]上昇/;   // Python: _STEVAL_RE
   const SIM_RELIEF = /スタミナ不足による速度低下を(\d+(?:\.\d+)?)[%％]軽減/;
   const simTextScope = (t, S) => {        // Python: _text_scope
     if (t.includes('常時')) return ['always', null, 1];
@@ -727,6 +728,7 @@ const OasisModel = (() => {
     const pos = {}; for (const k of SIM_POS) pos[k] = [{}, 1];
     const dyn = new Set(S.pos_kinds || []), newPos = new Set(S.new_pos || []);
     let nz = 1, relief = 1;
+    const rfx = [];                          // rating だけに効くスタミナ倍率（スタミナ評価）
     const recPh = [0, 0, 0];
     let recLow = null;
     const addPos = (kind, m, cm) => {
@@ -852,6 +854,8 @@ const OasisModel = (() => {
         if (mm) { if (!recLow) recLow = [parseFloat(mm[1]) / 100, parseFloat(mm[2]) / 100]; return; }
         mm = t.match(SIM_RELIEF);
         if (mm) { relief *= 1 - parseFloat(mm[1]) / 100; return; }
+        mm = t.match(SIM_STEVAL);
+        if (mm) { rfx.push([SIM_PH.indexOf(mm[1]), 1 + parseFloat(mm[2]) / 100]); return; }
         itemClause(j === 0 ? label : '', t, j === 0 ? String(it.effect_key || '') : '');
       });
     }
@@ -865,6 +869,7 @@ const OasisModel = (() => {
     const KS = ['speed', 'power', 'stamina'];
     const st = [0, 1, 2].map(() => KS.map(k => base[k]));
     for (const [pi, m] of fx) KS.forEach((k, j) => { if (k in m) st[pi][j] *= m[k]; });
+    for (const [pi, x] of rfx) st[pi][2] *= x;        // 初期スタミナ・消費（e）には入れない（Python と同じ）
     return { st: st, c0: need / n, cost: cost, s0: Math.floor(e.stamina),
              g_p: gamble ? gamble[0] : 0, g_m: KS.map(k => gamble ? (gamble[1][k] == null ? 1 : +gamble[1][k]) : 1),
              p_m: SIM_POS.map(kd => KS.map(k => pos[kd][0][k] == null ? 1 : pos[kd][0][k])),
@@ -913,10 +918,12 @@ const OasisModel = (() => {
     const ord = [...Array(H).keys()];
     const inRace = !!(S.horse_sd && S.horse_in_race);   // 調子のぶれをレース中の速さに掛ける（Python と同じ）
     const mul = [1, 1, 1];
+    const sdR = S.cost_sd_r || 0, sdH = S.cost_sd_h == null ? S.cost_sd : S.cost_sd_h;
     for (let it = 0; it < NS; it++) {
+      const zr = sdR ? randn() : 0;            // 消費の乱数のレース共通ぶん（Python: COST_COMMON）
       for (let h = 0; h < H; h++) {
         const x = prof[h];
-        RF[h] = Math.exp(S.cost_mu + S.cost_sd * randn());
+        RF[h] = Math.exp(S.cost_mu + sdR * zr + sdH * randn());
         C[h] = x.c0 * RF[h];
         DROP[h] = -10;
         ON[h] = x.g_p > 0 && randn() < S.gamble_z ? 1 : 0;      // 勝負師の抽選（5%）

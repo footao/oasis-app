@@ -27,3 +27,8 @@ _handoff/
 shadow.jsonl
 shadow.log
 shadow_report.txt
+
+# 見張り（watch.py）の状態と警告。馬名を含む
+watch_state.json
+alerts.txt
+alerts_sent.txt

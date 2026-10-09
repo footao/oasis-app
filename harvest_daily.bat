@@ -21,4 +21,6 @@ echo ===== %DATE% %TIME% =====>> harvest.log
 set RC=%ERRORLEVEL%
 rem 影の運用: シミュレータの予想を記録して bot と比べる（買い方には使わない）。結果は shadow_report.txt
 "%PY%" shadow_sim.py >> shadow.log 2>&1
+rem 見張り: 大きく外れたレース・シミュに反映されない効果・精度の低下を alerts.txt に書く（次のレポートのあとに Discord へ）
+"%PY%" watch.py >> watch.log 2>&1
 exit /b %RC%

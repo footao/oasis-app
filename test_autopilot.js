@@ -104,7 +104,12 @@ if (fs.existsSync(fxPath)) {
     const sim = OasisModel.simRace(r.horses, r.dist, r.track, M, M.sim.n_sim, r.sid).win;
     console.assert(c.model === 'sim', 'analyseRace は区間シミュレータで予想する');
     console.assert(gotWin && gotWin.every((p, i) => Math.abs(p - sim[i]) < 1e-12), '単勝の確率はシミュレータのもの');
-    console.assert(gotCombo && gotCombo.length && Math.abs(gotCombo.reduce((a, x) => a + x.p, 0) - 1) < 1e-9, '3連単の確率はシミュレータのもの');
+    // 3連単はシミュレータの組の確率を較正したもの（σ(a + b·logit p)。順番は変わらない）
+    const sc = OasisModel.simRace(r.horses, r.dist, r.track, M, M.sim.n_sim, r.sid).combo, tc = M.sim.tri_calib;
+    const cal = p => { const q = Math.min(Math.max(p, 1e-4), 1 - 1e-4); return 1 / (1 + Math.exp(-(tc[0] + tc[1] * Math.log(q / (1 - q))))); };
+    console.assert(gotCombo && gotCombo.length === sc.length && gotCombo.every((x, i) => x.i === sc[i].i && x.j === sc[i].j
+                   && x.k === sc[i].k && Math.abs(x.p - cal(sc[i].p)) < 1e-12) && cal(0.45) > 0.45 && cal(0.05) < 0.05,
+                   '3連単の確率はシミュレータの組を較正したもの');
     console.assert(c.rw && c.rw.length === Math.min(5, pets.length) && c.rc && c.rc.length >= 1 && c.rc.length <= 10, '従来モデルの予想を rw/rc に残す');
     console.log('analyseRace: model', c.model, '/ 従来の本命', c.rw && c.rw[0].n);
   })().catch(e => { failed++; console.error('❌ analyseRace が落ちた: ' + (e && e.stack || e)); });

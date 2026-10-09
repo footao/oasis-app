@@ -80,7 +80,7 @@ def main(log_path=None):
         # 見本は直近4レース＋区間効果（序盤/中盤/終盤・残り300m・残スタミナ・先頭・馬場）を持つ馬がいるレース
         want = race_sim.LOWST_LABELS | race_sim.LEAD_LABELS | race_sim.POS_LABELS | {
             '終焉加速', '幻界終走', '時界超越', '末脚', '中盤加速', 'ロケットスタート', '二の脚', '芝啜り', '泥啜り',
-            '孤影の疾走', '復讐刻印', '追い込み', '亡者の追走', '終星の鎮魂歌', '逆境祈願', '苦痛慣れ', '魂継ぎ', '安定の加護'}
+            '孤影の疾走', '復讐刻印', '追い込み', '亡者の追走', '終星の鎮魂歌', '逆境祈願', '苦痛慣れ', '魂継ぎ', '安定の加護', '夜明けの護り'}
         seen, extra = set(), []
         for r in reversed(raw[:-4]):
             labs = {(it or {}).get('effect_label') for h in r['horses'] for it in (h.get('equipment'), h.get('charm'))

@@ -30,6 +30,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import oasis_core as oc
+import race_sim as rs_mod
 
 
 def hr(title):
@@ -948,12 +949,15 @@ def regression_tests():
           and 'emitSummary(LAST_NOBET, [], 0);' in _ap and 'if (canBuy) LAST_NOBET = ctx;' in _ap,
           'R2531 はまとめが空でパネルのログしか残らず、何を見て見送ったか追えなかった')
 
-    check('P41 未成立枠は1レース1口まで',
-          oc.DEFAULT_SETTINGS['unformed_max_units'] == 1
+    check('P41 未成立枠は1レース2口まで（2026/10/09〜）',
+          oc.DEFAULT_SETTINGS['unformed_max_units'] == 2
           and len(oc.unformed_sleeve_picks({(0, 1, 2): 0.5, (0, 2, 1): 0.4, (1, 0, 2): 0.3},
                                            ['a', 'b', 'c'], lambda n: None, 1_300_000,
-                                           p_min=0.2, edge_min=0.3, max_units=1)) == 1,
-          '実結果24件で1本・回収率9.6%。宝くじとして最小額だけ残す（JS は model.json の defaults から読む）')
+                                           p_min=0.1, edge_min=0.3, max_units=2)) == 2,
+          '較正済みの確率で下限10%。JS は model.json の defaults から読む')
+    check('P41 3連単の組の確率を較正してから使う',
+          "const tc = M.sim.tri_calib;" in _ap and rs_mod.TRI_CALIB[1] > 1.0,
+          f'race_sim.TRI_CALIB {rs_mod.TRI_CALIB}（中ほどの控えめ・低いところの高めを直す）')
 
     check('P40 市場との乖離が大きすぎる単勝は買わない',
           oc.WIN_SKIP_RATIO == 0
@@ -1084,8 +1088,8 @@ def regression_tests():
     check('P28 3連単の的中率下限が Python と JS で一致している',
           _js_mp is not None and abs(float(_js_mp.group(1)) - _mp) < 1e-9,
           f"Python {_mp} / JS {_js_mp.group(1) if _js_mp else '見つからない'}")
-    check('P28 的中率5〜15%の帯を買わない値になっている',
-          _mp >= 0.15 and oc.DEFAULT_SETTINGS['unformed_p_min'] >= 0.15,
+    check('P28 的中率5〜15%の帯を買わない値になっている（EV枠。未成立枠は 10/09〜 較正済みで10%）',
+          _mp >= 0.15 and oc.DEFAULT_SETTINGS['unformed_p_min'] >= 0.10,
           f"min_prob {_mp} / 未成立 {oc.DEFAULT_SETTINGS['unformed_p_min']}"
           '（実ベット52レース: 予測5〜15%の帯は93件・予測9.1%→実測1.1%・回収率24%。'
           '切ると全体123%→140%、σ差し戻し後34レースで139%→147%）')

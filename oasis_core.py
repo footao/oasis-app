@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.55.0'
+CORE_VERSION = '3.56.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -3351,9 +3351,10 @@ DEFAULT_SETTINGS = dict(
     # 未成立枠は1レース1口まで（2026/09/29）。実結果24件で的中1本・回収率9.6%、
     # その1本も CO バグで人気組を未成立と誤認したもの（実効136倍の見積りが実際2.3倍）。
     # 「当たれば120倍」の払戻は未観測なので、宝くじとして最小額だけ残す。
-    unformed_sleeve=False, unformed_max_units=1,
-    # 未成立組も同じ下限を通す（下の min_prob と同じ理由。実測 0/31 だった）
-    unformed_p_min=0.20, unformed_edge_min=0.30,
+    # 2026/10/09: 2口・下限10% に広げた。上の実測は従来モデル（Ridge）のもの。区間シミュレータ＋3連単の較正では
+    # 10〜20% 帯が 予測11%→実際11% と合っていて、プール約100万なら損益分岐は約1%（R2649 は1口で約100万）。
+    unformed_sleeve=False, unformed_max_units=2,
+    unformed_p_min=0.10, unformed_edge_min=0.30,
     win_bets=False, win_edge_min=0.15,
     n_sim=N_SIM, spec_path=None,
     # モデル確率をどこまで信じるか。EV計算では p_bet = λ×モデル + (1−λ)×市場 を使う。

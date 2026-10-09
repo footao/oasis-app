@@ -137,6 +137,9 @@ _REC_PH_RE = re.compile(r'(序盤|中盤|終盤)(?:突入|開始)時に[^。]*?(
 # 「残りスタミナ20%以下で一度だけ4%回復」/「残りスタミナが20%以下になったとき、一度だけ最大スタミナの6%を回復」（緊急回復）
 _REC_LOW_RE = re.compile(r'残りスタミナが?(\d+(?:\.\d+)?)[%％]以下[^。]*?一度だけ[^。]*?(\d+(?:\.\d+)?)[%％]を?回復')
 # 「スタミナ不足による速度低下をN%軽減」（苦痛慣れ・粘り腰）: 疲労補正が1未満の区間だけ、落ちる幅をN%縮める
+# 「序盤のスタミナ評価がN%上昇」（夜明けの護り）: そのフェーズの rating の計算でだけスタミナを N% 増し。
+# 初期スタミナ・消費・疲労補正は変わらない（同じ馬の着け外し24組中22組で一致・2026/10/09）
+_STEVAL_RE = re.compile(r'(序盤|中盤|終盤)のスタミナ評価が(\d+(?:\.\d+)?)[%％]上昇')
 _RELIEF_RE = re.compile(r'スタミナ不足による速度低下を(\d+(?:\.\d+)?)[%％]軽減')
 # 2026/10/08 timeline の解析で見つけたずれ（それまでは平均・別物として扱っていた）:
 #   セカンドウインド・緊急回復はスタミナの**回復**（スタミナのステータス +8%/+6% として rating まで盛っていた）
@@ -152,6 +155,15 @@ FIX_REC, FIX_RELIEF, FIX_LS = True, True, True
 # （dyn は3連単 −0.104±0.040 だが単勝が ±0.021 とぶれる。クランプ前の式は馬をまたぐと合わない＝傾き −0.73）
 COST_MODE = 'clampdyn'   # 'old' 一定 / 'clamp' 乱数の後にクランプ / 'clampdyn' ＋発動中の実効ステ / 'dyn' 式から全部
 COST_DYNAMIC = COST_MODE == 'dyn'
+# 消費の乱数はレース共通ぶん（sd 0.038）と馬ごとぶん（0.051）に分けて振る。全頭が同時にバテる/余るレースが出る。
+# 前向き207R: 単勝LL 0.211→0.208（−0.0024±0.0016）/ 3連単LL 0.739→0.720（−0.020±0.005）/ 3連単本命的中 77.5%→79.3%
+COST_COMMON = True
+# 3連単の組の確率の較正: p' = σ(a + b·logit p)。シミュは組の確率が中ほど（40〜70%）で控えめ・
+# 低いところ（2〜10%）で高めに出る（前向き225R: 予想45%→実際70% / 65%→92% / 5%→1%）。
+# 前向きに当て直した係数で 実際の組の対数損失 0.650→0.626、記録のある組での買い直し +1,106万→+1,181万（2026/10/09）。
+# bot の 3連単（EV枠・未成立枠）にだけ使う。単勝は較正が合っているので触らない。
+# 10/09 消費の乱数をレース共通に分けた後に当て直し（0.33, 1.40 → 0.28, 1.36）
+TRI_CALIB = (0.28, 1.36)
 
 
 # 見本（selftest と JS の一致検証用）。数値は告知の範囲の中から1つ選んだもの。
@@ -200,6 +212,7 @@ def horse_profile(h, dist, track, spec, same_species, scope_tbl=None):
     fx, cost, gamble = [], [1.0, 1.0, 1.0], None
     nz, rec = 1.0, []                 # 区間の乱数の倍率 / スタミナ回復 [(フェーズ or None, 残り割合の閾値, 回復率)]
     relief = 1.0                      # 疲労補正 < 1 のとき、落ちる幅に掛ける倍率（苦痛慣れ・粘り腰）
+    rfx = []                          # rating の計算だけに効くスタミナ倍率 [(フェーズ, 倍率)]
     pos = {k: [{}, 1.0, set()] for k in POS_KINDS}      # 種類 → [ステ倍率, 消費倍率, 発動キー]
 
     def add_pos(kind, m, cm, key):
@@ -381,11 +394,15 @@ def horse_profile(h, dist, track, spec, same_species, scope_tbl=None):
             if mm:
                 relief *= 1.0 - float(mm.group(1)) / 100.0
                 continue
+            mm = _STEVAL_RE.search(t)
+            if mm:
+                rfx.append((_phase_idx(mm.group(1)), 1.0 + float(mm.group(2)) / 100.0))
+                continue
             # 2つ目以降の節（追加効果）は固有スキル名・effect_key のカタログを使わず、文面で決める
             item_clause(label if j == 0 else '', t, str(it.get('effect_key') or '') if j == 0 else '')
     for k in base:
         base[k] = max(base[k], 1.0)
-    return dict(base=base, fx=fx, cost=cost, gamble=gamble, pos=pos, nz=nz, rec=rec, relief=relief)
+    return dict(base=base, fx=fx, cost=cost, gamble=gamble, pos=pos, nz=nz, rec=rec, relief=relief, rfx=rfx)
 
 
 def _tobit(eq, gt, lt):
@@ -441,6 +458,8 @@ class RaceSim:
                 for j, k in enumerate(('speed', 'power', 'stamina')):
                     if k in m:
                         st[pi, j] *= m[k]
+            for pi, x in pf['rfx']:          # スタミナ評価（rating だけ。初期スタミナ・消費の e には入れない）
+                st[pi, 2] *= x
             g = pf['gamble']
             L = oc.STAMINA_COST_LAW[dist]
             wc = np.array(oc.INTERNAL_PHASE_WEIGHTS['序盤']) * np.array(oc.INTERNAL_DIST_BALANCE[dist])
@@ -471,7 +490,7 @@ class RaceSim:
         races = [r for r in races if str(r.get('harvested_at', ''))[:10] <= str(r.get('race_date', ''))]
         X = {(d, pi): [] for d in NSEG for pi in range(3)}
         Y = {(d, pi): [] for d in NSEG for pi in range(3)}
-        cr, fq = [], []
+        cr, fq, crg = [], [], {}
         for r in races:
             R = self._race(r)
             if not R:
@@ -521,6 +540,7 @@ class RaceSim:
                     cexp = row['c0'] * np.mean([row['cost'][pi] for pi in ph_of])
                     if cs and cexp > 0 and not row['g_p']:
                         cr.append(math.log(np.mean(cs) / cexp))
+                        crg.setdefault(r.get('schedule_id'), []).append(cr[-1])
                 s0, nn = tl[0].get('stamina'), len(tl) - 1
                 for k in range(1, len(tl)):
                     a, c, f = tl[k - 1].get('stamina'), tl[k].get('stamina_cost'), tl[k].get('fatigue_modifier')
@@ -542,6 +562,11 @@ class RaceSim:
                                                 [x for t, x in cr if t == '<'])
         else:
             self.cost_mu, self.cost_sd = float(np.mean(cr)), float(np.std(cr))
+            # レース共通ぶんと馬ごとぶんに分ける（同じレースの馬どうしのばらつき = 馬ごと）
+            g = [v for v in crg.values() if len(v) >= 3]
+            wv = float(np.mean([np.var(v, ddof=1) for v in g])) if g else self.cost_sd ** 2
+            self.cost_sd_h = math.sqrt(min(wv, self.cost_sd ** 2))
+            self.cost_sd_r = math.sqrt(max(self.cost_sd ** 2 - wv, 0.0))
         # 疲労補正は「残りの区間を走り切ったときの見込みの余り ÷ 初期スタミナ」でほぼ決まる
         # （timeline 39,630区間: 相関0.82。余りが多いほど最大 +3%、足りないと 0.65 まで落ちる）。
         # 2026/10/07 まで「残り ÷ 1区間の消費」で引いていて、余りの +0〜3% を全部 1.0 に潰していた
@@ -598,6 +623,8 @@ class RaceSim:
                 'w': {d: [[float(x) for x in self.W[(d, pi)][0]] + [float(self.W[(d, pi)][1])]
                           for pi in range(3)] for d in NSEG},
                 'cost_mu': self.cost_mu, 'cost_sd': self.cost_sd,
+                'cost_sd_r': self.cost_sd_r if COST_COMMON else 0.0,
+                'cost_sd_h': self.cost_sd_h if COST_COMMON else self.cost_sd,
                 'fqx': [float(x) for x in self.FQX], 'fqy': [float(x) for x in self.FQY],
                 'v_exp': V_EXP, 'f_exp': F_EXP, 'seg_noise': SEG_NOISE, 'horse_sd': self.horse_sd,
                 'horse_in_race': HORSE_IN_RACE,
@@ -605,6 +632,7 @@ class RaceSim:
                 'lead_duty': LEAD_DUTY, 'lowst_duty': LOWST_DUTY,
                 'cost_passives': {k: [v[0], v[1]] for k, v in COST_PASSIVES.items()}, 'gamble': GAMBLE,
                 # JS は一様乱数を持たないので、勝負師の抽選は「正規乱数 < この値」で行う（確率は同じ）
+                'tri_calib': list(TRI_CALIB),
                 'gamble_z': NormalDist().inv_cdf(float((self.spec.get(GAMBLE) or {}).get('duty', 0.05))),
                 'pos_kinds': [k for k in POS_KINDS if k in POS_DYNAMIC], 'pos_duty': POS_DUTY,
                 'pos_passives': self._pos_passives(), 'new_pos': sorted(NEW_POS),
@@ -620,7 +648,11 @@ class RaceSim:
         H, NS, ns = len(rows), self.n_sim, NSEG[d]
         n = sum(ns)
         ph_of = np.repeat(np.arange(3), ns)
-        rf = np.exp(self.cost_mu + self.cost_sd * rng.standard_normal((NS, H)))   # レースの消費の乱数
+        if COST_COMMON:   # レース共通の乱数 ＋ 馬ごとの乱数（全頭が同時にバテる・余るレースを出す）
+            rf = np.exp(self.cost_mu + self.cost_sd_r * rng.standard_normal((NS, 1))
+                        + self.cost_sd_h * rng.standard_normal((NS, H)))
+        else:
+            rf = np.exp(self.cost_mu + self.cost_sd * rng.standard_normal((NS, H)))   # レースの消費の乱数
         L = oc.STAMINA_COST_LAW[d]
         wc = np.array(oc.INTERNAL_PHASE_WEIGHTS['序盤']) * np.array(oc.INTERNAL_DIST_BALANCE[d]) * L['c']
         craw = np.array([x['craw'] for x in rows])                            # H×フェーズ（クランプ前・倍率なし）
@@ -777,6 +809,8 @@ if __name__ == '__main__':      # 動作確認: 最後の日より前で学習 �
     assert ok(ls['cost'][1], 1 + 0.08 * 0.4) and ok(ls['cost'][2], 1.08) and (1, {'power': 1 + 0.07 * 0.4}) in [
         (q, {k: round(v, 12) for k, v in m.items()}) for q, m in ls['fx']]
     assert ok(P('closer_stance')['pos']['hold1'][0]['power'], 1.08) and ok(P('indomitable')['pos']['over1'][0]['power'], 1.08)
+    dg = P(None, dict(effect_label='夜明けの護り', effect_description='序盤のスタミナ評価が4.3%上昇', effect_key='charm_dawn_guard'))
+    assert dg['rfx'] == [(0, 1.043)] and ok(dg['base']['stamina'], 100) and not dg['fx']
     req = P(None, dict(effect_label='終星の鎮魂歌', effect_description='終盤で下位半分ならパワーが26.1%上昇', effect_key='unique_last_requiem'))
     assert ok(req['pos']['hold2'][0]['power'], 1.261) and not req['fx']
     # 先頭の判定（同じ位置なら pet_id の小さい馬が前）: R2257 はスタートで先頭を取った首位の呪いのおいらが逃げ切った
