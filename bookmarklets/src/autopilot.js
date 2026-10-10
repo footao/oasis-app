@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.56.0';
+const AP_VER = '1.57.1';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -79,11 +79,10 @@ const CFG = {
   // 2026/08/26 まで「+300%超は計算ミスとみなしてレースごと中止」していたが、
   // それは**一番おいしい場面だけを捨てる**設定だった（R2120 で実際に捨てた）。
   // 今は止めずに黄色でログに出すだけ。バグは1レースごとの目視で拾う方針。
-  // 1リクエストあたりの口数。**まず全口数を1回で送り、拒否されたときだけ**この値で
-  // 割り直す。分けて買うと払戻も購入履歴もその数だけ分かれて読みにくい。
-  // 元は buy.js から写した値で、単勝の20に根拠は無い（3連単の10は購入画面の上限）。
+  // 1リクエストあたりの口数。購入画面のボタンは1回10口までなので、APIでも
+  // それに合わせて10口ずつ送る（例: 20口 → 10＋10、25口 → 10＋10＋5）。
   TRI_PER_REQ: 10,
-  WIN_PER_REQ: 20,
+  WIN_PER_REQ: 10,
   WARN_EDGE: 3.0,           // これを超えたらログで知らせる（購入は止めない）
   MAX_SANE_ODDS: 5000,      // 実効オッズの上限。プール20万なら21倍が天井なので実質無効
   // 3連単プールがこれ未満なら3連単は見送る。既定は model.json の初期プール金
@@ -1073,8 +1072,7 @@ function showPending(pl) {
 }
 
 // ---- 購入 ----
-// 3連単は /api/trifecta/buy、単勝は /api/bet。1リクエストあたりの口数は
-// buy.js と同じ（3連単10口・単勝20口）。それを超えると弾かれる。
+// 3連単は /api/trifecta/buy、単勝は /api/bet。1リクエストは最大10口（購入画面と同じ）。
 let buying = false;
 async function doBuy() {
   if (buying || !PENDING) return;
@@ -1126,17 +1124,8 @@ async function doBuy() {
     }
   };
 
-  // まず全口数を1リクエストで送る。通れば払戻も購入履歴も1本にまとまって読みやすい。
-  // APIが1回あたりの口数を制限していた場合だけ chunk 口ずつに割り直す。
-  // ⚠ 通信エラーのときは割り直さない（送信済みかもしれず、二重購入になる）。
+  // chunk 口ずつ送る（購入画面の1回上限に合わせる）。口数の合計は変えない。
   const buyUnits = async (url, mkBody, label, units, unit, chunk) => {
-    if (units > chunk) {
-      const r = await post(url, mkBody(units), `${label} ${units}口`, units * unit, true);
-      if (r === 'ok') return [units, 0];
-      if (r === 'unknown') return [units, units];
-      log(`R${pl.sid}: ${label} ${units}口の一括購入が通らないので `
-          + `${chunk}口ずつに分けます`, '#888');
-    }
     let leftU = units, sent = 0, unsure = 0;
     while (leftU > 0) {
       const u = Math.min(leftU, chunk);

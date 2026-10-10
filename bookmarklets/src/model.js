@@ -919,11 +919,12 @@ const OasisModel = (() => {
     const inRace = !!(S.horse_sd && S.horse_in_race);   // 調子のぶれをレース中の速さに掛ける（Python と同じ）
     const mul = [1, 1, 1];
     const sdR = S.cost_sd_r || 0, sdH = S.cost_sd_h == null ? S.cost_sd : S.cost_sd_h;
+    const muC = S.cost_mu + (S.cost_mu_n || 0) * Math.log(H);   // 少頭数ほど消費が少ない（Python: COST_FIELD）
     for (let it = 0; it < NS; it++) {
       const zr = sdR ? randn() : 0;            // 消費の乱数のレース共通ぶん（Python: COST_COMMON）
       for (let h = 0; h < H; h++) {
         const x = prof[h];
-        RF[h] = Math.exp(S.cost_mu + sdR * zr + sdH * randn());
+        RF[h] = Math.exp(muC + sdR * zr + sdH * randn());
         C[h] = x.c0 * RF[h];
         DROP[h] = -10;
         ON[h] = x.g_p > 0 && randn() < S.gamble_z ? 1 : 0;      // 勝負師の抽選（5%）

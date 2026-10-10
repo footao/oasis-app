@@ -158,6 +158,9 @@ COST_DYNAMIC = COST_MODE == 'dyn'
 # 消費の乱数はレース共通ぶん（sd 0.038）と馬ごとぶん（0.051）に分けて振る。全頭が同時にバテる/余るレースが出る。
 # 前向き207R: 単勝LL 0.211→0.208（−0.0024±0.0016）/ 3連単LL 0.739→0.720（−0.020±0.005）/ 3連単本命的中 77.5%→79.3%
 COST_COMMON = True
+# 消費の水準は頭数で変わる（3頭 −13% / 8頭以上 −5%・log(頭数)の係数 +0.05）。これでレース共通ぶんの sd 0.038→0.034。
+# 前向き210R: 単勝LL −0.003±0.003 / 3連単LL −0.003±0.004（少頭数のレースが少ないので差は小さい）
+COST_FIELD = True
 # 3連単の組の確率の較正: p' = σ(a + b·logit p)。シミュは組の確率が中ほど（40〜70%）で控えめ・
 # 低いところ（2〜10%）で高めに出る（前向き225R: 予想45%→実際70% / 65%→92% / 5%→1%）。
 # 前向きに当て直した係数で 実際の組の対数損失 0.650→0.626、記録のある組での買い直し +1,106万→+1,181万（2026/10/09）。
@@ -490,7 +493,7 @@ class RaceSim:
         races = [r for r in races if str(r.get('harvested_at', ''))[:10] <= str(r.get('race_date', ''))]
         X = {(d, pi): [] for d in NSEG for pi in range(3)}
         Y = {(d, pi): [] for d in NSEG for pi in range(3)}
-        cr, fq, crg = [], [], {}
+        cr, fq, crg, crn = [], [], {}, []
         for r in races:
             R = self._race(r)
             if not R:
@@ -541,6 +544,7 @@ class RaceSim:
                     if cs and cexp > 0 and not row['g_p']:
                         cr.append(math.log(np.mean(cs) / cexp))
                         crg.setdefault(r.get('schedule_id'), []).append(cr[-1])
+                        crn.append(math.log(len(R['rows'])))
                 s0, nn = tl[0].get('stamina'), len(tl) - 1
                 for k in range(1, len(tl)):
                     a, c, f = tl[k - 1].get('stamina'), tl[k].get('stamina_cost'), tl[k].get('fatigue_modifier')
@@ -563,6 +567,10 @@ class RaceSim:
         else:
             self.cost_mu, self.cost_sd = float(np.mean(cr)), float(np.std(cr))
             # レース共通ぶんと馬ごとぶんに分ける（同じレースの馬どうしのばらつき = 馬ごと）
+            self.cost_mu_n = 0.0
+            if COST_FIELD and len(set(crn)) > 1:   # 少頭数ほど消費が少ない（3頭 −13% / 8頭以上 −5%）。log(頭数) で引く
+                self.cost_mu_n, self.cost_mu = (float(v) for v in np.polyfit(crn, cr, 1))
+                self.cost_sd = float(np.std(np.array(cr) - (self.cost_mu + self.cost_mu_n * np.array(crn))))
             g = [v for v in crg.values() if len(v) >= 3]
             wv = float(np.mean([np.var(v, ddof=1) for v in g])) if g else self.cost_sd ** 2
             self.cost_sd_h = math.sqrt(min(wv, self.cost_sd ** 2))
@@ -623,7 +631,7 @@ class RaceSim:
                 'w': {d: [[float(x) for x in self.W[(d, pi)][0]] + [float(self.W[(d, pi)][1])]
                           for pi in range(3)] for d in NSEG},
                 'cost_mu': self.cost_mu, 'cost_sd': self.cost_sd,
-                'cost_sd_r': self.cost_sd_r if COST_COMMON else 0.0,
+                'cost_sd_r': self.cost_sd_r if COST_COMMON else 0.0, 'cost_mu_n': self.cost_mu_n,
                 'cost_sd_h': self.cost_sd_h if COST_COMMON else self.cost_sd,
                 'fqx': [float(x) for x in self.FQX], 'fqy': [float(x) for x in self.FQY],
                 'v_exp': V_EXP, 'f_exp': F_EXP, 'seg_noise': SEG_NOISE, 'horse_sd': self.horse_sd,
@@ -648,11 +656,12 @@ class RaceSim:
         H, NS, ns = len(rows), self.n_sim, NSEG[d]
         n = sum(ns)
         ph_of = np.repeat(np.arange(3), ns)
+        mu = self.cost_mu + getattr(self, 'cost_mu_n', 0.0) * math.log(H)
         if COST_COMMON:   # レース共通の乱数 ＋ 馬ごとの乱数（全頭が同時にバテる・余るレースを出す）
-            rf = np.exp(self.cost_mu + self.cost_sd_r * rng.standard_normal((NS, 1))
+            rf = np.exp(mu + self.cost_sd_r * rng.standard_normal((NS, 1))
                         + self.cost_sd_h * rng.standard_normal((NS, H)))
         else:
-            rf = np.exp(self.cost_mu + self.cost_sd * rng.standard_normal((NS, H)))   # レースの消費の乱数
+            rf = np.exp(mu + self.cost_sd * rng.standard_normal((NS, H)))   # レースの消費の乱数
         L = oc.STAMINA_COST_LAW[d]
         wc = np.array(oc.INTERNAL_PHASE_WEIGHTS['序盤']) * np.array(oc.INTERNAL_DIST_BALANCE[d]) * L['c']
         craw = np.array([x['craw'] for x in rows])                            # H×フェーズ（クランプ前・倍率なし）
