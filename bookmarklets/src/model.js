@@ -908,6 +908,9 @@ const OasisModel = (() => {
       for (let i = 1; i < fqx.length; i++) if (q <= fqx[i]) return fqy[i - 1] + (fqy[i] - fqy[i - 1]) * (q - fqx[i - 1]) / (fqx[i] - fqx[i - 1]);
       return fqy[fqy.length - 1];
     };
+    // ゲームの疲労補正の式（Python: FAT_EXACT）。x = 区間の始めのスタミナ ÷ (距離の定数 × 残り区間数)
+    const fatC = S.fat_c ? S.fat_c[dist] : null;
+    const fatX = x => (x >= 1 ? Math.min(1.03, 1 + 0.02 * (x - 1)) : Math.max(0.65, 0.65 + 0.35 * x));
     const randn = makeRng(seed == null ? 1 : seed);
     const NS = nSim || S.n_sim || 8000;
     const win = new Float64Array(H), combo = new Map(), T = new Float64Array(H);
@@ -979,7 +982,7 @@ const OasisModel = (() => {
           const rv = Math.pow(Math.max(st[0] * w[0] * mul[0] + st[1] * w[1] * mul[1] + st[2] * w[2] * mul[2] + w[3], 1), S.v_exp);
           // 疲労補正は「この先を走り切ったときの見込みの余り ÷ 初期スタミナ」で引く（Python と同じ）
           if (cMode === 'clamp' || cMode === 'clampdyn') C[h] = clampC(RF[h] * x.c0);
-          let f0 = fat((Sv[h] - C[h] * remS[h][k]) / S0[h]);
+          let f0 = fatC ? fatX(Sv[h] / (fatC * (nseg - k))) : fat((Sv[h] - C[h] * remS[h][k]) / S0[h]);
           if (f0 < 1) f0 = 1 - (1 - f0) * x.relief;           // 苦痛慣れ・粘り腰
           const f = Math.pow(f0, S.f_exp);
           DT[h] = HZ[h] / (rv * f * (1 + S.seg_noise * x.nz * randn()));

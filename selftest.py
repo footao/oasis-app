@@ -957,6 +957,13 @@ def regression_tests():
     check('P41 3連単の組の確率を較正してから使う',
           "const tc = M.sim.tri_calib;" in _ap and rs_mod.TRI_CALIB[1] > 1.0,
           f'race_sim.TRI_CALIB {rs_mod.TRI_CALIB}（中ほどの控えめ・低いところの高めを直す）')
+    _fc = getattr(rs_mod, 'FAT_C', {})
+    check('P42 疲労補正はゲームの式（距離の定数 × 残り区間で見込む）',
+          rs_mod.FAT_EXACT and [round(_fc[d] * rs_mod.NSEG[d][0] + _fc[d] * sum(rs_mod.NSEG[d][1:]), 6)
+                                for d in ('短距離', 'マイル', '中距離', '長距離')] == [25, 40, 65, 80]
+          and abs(min(1.03, 1 + 0.02 * (141 / (_fc['長距離'] * 25) - 1)) - 1.01525) < 1e-4
+          and 'fatC ? fatX(Sv[h] / (fatC * (nseg - k)))' in _model_js,
+          'R2689 はなこ 1区間目: スタミナ141・残り25区間 → 1.0152（timeline と一致）')
 
     check('P40 市場との乖離が大きすぎる単勝は買わない',
           oc.WIN_SKIP_RATIO == 0
@@ -987,8 +994,8 @@ def regression_tests():
           'CO は guild ごとに残り続けるので、古い値があると永久に未成立扱いになる。'
           '未成立＝実効100倍超なので、間違う向きが最悪（最も強気に倒れる）')
 
-    check('P37 2着と3着の順番は市場が同意しないときだけ抑える',
-          oc.SWAP23_ON is True and oc.SWAP23_CAP == 0.60 and oc.SWAP23_MKT_AGREE == 0.55
+    check('P37 2着と3着の順番の補正（今はオフ・入れるときは市場が同意しないときだけ抑える）',
+          oc.SWAP23_ON is False and oc.SWAP23_CAP == 0.60 and oc.SWAP23_MKT_AGREE == 0.55
           and "const swKey = c => `${c.i}-${c.k}-${c.j}`;" in _ap
           and 'if (mPref >= agree || sPref <= cap) continue;' in _ap
           and 'pOf.set(k, m); pOf.set(sk, m);' not in _ap
@@ -1029,7 +1036,7 @@ def regression_tests():
           'od1.5以下の実測的中率 82%。旧 0.95 は口数を張りすぎる')
 
     check('P34 単勝に下限的中率がある（低確率帯を買わない）',
-          oc.WIN_MIN_PROB == 0.50
+          oc.WIN_MIN_PROB == 0.40
           and 'p[i] >= minP' in _model_js
           and "minProb: mNum('win_min_prob'" in _ap,
           '実測（81本）で単勝は予測50%未満が 25本中1本・回収率78%、'

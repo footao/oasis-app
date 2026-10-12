@@ -99,6 +99,12 @@ POS_LABELS = {'競り合い', '天嵐決闘', '王殺し', '星界破砕', '首�
 POS_DUTY = {'duel': 0.655, 'king': 0.175, 'lead': LEAD_DUTY, 'solo': 0.05,
             'lone': 0.101, 'low': 0.527, 'over1': 0.065, 'over2': 0.107, 'hold1': 0.271, 'hold2': 0.254}
 DUEL_M, SOLO_M = 20.0, 50.0
+# 疲労補正はゲームの式そのもの（timeline 2.4万区間で 99.4% が ±0.0002・残りはスタミナ表示の丸め）。
+#   x = 区間の始めのスタミナ ÷ (距離ごとの定数 × 残り区間数)。定数 × 区間数 = 25 / 40 / 65 / 80。
+#   x ≥ 1: 1 + 0.02(x − 1)（上限 1.03） / x < 1: 0.65 + 0.35x（下限 0.65）。馬ごとの実際の消費は見ない。
+#   前向き228R（vs 実測の平均表）: 単勝LL −0.0086±0.0052 / 3連単LL −0.0345±0.0094（2026/10/13）
+FAT_EXACT = True
+FAT_C = {'短距離': 25 / 10, 'マイル': 40 / 15, '中距離': 65 / 20, '長距離': 80 / 25}
 SEG_M = 100.0                     # 1区間 100m（全距離）
 LEAD_COST_UP = 1.047              # 首位の呪いの「スタミナ消費も増加」（発動中の区間消費の実測）
 
@@ -634,6 +640,7 @@ class RaceSim:
                 'cost_sd_r': self.cost_sd_r if COST_COMMON else 0.0, 'cost_mu_n': self.cost_mu_n,
                 'cost_sd_h': self.cost_sd_h if COST_COMMON else self.cost_sd,
                 'fqx': [float(x) for x in self.FQX], 'fqy': [float(x) for x in self.FQY],
+                'fat_c': FAT_C if FAT_EXACT else None,
                 'v_exp': V_EXP, 'f_exp': F_EXP, 'seg_noise': SEG_NOISE, 'horse_sd': self.horse_sd,
                 'horse_in_race': HORSE_IN_RACE,
                 'n_sim': self.n_sim, 'lowst_labels': sorted(LOWST_LABELS), 'lead_labels': sorted(LEAD_LABELS),
@@ -705,7 +712,11 @@ class RaceSim:
                 c = np.clip(rf * craw[None, :, pi], L['lo'], L['hi'])        # 見込みの余りはこの区間の消費で引く
             elif COST_MODE in ('clamp', 'clampdyn'):
                 c = np.clip(rf * c0v, L['lo'], L['hi'])
-            f = np.interp((s - c * rem[None, :, k]) / S0, self.FQX, self.FQY)
+            if FAT_EXACT:
+                x = s / (FAT_C[d] * (n - k))
+                f = np.where(x >= 1.0, np.minimum(1.03, 1.0 + 0.02 * (x - 1.0)), np.maximum(0.65, 0.65 + 0.35 * x))
+            else:
+                f = np.interp((s - c * rem[None, :, k]) / S0, self.FQX, self.FQY)
             f = np.where(f < 1.0, 1.0 - (1.0 - f) * relv, f)
             mult = np.where(on[:, :, None], gm[None, :, :], 1.0)            # NS×H×3
             cmul = np.ones((NS, H))
