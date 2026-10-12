@@ -433,7 +433,7 @@ const OasisModel = (() => {
     const unit = +o.stakeUnit, totalUnits = +o.totalUnits, maxUnits = +o.maxUnits;
     const riskCapFrac = (o.riskCapFrac == null ? 0.10 : +o.riskCapFrac);
     const minP = (o.minProb == null ? 0.50 : +o.minProb);
-    // モデルだけが強気で市場が同意しない帯は買わない（実測 0/6・全損）。
+    // モデルだけが強気で市場が同意しない帯は買わない（旧モデルで 0/6）。0 = 見送らない（2026/10/12〜）。
     const skipP = (o.skipP == null ? 0.90 : +o.skipP);
     const skipOd = (o.skipOd == null ? 10.0 : +o.skipOd);
     // 乖離 = p × od。実結果72件で 12以上は 0/9・全損。p 閾値が取りこぼす帯を止める。
@@ -449,7 +449,7 @@ const OasisModel = (() => {
       k0.push(o.myUnits && o.myUnits[i] != null ? Math.trunc(o.myUnits[i]) : 0);
       // 予測が低い馬は買わない（実測で 50%未満は 25本中1本・回収率78%）。
       ok.push(Number.isFinite(od[i]) && p[i] >= minP && (od[i] > 1.0 || unb[i])
-              && !(p[i] >= skipP && od[i] >= skipOd && !unb[i])
+              && !(skipP > 0 && p[i] >= skipP && od[i] >= skipOd && !unb[i])
               && !(skipRatio > 0 && p[i] * od[i] >= skipRatio && !unb[i]));
     }
     if (pool == null || pool <= 0 || !ok.some(Boolean)) return [[], null];

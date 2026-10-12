@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.56.0'
+CORE_VERSION = '3.57.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -104,7 +104,11 @@ WIN_MIN_PROB = 0.50
 #   R2492 90.0%/od28, R2495 91.8%/od11, R2517 99.4%/od45）。
 # 主張どおりなら6連敗はまず起こらないので、この帯の確率は信用しない。
 # 市場が同意する帯（od1.17〜1.55）は同期間 16/17 なので、そこは触らない。
-WIN_SKIP_P = 0.90        # これ以上の予測確率で
+# 2026/10/12: 0（見送りなし）にした。上の 0/6 は**旧モデル（Ridge）**の外れで、区間シミュレータで
+#   同じ6レースを前向きに予想し直すと6つとも市場の1番人気（od1.3〜1.7）を本命にして全部1着。
+#   シミュの前向き238R: p≥0.5 & od≥5 は 16件12勝（予測12.5）・1口回収1350%。
+#   この帯（p≥0.90 & od≥10）だけなら 4件1勝（9月前半・学習が薄い時期）。続けて外れたら 0.90 に戻すこと。
+WIN_SKIP_P = 0           # これ以上の予測確率で（0 = 見送らない）
 WIN_SKIP_OD = 10.0       # これ以上のオッズなら見送る
 # 乖離 = モデルp × オッズ。1.0 で市場と同意、大きいほどモデルだけが強気。
 # 実結果と突き合わせた単勝72件（〜2026/09/29）:
@@ -3208,7 +3212,8 @@ def win_bet_picks_pool(names, win_p, odds, pool, bankroll, kelly_frac, edge_min,
     # モデルだけが強気で市場が同意しない帯は買わない（実測 0/6・全損）。
     sp = WIN_SKIP_P if skip_p is None else float(skip_p)
     so = WIN_SKIP_OD if skip_od is None else float(skip_od)
-    ok &= ~((p >= sp) & (od >= so) & ~unb)
+    if sp > 0:
+        ok &= ~((p >= sp) & (od >= so) & ~unb)
     # 市場との乖離そのもので切る（上の p 閾値が取りこぼす帯を止める）。
     sr = WIN_SKIP_RATIO if skip_ratio is None else float(skip_ratio)
     if sr > 0:

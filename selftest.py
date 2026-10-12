@@ -775,19 +775,18 @@ def regression_tests():
           and 'Math.min(CFG.TRI_MAX_UNITS, unitsLeft)' in _ap,
           f'model.json の max_total_units = {oc.MAX_TOTAL_UNITS}')
     # 配分された口数ぶん買うこと（1組1口で送ると配分が意味を持たない）
-    # 分けて買うと払戻も購入履歴もその数だけ分かれて読みにくい。まず一括で送り、
-    # APIに**拒否されたときだけ**割る。通信エラーでは割らない（二重購入になる）。
-    check('P19 autopilot はまず全口数を1リクエストで送る',
+    # 購入画面のボタンは1回あたり 3連単10口・単勝100口まで（2026/10/10〜 API もそれに合わせる）。
+    check('P19 autopilot は購入画面の1回上限ずつ送る',
           'const buyUnits = async (url, mkBody, label, units, unit, chunk) => {' in _ap
-          and 'const r = await post(url, mkBody(units), `${label} ${units}口`, units * unit, true);' in _ap
-          and "if (r === 'ok') return [units, 0];" in _ap,
-          '拒否されたら chunk 口ずつに割り直す')
+          and 'const u = Math.min(leftU, chunk);' in _ap
+          and 'mkBody(units)' not in _ap,
+          '20口 → 10＋10。全口数を1回で送る経路は無い')
     check('P19 autopilot は通信エラーでは再送しない',
           'return true; } };' in _ap.replace('\n', ' ').replace('  ', ' ')
           or '送信済みか不明' in _ap,
           '二重購入を避ける')
     check('P19 autopilot の分割単位は CFG に出ている',
-          'TRI_PER_REQ: 10' in _ap and 'WIN_PER_REQ: 20' in _ap)
+          'TRI_PER_REQ: 10' in _ap and 'WIN_PER_REQ: 100' in _ap)
 
     # エッジが大きいことは異常ではない（プールが薄いほど初期プール金の比率が上がる）。
     # 2026/08/26 まで +300%超でレースごと中止しており、R2120 で一番おいしい組を捨てた。
@@ -1004,18 +1003,19 @@ def regression_tests():
           "pk.swap23 ? 'ev23' : 'ev'" in _ap and 'pr: r3(d.praw)' in _ap,
           'src=ev23 と pr（ならす前）で、後からこの変更の効果だけを切り出せる')
 
-    check('P35 モデルだけ強気で市場が同意しない単勝は買わない',
-          oc.WIN_SKIP_P == 0.90 and oc.WIN_SKIP_OD == 10.0
-          and 'p[i] >= skipP && od[i] >= skipOd' in _model_js
+    check('P35 モデルだけ強気の単勝の見送りは 0 で無効（シミュでは当たっている）',
+          oc.WIN_SKIP_P == 0 and oc.WIN_SKIP_OD == 10.0
+          and 'skipP > 0 && p[i] >= skipP && od[i] >= skipOd' in _model_js
           and "skipP: mNum('win_skip_p'" in _ap,
-          '実測 0/6・投入507,000が全損（モデル90〜99%／od11〜45）。'
-          '市場が同意する帯（od1.17〜1.55）は 16/17 なので触らない')
-    check('P35 弾くのは「高確率かつ長オッズ」の組み合わせだけ',
+          '旧モデルの 0/6 はシミュでは6つとも市場の本命が1着。0.90 に戻せば元の見送りになる')
+    check('P35 有効にしたときに弾くのは「高確率かつ長オッズ」の組み合わせだけ',
           not oc.win_bet_picks_pool(['a'], [0.95], [20.0], 10**6, 10**6, 0.25, 0.0,
-                                    my_units=[0])[0]
+                                    my_units=[0], skip_p=0.90)[0]
+          and any(r['name'] == 'a' for r in oc.win_bet_picks_pool(
+              ['a'], [0.95], [20.0], 10**6, 10**6, 0.25, 0.0, my_units=[0])[0])
           and any(r['name'] == 'b' for r in oc.win_bet_picks_pool(
-              ['b'], [0.8], [1.6], 10**6, 10**6, 0.25, 0.0, my_units=[0])[0]),
-          'p95%/od20 は見送り、p80%/od1.6 は買う')
+              ['b'], [0.8], [1.6], 10**6, 10**6, 0.25, 0.0, my_units=[0], skip_p=0.90)[0]),
+          '0.90 なら p95%/od20 は見送り・既定(0)なら買う。p80%/od1.6 はどちらでも買う')
     check('P36 市場本命枠にオッズ上限がある',
           oc.MARKET_FAV_MAX_OD == 1.5
           and oc.market_fav_pick({('a',): 2.0, ('b',): 9.0}) is None
@@ -1114,7 +1114,9 @@ def regression_tests():
           '2026/09/05 21時: まとめは299,000rrc買った表示なのにBOTに1件も届かなかった。'
           'post() が通信エラーで true を返していたため。3値にして、まとめに「うちN口 送信不明」を出す')
     check('P27 通信エラーでも再送しない（二重購入を避ける）',
-          "if (r === 'unknown') return [units, units];" in _ap)
+          "else if (r === 'unknown') { sent += u; unsure += u; }" in _ap
+          and 'leftU -= u;' in _ap,
+          '送信不明の分も送ったことにして次の分へ進む（同じ分を送り直さない）')
 
     check('P30 市場本命の口数はモデルではなく実測の的中率で決める',
           "mNum('market_fav_p'" in _ap and 'OasisModel.optimalUnitsEv(fp, od, P, U_, room)' in _ap
