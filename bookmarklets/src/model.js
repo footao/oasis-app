@@ -695,6 +695,7 @@ const OasisModel = (() => {
   const SIM_REC_LOW = /残りスタミナが?(\d+(?:\.\d+)?)[%％]以下[^。]*?一度だけ[^。]*?(\d+(?:\.\d+)?)[%％]を?回復/;
   const SIM_STEVAL = /(序盤|中盤|終盤)のスタミナ評価が(\d+(?:\.\d+)?)[%％]上昇/;   // Python: _STEVAL_RE
   const SIM_RELIEF = /スタミナ不足による速度低下を(\d+(?:\.\d+)?)[%％]軽減/;
+  const SIM_SURF_ST = /(芝|ダート)で[^。]*スタミナ/;      // Python: _SURF_ST_RE（泥啜りのスタミナは rating だけ）
   const simTextScope = (t, S) => {        // Python: _text_scope
     if (t.includes('常時')) return ['always', null, 1];
     if (t.includes('残り300m')) return ['tail300', null, 1];
@@ -823,6 +824,11 @@ const OasisModel = (() => {
         const x = parseFloat(cm[1]) / 100;
         for (let pi = 0; pi < 3; pi++) cost[pi] *= cm[2] === '減少' ? 1 - x : 1 + x;
         delete m.stamina;
+      }
+      const ms = desc.match(SIM_SURF_ST);
+      if (ms && m.stamina != null) {
+        const x = +m.stamina; delete m.stamina;
+        if (ms[1] === track) for (let pi = 0; pi < 3; pi++) rfx.push([pi, x]);
       }
       if (!Object.keys(m).length) return;
       const c = label ? (M.item_scope || {})[label] : null;

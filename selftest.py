@@ -810,10 +810,11 @@ def regression_tests():
     check('P19 autopilot は金の乗った組を取り切る（上位N打ち切りをしない）',
           'ODDS_TOP_N' not in _ap and 'if (BASE > 0 && BASE - seenAmt < unit) break;' in _ap,
           'Streamlit は貼り付けで全組そろうので、候補集合と市場の正規化を合わせる')
-    check('P19 autopilot は実残高を手元資金に使う',
-          'async function loadBalance()' in _ap and 'cands, P, bankroll(),' in _ap
-          and 'bankroll(), D.kelly_fraction' in _ap,
-          'Streamlit は貼り付けの balance= を BANKROLL に自動反映している')
+    check('P19 autopilot は実残高を手元資金に使う（ケリーの元手には下限）',
+          'async function loadBalance()' in _ap and 'cands, P, kellyBank(),' in _ap
+          and 'kellyBank(), D.kelly_fraction' in _ap
+          and 'Math.max(bankroll(), CFG.KELLY_BANK_MIN || 0)' in _ap and 'KELLY_BANK_MIN: 3000000' in _ap,
+          '残高が用事で減っても口数を絞らない。まとめの bank は実残高')
     check('P19 autopilot は min_prob を切り上げない',
           'CFG.MIN_PROB = +D.min_prob;' in _ap and 'Math.max(+D.min_prob' not in _ap,
           '0.02 に切り上げていたので小さい確率の組を取りこぼしていた')
@@ -826,7 +827,7 @@ def regression_tests():
 
     # 1レースのリスク上限は資金比ではなく RACE_BUDGET 固定（資金が増えても賭け額は増えない）
     check('P19 autopilot の1レース上限は所持金に依らず RACE_BUDGET',
-          'const riskFrac = () => CFG.RACE_BUDGET / bankroll();' in _ap
+          'const riskFrac = () => CFG.RACE_BUDGET / kellyBank();' in _ap
           and 'riskFrac(), CFG.EDGE_MIN,' in _ap
           and 'riskCapFrac: riskFrac(),' in _ap
           and 'D.max_risk_frac' not in _ap,
@@ -964,6 +965,13 @@ def regression_tests():
           and abs(min(1.03, 1 + 0.02 * (141 / (_fc['長距離'] * 25) - 1)) - 1.01525) < 1e-4
           and 'fatC ? fatX(Sv[h] / (fatC * (nseg - k)))' in _model_js,
           'R2689 はなこ 1区間目: スタミナ141・残り25区間 → 1.0152（timeline と一致）')
+    _pd = rs_mod.horse_profile(dict(name='t', speed=45, power=120, stamina=80, passive_skill='', passive_skill_2='',
+                                    equipment={'effect_label': '泥啜り', 'effect_description': 'ダートでスタミナとパワーがそれぞれ3.1%上昇'}),
+                               '長距離', 'ダート', oc.default_spec(), False)
+    check('P43 泥啜りのスタミナは rating だけ（最大スタミナは増えない）',
+          abs(_pd['base']['stamina'] - 80) < 1e-9 and _pd['rfx'] == [(0, 1.031), (1, 1.031), (2, 1.031)]
+          and 'SIM_SURF_ST' in _model_js,
+          'timeline: ダートの泥啜り33頭中30頭で初期スタミナが盛った分だけ少なく、rating は盛った値と合う')
 
     check('P40 市場との乖離が大きすぎる単勝は買わない',
           oc.WIN_SKIP_RATIO == 0

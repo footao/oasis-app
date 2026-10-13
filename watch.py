@@ -114,6 +114,7 @@ def run(check_all=False):
     st = json.load(open(STATE, encoding='utf-8')) if os.path.exists(STATE) and not check_all else {}
     last = st.get('last_sid', max(races) - 1 if not check_all else 0)
     spec = oc.default_spec()
+    sim = rs.RaceSim(spec)
     blocks = []
     new = sorted(s for s in races if s > last and races[s].get('horses'))
     for sid in new:
@@ -126,6 +127,9 @@ def run(check_all=False):
             except Exception as e:             # 要約が失敗しても警告そのものは出す
                 msgs.append(f'（答え合わせの要約に失敗: {e}）')
         msgs += [f'シミュに反映されない効果: {u}' for u in unk]
+        bad = sim.stale(r) if r.get('distance') in rs.NSEG else []
+        if bad:
+            msgs.append(f"初期スタミナがステータスと合わない（採取前にステータスが変わった疑い・学習から外します）: {'・'.join(bad)}")
         if msgs:
             blocks.append(f"⚠ R{sid} {r['race_date']} {r['race_time']}\n" + '\n'.join(msgs))
     d = drift(races, reps)

@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.60.0';
+const AP_VER = '1.62.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -72,6 +72,9 @@ const CFG = {
   // レース単位の上限をそこに置き、1日の上限は別に持つ（既定は6レース分）。
   // 1日の上限をレース1回分にすると、最初のレースで使い切って残りが全部見送りになる。
   RACE_BUDGET: 300000,      // 1レースの上限（rrc）
+  // ケリーの元手の下限。残高が用事で減っても口数を絞らない（2026/10/14・tao の希望）。
+  //   250万以上ならケリーはほぼ効かない（再生138R: 250万 +1,692万 / ケリーなし +1,693万）。0 にすると実残高だけで決める。
+  KELLY_BANK_MIN: 3000000,
   DAILY_BUDGET: 1800000,    // 1日の上限（rrc）
   // 大きいエッジは**異常ではない**。プールが小さいほど初期プール金の占める割合が
   // 大きく、未成立組なら1口で実効21倍なので +300% は普通に出る。市場が薄い時期は
@@ -352,6 +355,7 @@ async function loadBalance() {
       + `（${((M.defaults || {}).bankroll || 1200000).toLocaleString()} rrc）`, '#ffb74d');
 }
 const bankroll = () => BANKROLL || (M.defaults || {}).bankroll || 1200000;
+const kellyBank = () => Math.max(bankroll(), CFG.KELLY_BANK_MIN || 0);   // 口数の計算用（まとめの bank は実残高のまま）
 // ---- キャリーオーバー（誰も3連単を当てずに繰り越された金）----
 // 繰越金は**プールには入っているが誰も賭けていない金**。実際に賭けられた総額
 // BASE = プール − 初期金 − CO で、ここを引かないとオッズ取得の打ち切りが
@@ -367,7 +371,7 @@ function setCO(v) {
 // **所持金に関係なく RACE_BUDGET まで**（ゲーム上限の 3連単20口＋単勝100口 ＝ 30万）。
 // 配分関数は max_risk_frac × bankroll でしか上限を受け取らないので、
 // RACE_BUDGET / bankroll を渡して等価にする。資金が増えても賭け額は増えない。
-const riskFrac = () => CFG.RACE_BUDGET / bankroll();
+const riskFrac = () => CFG.RACE_BUDGET / kellyBank();
 
 // ---- 受付中のレースを探す ----
 async function findRace() {
@@ -725,7 +729,7 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
 
   const budgetU = Math.min(CFG.TRI_MAX_UNITS, unitsLeft);
   const alloc = OasisModel.allocateUnitsStable(
-    cands, P, bankroll(), D.kelly_fraction || 0.25,
+    cands, P, kellyBank(), D.kelly_fraction || 0.25,
     riskFrac(), CFG.EDGE_MIN,
     { budget: budgetU, stakeUnit: U_, maxPerCombo: M.max_units || 20 });
   const picks = [];
@@ -774,7 +778,7 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
       const kEv = OasisModel.optimalUnitsEv(fp, od, P, U_, room)[0];
       // 資金が細いときに張り過ぎないよう、分数ケリーでも頭を押さえる
       const kKelly = Math.floor((D.kelly_fraction || 0.25) * ((fp * od - 1) / (od - 1))
-                                * bankroll() / U_);
+                                * kellyBank() / U_);
       // 見積もりでEVが立たないなら買わない（「最低1口」の下駄で損を確定させない）
       const k = fp * od <= 1 ? 0 : (kEv > 0 ? Math.max(1, Math.min(kEv, Math.max(kKelly, 1), room)) : 0);
       const eff = (P + (used + k) * U_) / (P / od + k * U_);
@@ -998,7 +1002,7 @@ function analyseWin(sid, pets, winP, measuredPool, budgetLeft) {
   //   較正が合っており、52レースでも 125%（σ差し戻し後は149%）と稼ぎ頭。絞る理由がない。
   const [picks] = OasisModel.winBetPicksPool(
     key, pBet, fl.odds_eff, pool,
-    bankroll(), D.kelly_fraction || 0.25, D.win_edge_min || 0.15,
+    kellyBank(), D.kelly_fraction || 0.25, D.win_edge_min || 0.15,
     { stakeUnit: WU,
       // ⚠ totalUnits は「このレースの**合計**上限」であって残り枠ではない。
       //   winBetPicksPool は中で budget = min(totalUnits, riskUnits) - 購入済み を

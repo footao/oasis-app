@@ -146,6 +146,9 @@ _REC_LOW_RE = re.compile(r'残りスタミナが?(\d+(?:\.\d+)?)[%％]以下[^�
 # 「序盤のスタミナ評価がN%上昇」（夜明けの護り）: そのフェーズの rating の計算でだけスタミナを N% 増し。
 # 初期スタミナ・消費・疲労補正は変わらない（同じ馬の着け外し24組中22組で一致・2026/10/09）
 _STEVAL_RE = re.compile(r'(序盤|中盤|終盤)のスタミナ評価が(\d+(?:\.\d+)?)[%％]上昇')
+# 「ダートでスタミナとパワーが…上昇」（泥啜り）のスタミナは rating にだけ効き、最大スタミナは増えない
+#   （timeline: ダートの泥啜り33頭中30頭で初期スタミナが盛った分だけ少なく、rating は盛った値と合う・2026/10/13）
+_SURF_ST_RE = re.compile(r'(芝|ダート)で[^。]*スタミナ')
 _RELIEF_RE = re.compile(r'スタミナ不足による速度低下を(\d+(?:\.\d+)?)[%％]軽減')
 # 2026/10/08 timeline の解析で見つけたずれ（それまでは平均・別物として扱っていた）:
 #   セカンドウインド・緊急回復はスタミナの**回復**（スタミナのステータス +8%/+6% として rating まで盛っていた）
@@ -361,6 +364,11 @@ def horse_profile(h, dist, track, spec, same_species, scope_tbl=None):
             for pi in range(3):
                 cost[pi] *= (1.0 - x) if cm.group(2) == '減少' else (1.0 + x)
             m.pop('stamina', None)
+        ms = _SURF_ST_RE.search(desc)
+        if ms and 'stamina' in m:
+            x = m.pop('stamina')
+            if ms.group(1) == track:
+                rfx.extend((pi, float(x)) for pi in range(3))
         if not m:
             return
         cat = oc.ITEM_EFFECT_CATALOG.get(label) or {} if label else {}
@@ -440,6 +448,23 @@ class RaceSim:
         self.n_sim, self.rng = n_sim, np.random.default_rng(seed)
         self.horse_sd = HORSE_SD
 
+    def stale(self, r):
+        """timeline の初期スタミナがステータスから出す値と合わない馬（採取前にステータスが変わった疑い）の名前。
+        R2336 の n（記録上パワー56・実際は rating が倍）のように、日付では見分けられないものを拾う。"""
+        R = self._race(r)
+        if not R:
+            return []
+        out = []
+        for row in R['rows']:
+            tl = row['h'].get('timeline') or []
+            a0 = tl[0].get('stamina') if tl else None
+            if a0 is None:
+                continue
+            ok = [row['s0']] + ([math.floor(row['s0'] * row['g_m'][2])] if row['g_p'] else [])   # 勝負師が出たとき
+            if min(abs(a0 - x) for x in ok) > 1.01:
+                out.append(row['h'].get('name', ''))
+        return out
+
     # ---- 1レースを「馬ごとの配列」にする（JS: simInputs と同じ計算）----
     def _race(self, r):
         dist, track = r.get('distance'), r.get('surface')
@@ -497,6 +522,7 @@ class RaceSim:
     def fit(self, races):
         # 翌日以降に採取したレースは、ステータスが「その時点の今」に化けている（9/10〜12 の18レース）
         races = [r for r in races if str(r.get('harvested_at', ''))[:10] <= str(r.get('race_date', ''))]
+        # stale() で学習から外す版は前向き228Rで 3連単LL +0.010±0.003 と悪化（8月後半の28Rが減るため）→ 見張りの警告だけに使う
         X = {(d, pi): [] for d in NSEG for pi in range(3)}
         Y = {(d, pi): [] for d in NSEG for pi in range(3)}
         cr, fq, crg, crn = [], [], {}, []
