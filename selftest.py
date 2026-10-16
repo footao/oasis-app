@@ -923,6 +923,11 @@ def regression_tests():
           'out.failed = new Set();' in _ap and 'if (!d2) out.failed.add(' in _ap
           and 'if (CFG.UNFORMED_ON && !oddsFailed && budgetU - used >= 1) {' in _ap,
           '429 やタイムアウトで取れなかった人気組が、実効100倍超の未成立に見えて買われる')
+    check('P47 下見のオッズ取得は購入の窓（締切 LEAD_SEC 秒前）の手前で止める',
+          'const stopAt = canBuy ? 0 : nextRaceTime() - (CFG.LEAD_SEC + 3) * 1000;' in _ap
+          and _ap.count('fullReq, stopAt);') == 2
+          and 'if (stopAt && Date.now() >= stopAt) {' in _ap,
+          '起動が締切3分前（2026/10/16〜）。全組を舐める下見が窓をまたぐと本番の解析が走れず買い逃す')
     check('P45 3連単プールが取れないときは CO を消さずに見送る',
           "if (!poolJ) { log(`R${sid}: 3連単プールを取得できません → 3連単は見送り`, '#ffb74d'); return none; }" in _ap,
           '0 と同じに扱うと正しいキャリーオーバーを消し、以降のスイープが締切に間に合わない')

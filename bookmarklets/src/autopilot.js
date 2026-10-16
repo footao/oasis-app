@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.62.0';
+const AP_VER = '1.62.1';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -392,7 +392,7 @@ async function findRace() {
 //   未取得の組には1口も入っていない ＝ 残りは全部未成立。
 // 賭け金は必ず1口の倍数なので、残りが1口未満になった時点で打ち切ってよい。
 // PAR=20 は bm.js の実測（api.oasis.red のスループット上限）。上げても速くならない。
-async function fetchOdds(sid, pets, combo, pool, unit, maxReq) {
+async function fetchOdds(sid, pets, combo, pool, unit, maxReq, stopAt = 0) {
   const out = new Map();
   // 取れなかった組（HTTP エラー・通信エラー）。「誰も賭けていない（オッズ無し）」と区別する。
   // 混ぜると、取り損ねた人気組が実効100倍超の未成立に見えて買ってしまう。
@@ -426,6 +426,12 @@ async function fetchOdds(sid, pets, combo, pool, unit, maxReq) {
     seenAmt = 0;
     for (const od of out.values()) seenAmt += Math.round(pool / od / unit) * unit;
     if (BASE > 0 && BASE - seenAmt < unit) break;
+    // 下見は購入の窓の手前で切り上げる。起動が締切3分前になり（2026/10/16〜）、全組を舐める下見が
+    // 窓をまたぐと busy のまま本番の tick が走れず買い逃す。途中で止めた回は queue が残るので CO は書かない。
+    if (stopAt && Date.now() >= stopAt) {
+      log(`R${sid}: 下見のオッズ取得を ${cut}組で止めました（購入の窓に入るため）`, '#888');
+      break;
+    }
     if (cut >= maxReq) {
       // BASE=0 の裏取り（上位20組だけ見る）では毎回ここに来るので、警告は本当に打ち切ったときだけ
       if (BASE > 0) {
@@ -607,8 +613,9 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
   // 下見（締切まで時間がある回）は上限を外して全組舐める。そこで CO を確定させ、
   // 締切30秒前の本番では引いた BASE で早く打ち切れるようにする。
   const fullReq = canBuy ? CFG.ODDS_MAX_REQ : combo.length;
+  const stopAt = canBuy ? 0 : nextRaceTime() - (CFG.LEAD_SEC + 3) * 1000;
   if (BASE >= U_) {
-    oddsRaw = await fetchOdds(sid, pets, combo, P, U_, fullReq);
+    oddsRaw = await fetchOdds(sid, pets, combo, P, U_, fullReq, stopAt);
   } else {
     // 「賭け0件」は CO を信じた結論にすぎない。CO は guild ごとに保存され続けるので、
     // 古い値が残っていると永久にオッズを取らなくなり、全組が未成立に見える（＝最も
@@ -618,7 +625,7 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
       setCO(0);
       log(`R${sid}: 賭け0件と判定していましたが実際にはオッズが付いています。`
           + `キャリーオーバー ${CO.toLocaleString()} rrc を破棄して取り直します`, '#ff8a80');
-      oddsRaw = await fetchOdds(sid, pets, combo, P, U_, fullReq);
+      oddsRaw = await fetchOdds(sid, pets, combo, P, U_, fullReq, stopAt);
     } else {
       log(`R${sid}: 賭け0件（プール ${pool0.toLocaleString()}・上位20組もオッズなし）`, '#888');
     }
