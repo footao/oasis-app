@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.62.1';
+const AP_VER = '1.63.0';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -111,6 +111,9 @@ const CFG = {
   MARKET_FAV_MIN_OD: 1.0,
   MARKET_FAV_UNITS: 1,
   UNFORMED_MAX_UNITS: null, // null = model.json の unformed_max_units
+  // 的中率がこれ以上の未成立組は、1口ではなく3連単の残り口数（合計 UNFORMED_BIG_UNITS まで）を入れる（1.63.0〜）。
+  UNFORMED_BIG_P: 0.90,
+  UNFORMED_BIG_UNITS: 20,
   MIN_TRAIN_RACES: 20,      // 学習レースがこれ未満のモデルでは賭けない（雛形のまま等）
   MODEL_URL: 'https://raw.githubusercontent.com/footao/oasis-app/main/model.json',
   MODEL_JSON: null,
@@ -825,6 +828,18 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
       picks.push({ c: { i: ids[0], j: ids[1], k: ids[2], p: p }, k: k, eff: effOd,
                    edge: p * effOd - 1, p: p, unformed: true, od: null, names: names });
       used += k;
+    }
+    // 的中率の高い未成立組は口数を増やす（2026/10/17 ユーザー判断）。
+    // 誰も乗ってこなければ払戻はプール総取りのままなので、増やした分は当たればそのまま戻る（損は外れたときだけ）。
+    // 締切ギリギリに他人が同じ組を買うと、1口では取り分が薄まる（R2747: 1口・見込み21倍 → 実際13倍）。
+    const big = picks.find(pk => pk.unformed && pk.p >= CFG.UNFORMED_BIG_P);
+    const add = big ? Math.min(budgetU - used, CFG.UNFORMED_BIG_UNITS - big.k) : 0;
+    if (add > 0) {
+      big.k += add; used += add;
+      big.eff = (P + big.k * U_) / (big.k * U_);   // 誰も乗ってこない場合の実効オッズ
+      big.edge = big.p * big.eff - 1;
+      log(`R${sid}: 未成立の ${big.names.join('→')}（的中${fx(big.p * 100, 1)}%）は ${big.k}口にします`
+          + `（駆け込みで取り分が薄まるのを防ぐ）`, '#e2b96f');
     }
   }
   // 賭け方を後から正確に再生できるように、モデル確率の上位20組を全部残す

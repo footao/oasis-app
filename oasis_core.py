@@ -45,7 +45,7 @@ from sklearn.linear_model import Ridge
 
 # oasis_app.py との組み合わせ検査に使う版番号。
 # 機能を足したら上げること（app 側の REQUIRED_CORE と一致している必要がある）。
-CORE_VERSION = '3.60.0'
+CORE_VERSION = '3.61.0'
 
 # =====================================================================
 #  0. ゲーム仕様の定数
@@ -3362,7 +3362,8 @@ DEFAULT_SETTINGS = dict(
     # 「当たれば120倍」の払戻は未観測なので、宝くじとして最小額だけ残す。
     # 2026/10/09: 2口・下限10% に広げた。上の実測は従来モデル（Ridge）のもの。区間シミュレータ＋3連単の較正では
     # 10〜20% 帯が 予測11%→実際11% と合っていて、プール約100万なら損益分岐は約1%（R2649 は1口で約100万）。
-    unformed_sleeve=False, unformed_max_units=2,
+    # 2026/10/17: 5口までに（ユーザー判断。R2745 で2口の枠を使い切っていた）。1組1口・下限10%は変えない。
+    unformed_sleeve=False, unformed_max_units=5,
     unformed_p_min=0.10, unformed_edge_min=0.30,
     win_bets=False, win_edge_min=0.15,
     n_sim=N_SIM, spec_path=None,

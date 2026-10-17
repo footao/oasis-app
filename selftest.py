@@ -954,12 +954,17 @@ def regression_tests():
           and 'emitSummary(LAST_NOBET, [], 0);' in _ap and 'if (canBuy) LAST_NOBET = ctx;' in _ap,
           'R2531 はまとめが空でパネルのログしか残らず、何を見て見送ったか追えなかった')
 
-    check('P41 未成立枠は1レース2口まで（2026/10/09〜）',
-          oc.DEFAULT_SETTINGS['unformed_max_units'] == 2
+    check('P41 未成立枠は1レース5口まで（2026/10/17〜）',
+          oc.DEFAULT_SETTINGS['unformed_max_units'] == 5
           and len(oc.unformed_sleeve_picks({(0, 1, 2): 0.5, (0, 2, 1): 0.4, (1, 0, 2): 0.3},
                                            ['a', 'b', 'c'], lambda n: None, 1_300_000,
                                            p_min=0.1, edge_min=0.3, max_units=2)) == 2,
           '較正済みの確率で下限10%。JS は model.json の defaults から読む')
+    check('P48 的中率90%以上の未成立組は3連単の残り口数まで入れる',
+          'UNFORMED_BIG_P: 0.90,' in _ap and 'UNFORMED_BIG_UNITS: 20,' in _ap
+          and "const big = picks.find(pk => pk.unformed && pk.p >= CFG.UNFORMED_BIG_P);" in _ap
+          and 'const add = big ? Math.min(budgetU - used, CFG.UNFORMED_BIG_UNITS - big.k) : 0;' in _ap,
+          'R2747: 99.9%の未成立組を1口だけ買い、締切前の他人の買いで21倍→13倍に薄まった')
     check('P41 3連単の組の確率を較正してから使う',
           "const tc = M.sim.tri_calib;" in _ap and rs_mod.TRI_CALIB[1] > 1.0,
           f'race_sim.TRI_CALIB {rs_mod.TRI_CALIB}（中ほどの控えめ・低いところの高めを直す）')
