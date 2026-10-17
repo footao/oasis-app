@@ -687,7 +687,7 @@ const OasisModel = (() => {
   // 係数（rating の式・消費のぶれ・失速の表）は model.json の sim。
   const SIM_PH = ['序盤', '中盤', '終盤'];
   const SIM_CONS = /スタミナ消費量[^。]*?(\d+(?:\.\d+)?)[%％](増加|減少)/;
-  const SIM_POS = ['duel', 'king', 'lead', 'solo', 'lone', 'low', 'over1', 'over2', 'hold1', 'hold2'];
+  const SIM_POS = ['duel', 'king', 'lead', 'solo', 'lone', 'low', 'over1', 'over2', 'hold1', 'hold2', 'lowst'];
   // oasis 級の「固有スキル＋追加効果」を節に分ける（Python: _CLAUSE_RE ほか）
   const SIM_CLAUSE = /[＋+]?\s*追加効果\s*[：:]|\n|。/;
   const SIM_NOISE = /乱数幅を(\d+(?:\.\d+)?)[%％]狭める/;
@@ -707,6 +707,7 @@ const OasisModel = (() => {
     return null;
   };
   const simPosKind = t => {                 // Python: _pos_kind
+    if (/残りスタミナ\d+(?:\.\d+)?[%％]以下で/.test(t) && !t.includes('一度だけ')) return 'lowst';
     if (t.includes('先頭から20m以内')) return 'king';
     if (t.includes('50m以内に') && t.includes('いない')) return 'lone';
     if (t.includes('追い抜かれてから200m')) return 'over2';
@@ -899,6 +900,7 @@ const OasisModel = (() => {
     const hasP = prof.map(x => SIM_POS.map((_, j) => x.p_m[j].some(v => v !== 1) || x.p_c[j] !== 1));
     const anyP = hasP.some(a => a.some(Boolean));
     const pid = horses.map(h => +h.pet_id || 0);
+    const rkB = S.rank_beta || [0, 0], rOrd = [...Array(horses.length).keys()], RM = new Float64Array(horses.length);
     // 1区間の消費 = clamp(乱数 × c0 × 発動中の実効ステの比, 下限, 上限)（Python: COST_MODE='clampdyn'）
     const L = (M.stamina_cost_law || {})[dist] || { lo: 0, hi: Infinity };
     const cMode = S.cost_mode || 'old';
@@ -930,6 +932,7 @@ const OasisModel = (() => {
     const sdR = S.cost_sd_r || 0, sdH = S.cost_sd_h == null ? S.cost_sd : S.cost_sd_h;
     const muC = S.cost_mu + (S.cost_mu_n || 0) * Math.log(H);   // 少頭数ほど消費が少ない（Python: COST_FIELD）
     for (let it = 0; it < NS; it++) {
+      RM.fill(1);
       const zr = sdR ? randn() : 0;            // 消費の乱数のレース共通ぶん（Python: COST_COMMON）
       for (let h = 0; h < H; h++) {
         const x = prof[h];
@@ -944,6 +947,11 @@ const OasisModel = (() => {
       }
       for (let k = 0; k < nseg; k++) {
         const pi = segPh[k];
+        // フェーズの始めの順位でそのフェーズの消費が変わる（先頭ほど多い・同位置は pet_id 順）。Python: RANK_COST
+        if (H > 1 && (k === 0 || segPh[k - 1] !== pi) && rkB[Math.min(pi, 1)]) {
+          rOrd.sort((a, b) => (T[a] - T[b]) || (pid[a] - pid[b]));
+          for (let r = 0; r < H; r++) RM[rOrd[r]] = Math.exp(rkB[Math.min(pi, 1)] * (0.5 - r / (H - 1)));
+        }
         // 先頭と2番手（同じ位置なら pet_id の小さい馬が前。スタート直後は全頭 0m なので pet_id 順）
         let i1 = -1, i2 = -1;
         const ahead = (a, b) => T[a] < T[b] || (T[a] === T[b] && pid[a] < pid[b]);
@@ -973,7 +981,8 @@ const OasisModel = (() => {
             const cond = [near * spd <= S.duel_m, !lead && (T[h] - t1) * spd <= S.duel_m,
                           lead, lead && (t2 - T[h]) * spd >= S.solo_m,
                           near * spd >= S.solo_m, RK[h] + 1 > H / 2, DROP[h] === k, DROP[h] >= k - 1,
-                          pi === 1 && LOW[1][h] === 1, pi === 2 && LOW[2][h] === 1];
+                          pi === 1 && LOW[1][h] === 1, pi === 2 && LOW[2][h] === 1,
+                          Sv[h] <= (S.lowst_t == null ? 0.3 : S.lowst_t) * S0[h]];   // 残りスタミナ30%以下（Python: LOWST_T）
             for (let q = 0; q < SIM_POS.length; q++) if (hasP[h][q] && cond[q]) {
               for (let j = 0; j < 3; j++) mul[j] *= x.p_m[q][j];
               cmul *= x.p_c[q];
@@ -994,7 +1003,7 @@ const OasisModel = (() => {
           DT[h] = HZ[h] / (rv * f * (1 + S.seg_noise * x.nz * randn()));
           if (cMode === 'clampdyn') {                          // 発動中の効果で上がった実効ステぶん消費も増える
             const r = (st[0] * wcv[0] * mul[0] + st[1] * wcv[1] * mul[1] + st[2] * wcv[2] * mul[2]) / crw[h][pi];
-            C[h] = clampC(RF[h] * x.c0 * r);
+            C[h] = clampC(RF[h] * x.c0 * r * RM[h]);
           }
           Sv[h] -= C[h] * cmS[h][k] * cmul;
         }

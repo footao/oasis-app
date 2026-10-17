@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.63.0';
+const AP_VER = '1.64.1';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -48,7 +48,7 @@ const CFG = {
   MODEL_WEIGHT: 1.0,        // λ。model.json の defaults から上書きされる
   // 3連単の的中率下限。model.json の defaults.min_prob が正（単勝には掛からない）。
   // 実ベット52レースで「予測5〜15%」の帯が実測1.1%・回収率24%だったので切る。
-  MIN_PROB: 0.20,
+  MIN_PROB: 0.10,
   WIN_ON: true,             // 単勝も買う（NPCの初期金があるのでプールが常にある）
   // 単勝プールの実測（試し買い）。1口ずつ買って前後のオッズの動きから逆算する。
   // **これは実際の購入**なので、アーム中（＝人が購入を許可したレース）でしか走らせない。
@@ -114,6 +114,9 @@ const CFG = {
   // 的中率がこれ以上の未成立組は、1口ではなく3連単の残り口数（合計 UNFORMED_BIG_UNITS まで）を入れる（1.63.0〜）。
   UNFORMED_BIG_P: 0.90,
   UNFORMED_BIG_UNITS: 20,
+  // 3連単の口数に分数ケリーを掛けるか（1.64.0〜 掛けない＝期待値が最大になるところまで、1レース20口まで）。
+  // 10/01〜76R の試算（今のモデル）: ケリーあり・下限20% 実際+1,708万 → ケリーなし・下限10% +1,744万。単勝は今までどおりケリー。
+  TRI_KELLY: false,
   MIN_TRAIN_RACES: 20,      // 学習レースがこれ未満のモデルでは賭けない（雛形のまま等）
   MODEL_URL: 'https://raw.githubusercontent.com/footao/oasis-app/main/model.json',
   MODEL_JSON: null,
@@ -739,7 +742,7 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
 
   const budgetU = Math.min(CFG.TRI_MAX_UNITS, unitsLeft);
   const alloc = OasisModel.allocateUnitsStable(
-    cands, P, kellyBank(), D.kelly_fraction || 0.25,
+    cands, P, kellyBank(), CFG.TRI_KELLY ? (D.kelly_fraction || 0.25) : 1e9,
     riskFrac(), CFG.EDGE_MIN,
     { budget: budgetU, stakeUnit: U_, maxPerCombo: M.max_units || 20 });
   const picks = [];

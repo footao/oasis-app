@@ -87,7 +87,7 @@ if (fs.existsSync(fxPath)) {
   const F = JSON.parse(fs.readFileSync(fxPath, 'utf8'));
   const r = F.find(x => x.horses.length >= 8) || F[0];
   const code = {}; for (const [c, n] of Object.entries(M.code_map)) code[n] = c;
-  const pets = r.horses.map((h, i) => ({ pet_id: i, name: h.name, display_name: h.name, adult_key: h.species,
+  const pets = r.horses.map((h, i) => ({ pet_id: h.pet_id != null ? h.pet_id : i, name: h.name,   // 同位置の判定・順位は pet_id 順なので本物を渡す display_name: h.name, adult_key: h.species,
     speed: h.speed, power: h.power, stamina: h.stamina, odds: 10,
     passive_skill: code[h.passives[0]] || 'none', passive_skill_2: code[h.passives[1]] || 'none',
     equipment: h.equipment, charm: h.charm }));

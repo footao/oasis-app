@@ -82,7 +82,7 @@ COST_PASSIVES = {'省エネ走法': (None, 0.92), 'ロングスパート': ('終
 #   hold1/hold2 中盤/終盤「で下位半分なら」「開始時に順位が下位半分の場合」（差しの構え・亡者の追走・追い込み・終星の鎮魂歌）
 #         **そのフェーズの始めの順位で決まり、フェーズ中ずっと続く**（始めに下位 100% / 上位 0%・途中で順位が変わっても切れない）
 #   （timeline 4.9万区間・2026/10/08。頭数がちょうど半分の順位は上位扱い）
-POS_KINDS = ('duel', 'king', 'lead', 'solo', 'lone', 'low', 'over1', 'over2', 'hold1', 'hold2')
+POS_KINDS = ('duel', 'king', 'lead', 'solo', 'lone', 'low', 'over1', 'over2', 'hold1', 'hold2', 'lowst')
 NEW_POS = {'lone', 'low', 'over1', 'over2', 'hold1', 'hold2'}
 # 先頭の判定: 同じ位置（スタート直後は全頭 0m）なら pet_id の小さい馬が前（start_rank が434レース全部で
 # pet_id 順・首位の呪いの1区間目の発動 98/98 一致）。これを入れると「先頭の間」は効く:
@@ -93,11 +93,23 @@ NEW_POS = {'lone', 'low', 'over1', 'over2', 'hold1', 'hold2'}
 # 調子のぶれをレース中に入れた後でも 単勝LL +0.005±0.007 / 3連単LL −0.045±0.039・本命1着 92%→91% で、まだ決め手なし。
 # 2026/10/08: 孤影の疾走・下位半分系・追い抜かれ系も位置/順位で判定（下の COST_MODE と合わせた前向き200R で
 #   3連単LL 0.845→0.745（−0.100±0.048）・単勝LL 0.217→0.214。効いたのは主にフェーズの始めで決まる下位半分系）
-POS_DYNAMIC = {'duel', 'lead', 'solo', 'lone', 'low', 'over1', 'over2', 'hold1', 'hold2'}
+POS_DYNAMIC = {'duel', 'lead', 'solo', 'lone', 'low', 'over1', 'over2', 'hold1', 'hold2', 'lowst'}
 POS_LABELS = {'競り合い', '天嵐決闘', '王殺し', '星界破砕', '首位の呪い', '王冠過給', '先導祈願', '神樹轟臂', '原海戴冠'}   # 一致検証の見本選び用
 # 均すときの duty（消費量 c0 の計算は従来どおりこれで均す）
 POS_DUTY = {'duel': 0.655, 'king': 0.175, 'lead': LEAD_DUTY, 'solo': 0.05,
-            'lone': 0.101, 'low': 0.527, 'over1': 0.065, 'over2': 0.107, 'hold1': 0.271, 'hold2': 0.254}
+            'lone': 0.101, 'low': 0.527, 'over1': 0.065, 'over2': 0.107, 'hold1': 0.271, 'hold2': 0.254,
+            'lowst': LOWST_DUTY}
+# 「残りスタミナ30%以下で」（紅蓮点火・血走り・骨砕き・禍福転倒・星海反転）は、区間の始めのスタミナ ≤ 初期スタミナ×30% の
+# 区間だけ発動（timeline 4,350区間で 96% 一致）。〜10/17 は平均 duty 18.3% で全区間に均していて、紅蓮点火（+31%）の
+# いゔを序盤から +5.7% 速いと見ていた（R2749: 序盤の rating 予想 265.6 / 実際 251.8）。
+# 前向き258R: 単勝LL −0.0076±0.0072・3連単LL −0.0383±0.0152・23時の単勝LL 0.175→0.136（2026/10/17）
+LOWST_T = 0.30
+# フェーズの始めの順位でそのフェーズの消費が変わる（先頭ほど多い）。同じ馬・同じ設定どうしだと
+# 先頭と最後で約 exp(0.335)=1.4倍（中盤・終盤。序盤は 0.11）。ただし今の消費の式 c0 は速い馬ほど大きく、
+# 速い馬は前にいやすいので、その差の大半はすでに c0 に入っている → c0 からのずれを馬どうしで回帰した
+# 「上乗せぶん」だけを入れる（中盤・終盤 0.075 前後）。消費 ×exp(β·(0.5 − 順位の割合))、順位の割合は 0=先頭〜1=最後。
+# 前向き258R: 単勝LL −0.0067±0.0025・3連単LL −0.0217±0.0067（2026/10/17）
+RANK_COST = True
 DUEL_M, SOLO_M = 20.0, 50.0
 # 疲労補正はゲームの式そのもの（timeline 2.4万区間で 99.4% が ±0.0002・残りはスタミナ表示の丸め）。
 #   x = 区間の始めのスタミナ ÷ (距離ごとの定数 × 残り区間数)。定数 × 区間数 = 25 / 40 / 65 / 80。
@@ -113,6 +125,8 @@ LEAD_COST_UP = 1.0
 
 
 def _pos_kind(text):
+    if re.search(r'残りスタミナ\d+(?:\.\d+)?[%％]以下で', text) and '一度だけ' not in text:
+        return 'lowst'
     if '先頭から20m以内' in text:
         return 'king'
     if '50m以内に' in text and 'いない' in text:
@@ -529,6 +543,7 @@ class RaceSim:
         X = {(d, pi): [] for d in NSEG for pi in range(3)}
         Y = {(d, pi): [] for d in NSEG for pi in range(3)}
         cr, fq, crg, crn = [], [], {}, []
+        rkx = {0: [], 1: []}       # 順位の効き（馬どうし）: (c0 からのずれ, 順位の割合, log 頭数)
         for r in races:
             R = self._race(r)
             if not R:
@@ -580,6 +595,20 @@ class RaceSim:
                         cr.append(math.log(np.mean(cs) / cexp))
                         crg.setdefault(r.get('schedule_id'), []).append(cr[-1])
                         crn.append(math.log(len(R['rows'])))
+                if not row['g_p'] and len(R['rows']) > 1:
+                    Lw = oc.STAMINA_COST_LAW[R['dist']]
+                    for kk in range(1, len(tl)):
+                        p_ = tl[kk]
+                        if p_.get('phase') not in PH_TL or p_.get('start_rank') is None or p_.get('activated_passives'):
+                            continue
+                        if kk > 1 and tl[kk - 1].get('phase') == p_['phase']:
+                            continue
+                        c_ = p_.get('stamina_cost')
+                        if not c_ or not (Lw['lo'] * 1.001 < c_ < Lw['hi'] * 0.999):
+                            continue
+                        pi_ = PH_TL.index(p_['phase'])
+                        rkx[min(pi_, 1)].append((math.log(c_ / (row['c0'] * row['cost'][pi_])),
+                                                 (p_['start_rank'] - 1) / (len(R['rows']) - 1), math.log(len(R['rows']))))
                 s0, nn = tl[0].get('stamina'), len(tl) - 1
                 for k in range(1, len(tl)):
                     a, c, f = tl[k - 1].get('stamina'), tl[k].get('stamina_cost'), tl[k].get('fatigue_modifier')
@@ -619,6 +648,16 @@ class RaceSim:
         bins = [(fq[:, 0] >= lo) & (fq[:, 0] < hi) for lo, hi in zip(edges[:-1], edges[1:])]
         self.FQX = np.array([fq[m, 0].mean() for m in bins if m.any()])
         self.FQY = np.array([fq[m, 1].mean() for m in bins if m.any()])
+        rb = []
+        for grp in (0, 1):
+            v = np.array(rkx[grp]) if rkx[grp] else np.zeros((0, 3))
+            if len(v) > 50:
+                A = np.c_[v[:, 1] - v[:, 1].mean(), v[:, 2] - v[:, 2].mean()]
+                w_, *_ = np.linalg.lstsq(A, v[:, 0] - v[:, 0].mean(), rcond=None)
+                rb.append(float(-w_[0]))
+            else:
+                rb.append(0.0)
+        self.rank_beta = tuple(rb) if RANK_COST else (0.0, 0.0)
         return self
 
     def _pas_special(self):
@@ -673,7 +712,8 @@ class RaceSim:
                 'v_exp': V_EXP, 'f_exp': F_EXP, 'seg_noise': SEG_NOISE, 'horse_sd': self.horse_sd,
                 'horse_in_race': HORSE_IN_RACE,
                 'n_sim': self.n_sim, 'lowst_labels': sorted(LOWST_LABELS), 'lead_labels': sorted(LEAD_LABELS),
-                'lead_duty': LEAD_DUTY, 'lowst_duty': LOWST_DUTY,
+                'lead_duty': LEAD_DUTY, 'lowst_duty': LOWST_DUTY, 'lowst_t': LOWST_T,
+                'rank_beta': list(getattr(self, 'rank_beta', (0.0, 0.0))),
                 'cost_passives': {k: [v[0], v[1]] for k, v in COST_PASSIVES.items()}, 'gamble': GAMBLE,
                 # JS は一様乱数を持たないので、勝負師の抽選は「正規乱数 < この値」で行う（確率は同じ）
                 'tri_calib': list(TRI_CALIB),
@@ -730,7 +770,15 @@ class RaceSim:
         rank_prev = None
         last_drop = np.full((NS, H), -10)
         low_at = np.zeros((3, NS, H), bool)                                  # フェーズの始めに下位半分だったか
+        rmul = np.ones((NS, H))
+        rb = getattr(self, 'rank_beta', (0.0, 0.0))
         for k, pi in enumerate(ph_of):
+            if RANK_COST and H > 1 and (k == 0 or ph_of[k - 1] != pi) and rb[min(pi, 1)]:
+                # フェーズの始めの順位で、そのフェーズの消費が決まる（先頭ほど多い）。同位置は pet_id 順
+                rk_ = np.empty((NS, H), int)
+                np.put_along_axis(rk_, np.lexsort((np.broadcast_to(pid, (NS, H)), T), axis=1),
+                                  np.broadcast_to(np.arange(H), (NS, H)), 1)
+                rmul = np.exp(rb[min(pi, 1)] * (0.5 - rk_ / (H - 1)))
             if k > 0 and ph_of[k - 1] != pi and rph[:, pi].any():          # 「中盤突入時にスタミナを3%回復」
                 s = np.minimum(s + S0 * rph[None, :, pi], S0)
             if rlx.any():                                                    # 「残りスタミナ20%以下で一度だけ4%回復」
@@ -784,7 +832,8 @@ class RaceSim:
                         'over1': last_drop == k,
                         'over2': last_drop >= k - 1,
                         'hold1': low_at[1] if pi == 1 else np.zeros((NS, H), bool),
-                        'hold2': low_at[2] if pi == 2 else np.zeros((NS, H), bool)}
+                        'hold2': low_at[2] if pi == 2 else np.zeros((NS, H), bool),
+                        'lowst': s <= LOWST_T * S0}
                 for j, hm in has:
                     a_ = hm & cond[POS_KINDS[j]]
                     if detail:
@@ -801,7 +850,7 @@ class RaceSim:
             if COST_DYNAMIC:                                                 # 発動中の効果で上がった実効ステぶん消費も増える
                 c = np.clip(rf * np.einsum('nhj,hj->nh', mult, st[:, pi, :] * wc[None, :]), L['lo'], L['hi'])
             elif COST_MODE == 'clampdyn':
-                c = np.clip(rf * c0v * np.einsum('nhj,hj->nh', mult, st[:, pi, :] * wc[None, :]) / craw[None, :, pi],
+                c = np.clip(rf * c0v * np.einsum('nhj,hj->nh', mult, st[:, pi, :] * wc[None, :]) / craw[None, :, pi] * rmul,
                             L['lo'], L['hi'])
             s = s - c * cm[None, :, k] * cmul
         if self.horse_sd and not HORSE_IN_RACE:      # 1レース1頭ごとの調子のぶれ（区間の乱数だけでは自信過剰になる）
@@ -848,7 +897,7 @@ if __name__ == '__main__':      # 動作確認: 最後の日より前で学習 �
     assert ok(S['聖輪転生']['pos']['low'][0]['power'], 1.16) and S['聖輪転生']['rec'] == [(1, 1.0, 0.03)]
     assert S['永劫時律']['fx'] == [(1, {'speed': 1.24})] and ok(S['永劫時律']['nz'], 0.8)
     assert ok(S['世界樹循環']['base']['stamina'], 119) and ok(S['世界樹循環']['cost'][1], 0.96)
-    assert ok(S['星海反転']['base']['speed'], 100 * (1 + 0.18 * LOWST_DUTY)) and S['星海反転']['rec'] == [(None, 0.2, 0.04)]
+    assert ok(S['星海反転']['pos']['lowst'][0]['speed'], 1.18) and ok(S['星海反転']['base']['speed'], 100) and S['星海反転']['rec'] == [(None, 0.2, 0.04)]
     # timeline の解析（2026/10/08）で見つけた扱い: 回復・乱数・疲労の軽減・ロングスパート・順位/追い抜かれ系
     P = lambda code, it=None: horse_profile(dict(base, passive_skill=code, equipment=it), '長距離', '芝', sim.spec, False)
     assert P('second_wind')['rec'] == [(1, 1.0, 0.08)] and ok(P('second_wind')['base']['stamina'], 100)

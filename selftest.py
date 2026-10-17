@@ -968,6 +968,17 @@ def regression_tests():
     check('P49 首位の呪いのスタミナ消費増は二重に掛けない（clampdyn が入れている）',
           rs_mod.LEAD_COST_UP == 1.0 and rs_mod.COST_MODE == 'clampdyn',
           '1.047 を重ねると 23時マイルのおいらを 60% と見ていた（実戦3戦3勝・残りスタミナ約2）')
+    check('P50 「残りスタミナ30%以下で」の効果は、その区間だけ発動させる（均さない）',
+          'lowst' in rs_mod.POS_KINDS and 'lowst' in rs_mod.POS_DYNAMIC and rs_mod.LOWST_T == 0.3
+          and "'hold1', 'hold2', 'lowst'];" in _model_js and 'Sv[h] <= (S.lowst_t == null ? 0.3 : S.lowst_t) * S0[h]' in _model_js,
+          'R2749: 紅蓮点火のいゔを序盤から +5.7% 速いと見て、おいらの勝率を 72%→（修正後）に下げていた')
+    check('P51 フェーズの始めの順位で消費を変える（先頭ほど多い・c0 からの上乗せぶんだけ）',
+          rs_mod.RANK_COST and "'rank_beta': list(" in open(rs_mod.__file__, encoding='utf-8').read()
+          and 'C[h] = clampC(RF[h] * x.c0 * r * RM[h]);' in _model_js and 'RM.fill(1);' in _model_js,
+          '同じ馬・同じ設定どうしで先頭と最後の消費は約1.4倍。前向き258R: 3連単LL −0.022±0.007')
+    check('P52 3連単の口数にケリーを掛けない（期待値最大・1レース20口まで）',
+          'TRI_KELLY: false,' in _ap and 'CFG.TRI_KELLY ? (D.kelly_fraction || 0.25) : 1e9' in _ap,
+          '10/01〜76R（今のモデル）: ケリーあり・下限20% 実際+1,708万 → ケリーなし・下限10% +1,744万')
     check('P41 3連単の組の確率を較正してから使う',
           "const tc = M.sim.tri_calib;" in _ap and rs_mod.TRI_CALIB[1] > 1.0,
           f'race_sim.TRI_CALIB {rs_mod.TRI_CALIB}（中ほどの控えめ・低いところの高めを直す）')
@@ -1116,8 +1127,8 @@ def regression_tests():
     check('P28 3連単の的中率下限が Python と JS で一致している',
           _js_mp is not None and abs(float(_js_mp.group(1)) - _mp) < 1e-9,
           f"Python {_mp} / JS {_js_mp.group(1) if _js_mp else '見つからない'}")
-    check('P28 的中率5〜15%の帯を買わない値になっている（EV枠。未成立枠は 10/09〜 較正済みで10%）',
-          _mp >= 0.15 and oc.DEFAULT_SETTINGS['unformed_p_min'] >= 0.10,
+    check('P28 3連単の的中率下限は 10/17〜 10%（10%未満は予想3.0回→実際0回）・未成立枠も10%',
+          abs(_mp - 0.10) < 1e-9 and oc.DEFAULT_SETTINGS['unformed_p_min'] >= 0.10,
           f"min_prob {_mp} / 未成立 {oc.DEFAULT_SETTINGS['unformed_p_min']}"
           '（実ベット52レース: 予測5〜15%の帯は93件・予測9.1%→実測1.1%・回収率24%。'
           '切ると全体123%→140%、σ差し戻し後34レースで139%→147%）')
