@@ -979,6 +979,10 @@ def regression_tests():
     check('P52 3連単の口数にケリーを掛けない（期待値最大・1レース20口まで）',
           'TRI_KELLY: false,' in _ap and 'CFG.TRI_KELLY ? (D.kelly_fraction || 0.25) : 1e9' in _ap,
           '10/01〜76R（今のモデル）: ケリーあり・下限20% 実際+1,708万 → ケリーなし・下限10% +1,744万')
+    _ap_s, _ap_e = _ap.find('未成立組（誰も賭けていない組）を**先に**確保する'), _ap.find('const alloc = OasisModel.allocateUnitsStable(')
+    check('P53 未成立の組を先に確保してから、残りの口数で成立組を期待値最大にする',
+          0 <= _ap_s < _ap_e and '{ budget: budgetU - used, stakeUnit: U_' in _ap,
+          '後回しだと期待値最大が20口を使い切って未成立が買えない（R2649 の116倍）。10/01〜76R: 先に確保 +1,741万 / 後回し +1,621万')
     check('P41 3連単の組の確率を較正してから使う',
           "const tc = M.sim.tri_calib;" in _ap and rs_mod.TRI_CALIB[1] > 1.0,
           f'race_sim.TRI_CALIB {rs_mod.TRI_CALIB}（中ほどの控えめ・低いところの高めを直す）')

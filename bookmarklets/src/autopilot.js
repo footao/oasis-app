@@ -17,7 +17,7 @@
 // 挙動のバージョン。autopilot.js を直したら上げること。
 // **ビルド時刻のほうが当てになる**（model.json の trained_at ＝ build_autopilot.py を
 // 回した時刻で、こちらは上げ忘れようがない）。両方をパネルに出す。
-const AP_VER = '1.64.1';
+const AP_VER = '1.64.2';
 (async () => {
 'use strict';
 // 2回押されたら古いパネルを消して作り直す（javascript: URL は同じスコープで動くため）
@@ -741,12 +741,55 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
   }
 
   const budgetU = Math.min(CFG.TRI_MAX_UNITS, unitsLeft);
+  const picks = [];
+  let used = 0;
+  // --- ② 未成立組（誰も賭けていない組）を**先に**確保する（1.64.2〜）---
+  // 成立組の期待値最大が20口を使い切ると、未成立の候補が1口も買えなくなる（10/01〜76R で3レース。
+  // R2649 は 116倍の的中を逃す計算）。先に未成立を取り、残りの口数で成立組を期待値最大にする:
+  //   10/01〜76R 実際 +1,741万（後回しだと +1,621万・今まで +1,585万）。
+  const oddsFailed = (oddsRaw.failed && oddsRaw.failed.size) || 0;
+  if (oddsFailed && CFG.UNFORMED_ON) {
+    log(`R${sid}: オッズを ${oddsFailed}組 取り損ねたので未成立枠は見送り（人気組を未成立と誤認しないため）`, '#ffb74d');
+  }
+  if (CFG.UNFORMED_ON && !oddsFailed && budgetU - used >= 1) {
+    const disp = pets.map((h, i) => nameOf(i));
+    const odByName = new Map();
+    for (const c of combo) {
+      const od = odds.get(key3(c));
+      if (od) odByName.set([c.i, c.j, c.k].map(nameOf).join(' / '), od);
+    }
+    const odOf = names => odByName.get(names.join(' / ')) || null;
+    const sleeve = OasisModel.unformedSleevePicks(
+      combo.map(c => [[c.i, c.j, c.k], c.p]), disp, odOf, P,
+      { pMin: D.unformed_p_min || 0.20, edgeMin: D.unformed_edge_min || 0.30,
+        maxUnits: CFG.UNFORMED_MAX_UNITS, remainingBudget: budgetU - used,
+        stakeUnit: U_, pScale: lam });
+    const idxOf = new Map(disp.map((x, i) => [x, i]));
+    for (const row of sleeve) {
+      const names = row[0], p = row[1], effOd = row[2], k = row[3];
+      const ids = names.map(x => idxOf.get(x));
+      if (ids.some(x => x == null)) continue;
+      picks.push({ c: { i: ids[0], j: ids[1], k: ids[2], p: p }, k: k, eff: effOd,
+                   edge: p * effOd - 1, p: p, unformed: true, od: null, names: names });
+      used += k;
+    }
+    // 的中率の高い未成立組は口数を増やす（2026/10/17 ユーザー判断）。
+    // 誰も乗ってこなければ払戻はプール総取りのままなので、増やした分は当たればそのまま戻る（損は外れたときだけ）。
+    // 締切ギリギリに他人が同じ組を買うと、1口では取り分が薄まる（R2747: 1口・見込み21倍 → 実際13倍）。
+    const big = picks.find(pk => pk.unformed && pk.p >= CFG.UNFORMED_BIG_P);
+    const add = big ? Math.min(budgetU - used, CFG.UNFORMED_BIG_UNITS - big.k) : 0;
+    if (add > 0) {
+      big.k += add; used += add;
+      big.eff = (P + big.k * U_) / (big.k * U_);   // 誰も乗ってこない場合の実効オッズ
+      big.edge = big.p * big.eff - 1;
+      log(`R${sid}: 未成立の ${big.names.join('→')}（的中${fx(big.p * 100, 1)}%）は ${big.k}口にします`
+          + `（駆け込みで取り分が薄まるのを防ぐ）`, '#e2b96f');
+    }
+  }
   const alloc = OasisModel.allocateUnitsStable(
     cands, P, kellyBank(), CFG.TRI_KELLY ? (D.kelly_fraction || 0.25) : 1e9,
     riskFrac(), CFG.EDGE_MIN,
-    { budget: budgetU, stakeUnit: U_, maxPerCombo: M.max_units || 20 });
-  const picks = [];
-  let used = 0;
+    { budget: budgetU - used, stakeUnit: U_, maxPerCombo: M.max_units || 20 });
   for (const [k, v] of alloc) {
     const c = byKey.get(k);
     if (!c || !v[0]) continue;
@@ -805,46 +848,6 @@ async function analyseTrifecta(sid, pets, combo, U_, unitsLeft, canBuy) {
     }
   }
 
-  // --- ② 未成立組（誰も賭けていない組）に余りを回す ---
-  const oddsFailed = (oddsRaw.failed && oddsRaw.failed.size) || 0;
-  if (oddsFailed && CFG.UNFORMED_ON) {
-    log(`R${sid}: オッズを ${oddsFailed}組 取り損ねたので未成立枠は見送り（人気組を未成立と誤認しないため）`, '#ffb74d');
-  }
-  if (CFG.UNFORMED_ON && !oddsFailed && budgetU - used >= 1) {
-    const disp = pets.map((h, i) => nameOf(i));
-    const odByName = new Map();
-    for (const c of combo) {
-      const od = odds.get(key3(c));
-      if (od) odByName.set([c.i, c.j, c.k].map(nameOf).join(' / '), od);
-    }
-    const odOf = names => odByName.get(names.join(' / ')) || null;
-    const sleeve = OasisModel.unformedSleevePicks(
-      combo.map(c => [[c.i, c.j, c.k], c.p]), disp, odOf, P,
-      { pMin: D.unformed_p_min || 0.20, edgeMin: D.unformed_edge_min || 0.30,
-        maxUnits: CFG.UNFORMED_MAX_UNITS, remainingBudget: budgetU - used,
-        stakeUnit: U_, pScale: lam });
-    const idxOf = new Map(disp.map((x, i) => [x, i]));
-    for (const row of sleeve) {
-      const names = row[0], p = row[1], effOd = row[2], k = row[3];
-      const ids = names.map(x => idxOf.get(x));
-      if (ids.some(x => x == null)) continue;
-      picks.push({ c: { i: ids[0], j: ids[1], k: ids[2], p: p }, k: k, eff: effOd,
-                   edge: p * effOd - 1, p: p, unformed: true, od: null, names: names });
-      used += k;
-    }
-    // 的中率の高い未成立組は口数を増やす（2026/10/17 ユーザー判断）。
-    // 誰も乗ってこなければ払戻はプール総取りのままなので、増やした分は当たればそのまま戻る（損は外れたときだけ）。
-    // 締切ギリギリに他人が同じ組を買うと、1口では取り分が薄まる（R2747: 1口・見込み21倍 → 実際13倍）。
-    const big = picks.find(pk => pk.unformed && pk.p >= CFG.UNFORMED_BIG_P);
-    const add = big ? Math.min(budgetU - used, CFG.UNFORMED_BIG_UNITS - big.k) : 0;
-    if (add > 0) {
-      big.k += add; used += add;
-      big.eff = (P + big.k * U_) / (big.k * U_);   // 誰も乗ってこない場合の実効オッズ
-      big.edge = big.p * big.eff - 1;
-      log(`R${sid}: 未成立の ${big.names.join('→')}（的中${fx(big.p * 100, 1)}%）は ${big.k}口にします`
-          + `（駆け込みで取り分が薄まるのを防ぐ）`, '#e2b96f');
-    }
-  }
   // 賭け方を後から正確に再生できるように、モデル確率の上位20組を全部残す
   // （安牌で足切りした組・オッズの無い組も含む）。オッズはレース確定後に API から消える。
   const candLog = combo.slice(0, 20).map(c => {
