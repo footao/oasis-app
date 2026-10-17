@@ -965,6 +965,9 @@ def regression_tests():
           and "const big = picks.find(pk => pk.unformed && pk.p >= CFG.UNFORMED_BIG_P);" in _ap
           and 'const add = big ? Math.min(budgetU - used, CFG.UNFORMED_BIG_UNITS - big.k) : 0;' in _ap,
           'R2747: 99.9%の未成立組を1口だけ買い、締切前の他人の買いで21倍→13倍に薄まった')
+    check('P49 首位の呪いのスタミナ消費増は二重に掛けない（clampdyn が入れている）',
+          rs_mod.LEAD_COST_UP == 1.0 and rs_mod.COST_MODE == 'clampdyn',
+          '1.047 を重ねると 23時マイルのおいらを 60% と見ていた（実戦3戦3勝・残りスタミナ約2）')
     check('P41 3連単の組の確率を較正してから使う',
           "const tc = M.sim.tri_calib;" in _ap and rs_mod.TRI_CALIB[1] > 1.0,
           f'race_sim.TRI_CALIB {rs_mod.TRI_CALIB}（中ほどの控えめ・低いところの高めを直す）')
