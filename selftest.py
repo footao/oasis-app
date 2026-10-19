@@ -960,11 +960,12 @@ def regression_tests():
                                            ['a', 'b', 'c'], lambda n: None, 1_300_000,
                                            p_min=0.1, edge_min=0.3, max_units=2)) == 2,
           '較正済みの確率で下限10%。JS は model.json の defaults から読む')
-    check('P48 的中率90%以上の未成立組は3連単の残り口数まで入れる',
-          'UNFORMED_BIG_P: 0.90,' in _ap and 'UNFORMED_BIG_UNITS: 20,' in _ap
-          and "const big = picks.find(pk => pk.unformed && pk.p >= CFG.UNFORMED_BIG_P);" in _ap
-          and 'const add = big ? Math.min(budgetU - used, CFG.UNFORMED_BIG_UNITS - big.k) : 0;' in _ap,
-          'R2747: 99.9%の未成立組を1口だけ買い、締切前の他人の買いで21倍→13倍に薄まった')
+    _big_at, _ev_at = _ap.find('const big = picks.filter(pk => Math.round(pk.p * 1000) / 1000 >= CFG.UNFORMED_BIG_P)'), _ap.find('const alloc = OasisModel.allocateUnitsStable(')
+    check('P48 的中率90%以上の組（未成立・成立とも）には、他を買った後の残りの口数を全部入れる',
+          'UNFORMED_BIG_P: 0.90,' in _ap and 'UNFORMED_BIG_UNITS: 20,' in _ap and _big_at > _ev_at > 0
+          and 'const add = big ? Math.min(budgetU - used, CFG.UNFORMED_BIG_UNITS - big.k) : 0;' in _ap
+          and 'pk.unformed && pk.p >= CFG.UNFORMED_BIG_P' not in _ap,
+          'R2747: 未成立99.9%を1口で21倍→13倍に薄まった / R2758: 成立組90%（他人1口）を13口で止めていた')
     check('P49 首位の呪いのスタミナ消費増は二重に掛けない（clampdyn が入れている）',
           rs_mod.LEAD_COST_UP == 1.0 and rs_mod.COST_MODE == 'clampdyn',
           '1.047 を重ねると 23時マイルのおいらを 60% と見ていた（実戦3戦3勝・残りスタミナ約2）')
