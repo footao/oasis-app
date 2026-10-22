@@ -56,7 +56,10 @@ SEG_NOISE = 0.0119
 #   ゴールに 0.006: 単勝LL 0.266 / 3連単LL 1.005 → レース中に 0.004: 0.243 / 0.948（0.006 で 0.256/0.981、0.008 で悪化）
 #   較正: 予測95%以上 101R 予測99.0% 実際99.0%
 HORSE_IN_RACE = True
-HORSE_SD = 0.004       # 1頭ごとのレースのぶれ（前向き検証194レースで 0.004〜0.008 を比べて最良）
+# 1頭ごとのレースのぶれ。0.004（10/07 に194Rで決定）→ 0.002（10/21）。その後の修正でモデルが良くなり、ぶれが大きすぎて
+# 単勝の確率が控えめになっていた（予想50〜80%の帯が実際76%）。前向き281R: 単勝LL −0.0157±0.0033（COST_SD_H_K と合わせて）
+HORSE_SD = 0.002
+COST_SD_H_K = 0.5     # 馬ごとの消費の乱数を、レース内のばらつきから出した値の半分にする（同じ設定の馬は消費がほぼ一定。10/21）
 LOWST_LABELS = {'血走り', '骨砕き', '紅蓮点火', '深淵反転', '禍福転倒', '星海反転'}
 LEAD_LABELS = {'首位の呪い', '王冠過給', '先導祈願', '原海戴冠'}
 LEAD_DUTY = 0.079                 # 先頭の間（平均 duty で全区間に均す）
@@ -243,6 +246,9 @@ def horse_profile(h, dist, track, spec, same_species, scope_tbl=None):
     relief = 1.0                      # 疲労補正 < 1 のとき、落ちる幅に掛ける倍率（苦痛慣れ・粘り腰）
     rfx = []                          # rating の計算だけに効くスタミナ倍率 [(フェーズ, 倍率)]
     pos = {k: [{}, 1.0, set()] for k in POS_KINDS}      # 種類 → [ステ倍率, 消費倍率, 発動キー]
+    # 初期スタミナはゲームと同じく倍率を掛けるたびに切り捨てる（timeline 2,689頭で一致 83.5% → 98.7%。
+    # 最後に1回だと調和の加護持ちなどで1多くなり、ギリギリ持つ馬を「持つ」と見ていた: R2805 cry 2026/10/22）
+    s_int = [float(h['stamina'])]
 
     def add_pos(kind, m, cm, key):
         for k, x in m.items():
@@ -266,6 +272,8 @@ def horse_profile(h, dist, track, spec, same_species, scope_tbl=None):
         for k, x in m.items():
             if k in base:
                 base[k] *= 1.0 + (float(x) - 1.0) * min(max(duty, 0.0), 1.0)
+                if k == 'stamina':
+                    s_int[0] = math.floor(s_int[0] * (1.0 + (float(x) - 1.0) * min(max(duty, 0.0), 1.0)) + 1e-9)
 
     def phase(m, arg, duty):
         pi = _phase_idx(arg)
@@ -436,7 +444,7 @@ def horse_profile(h, dist, track, spec, same_species, scope_tbl=None):
             item_clause(label if j == 0 else '', t, str(it.get('effect_key') or '') if j == 0 else '')
     for k in base:
         base[k] = max(base[k], 1.0)
-    return dict(base=base, fx=fx, cost=cost, gamble=gamble, pos=pos, nz=nz, rec=rec, relief=relief, rfx=rfx)
+    return dict(base=base, fx=fx, cost=cost, gamble=gamble, pos=pos, nz=nz, rec=rec, relief=relief, rfx=rfx, s_int=s_int[0])
 
 
 def _tobit(eq, gt, lt):
@@ -514,7 +522,7 @@ class RaceSim:
             g = pf['gamble']
             L = oc.STAMINA_COST_LAW[dist]
             wc = np.array(oc.INTERNAL_PHASE_WEIGHTS['序盤']) * np.array(oc.INTERNAL_DIST_BALANCE[dist])
-            rows.append(dict(h=h, pid=int(h.get('pet_id') or 0), st=st, craw=[float(L['c'] * (st[pi] @ wc)) for pi in range(3)], c0=need / n, cost=list(pf['cost']), s0=math.floor(e['stamina']),
+            rows.append(dict(h=h, pid=int(h.get('pet_id') or 0), st=st, craw=[float(L['c'] * (st[pi] @ wc)) for pi in range(3)], c0=need / n, cost=list(pf['cost']), s0=math.floor(pf['s_int'] * e['stamina'] / base['stamina'] + 1e-9),
                              g_p=g[0] if g else 0.0,
                              g_m=[float(g[1].get(k, 1.0)) for k in ('speed', 'power', 'stamina')] if g else [1.0] * 3,
                              p_m=[[float(pf['pos'][kd][0].get(k, 1.0)) for k in ('speed', 'power', 'stamina')]
@@ -637,7 +645,7 @@ class RaceSim:
                 self.cost_sd = float(np.std(np.array(cr) - (self.cost_mu + self.cost_mu_n * np.array(crn))))
             g = [v for v in crg.values() if len(v) >= 3]
             wv = float(np.mean([np.var(v, ddof=1) for v in g])) if g else self.cost_sd ** 2
-            self.cost_sd_h = math.sqrt(min(wv, self.cost_sd ** 2))
+            self.cost_sd_h = math.sqrt(min(wv, self.cost_sd ** 2)) * COST_SD_H_K
             self.cost_sd_r = math.sqrt(max(self.cost_sd ** 2 - wv, 0.0))
         # 疲労補正は「残りの区間を走り切ったときの見込みの余り ÷ 初期スタミナ」でほぼ決まる
         # （timeline 39,630区間: 相関0.82。余りが多いほど最大 +3%、足りないと 0.65 まで落ちる）。
@@ -880,6 +888,10 @@ if __name__ == '__main__':      # 動作確認: 最後の日より前で学習 �
     sim = RaceSim(n_sim=2000).fit([r for r in raw if r['race_date'] < last['race_date']])
     win, tri, names = sim.predict(last, seed=1)
     assert len(win) == len(names) and abs(win.sum() - 1) < 1e-9 and abs(sum(tri.values()) - 1) < 1e-9
+    # 初期スタミナ（倍率ごとに切り捨て）が timeline の実測と合うか（2026/10/22 時点 98.7%）
+    chk = [(x['s0'], x['h']['timeline'][0]['stamina']) for r_ in raw[-120:] if r_.get('harvested_at', '')[:10] == r_['race_date']
+           for x in sim._race(r_)['rows'] if x['h'].get('timeline') and not x['g_p']]
+    assert sum(a == b for a, b in chk) >= 0.95 * len(chk), sum(a == b for a, b in chk) / len(chk)
     # oasis 級10種: 固有スキルと追加効果がそれぞれ正しい場所に入るか
     base = dict(speed=100.0, power=100.0, stamina=100.0)
     def pf(label, desc, d='長距離'):

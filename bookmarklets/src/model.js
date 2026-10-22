@@ -724,6 +724,7 @@ const OasisModel = (() => {
   function simProfile(h, dist, track, M, same) {
     const S = M.sim, ns = S.nseg[dist], n = ns[0] + ns[1] + ns[2];
     const base = { speed: +h.speed, power: +h.power, stamina: +h.stamina };
+    let sInt = +h.stamina;   // 初期スタミナは倍率を掛けるたびに切り捨て（Python: horse_profile の s_int）
     const fx = [], cost = [1, 1, 1];
     let gamble = null;
     // 位置で決まる効果（20m以内にライバル・先頭から20m以内の2位以下・先頭の間・2位と50m以上）
@@ -746,7 +747,12 @@ const OasisModel = (() => {
     };
     const avgCost = (kind, cm) => { for (let pi = 0; pi < 3; pi++) cost[pi] *= 1 + (cm - 1) * S.pos_duty[kind]; };
     const clamp01 = d => Math.min(Math.max(d, 0), 1);
-    const avg = (m, duty) => { for (const k of Object.keys(m)) if (k in base) base[k] *= 1 + (m[k] - 1) * clamp01(duty); };
+    const avg = (m, duty) => {
+      for (const k of Object.keys(m)) if (k in base) {
+        base[k] *= 1 + (m[k] - 1) * clamp01(duty);
+        if (k === 'stamina') sInt = Math.floor(sInt * (1 + (m[k] - 1) * clamp01(duty)) + 1e-9);
+      }
+    };
     const phase = (m, arg, duty) => {
       const pi = SIM_PH.indexOf(arg);
       if (pi < 0) { avg(m, duty); return; }
@@ -877,7 +883,7 @@ const OasisModel = (() => {
     const st = [0, 1, 2].map(() => KS.map(k => base[k]));
     for (const [pi, m] of fx) KS.forEach((k, j) => { if (k in m) st[pi][j] *= m[k]; });
     for (const [pi, x] of rfx) st[pi][2] *= x;        // 初期スタミナ・消費（e）には入れない（Python と同じ）
-    return { st: st, c0: need / n, cost: cost, s0: Math.floor(e.stamina),
+    return { st: st, c0: need / n, cost: cost, s0: Math.floor(sInt * e.stamina / base.stamina + 1e-9),
              g_p: gamble ? gamble[0] : 0, g_m: KS.map(k => gamble ? (gamble[1][k] == null ? 1 : +gamble[1][k]) : 1),
              p_m: SIM_POS.map(kd => KS.map(k => pos[kd][0][k] == null ? 1 : pos[kd][0][k])),
              p_c: SIM_POS.map(kd => pos[kd][1]), nz: nz, relief: relief, rec_ph: recPh, rec_low: recLow || [0, 0] };
