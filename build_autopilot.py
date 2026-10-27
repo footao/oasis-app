@@ -194,21 +194,23 @@ def main(log_path=None):
 
 
 def _write_sim_fixture(sim, races, race_sim):
-    """test_sim.js 用の見本: 直近数レースの Python 側の入力と勝率（4万回）。"""
+    """test_sim.js 用の見本: 直近数レースの Python 側の入力と勝率・3連単の上位10組（4万回）。"""
     import oasis_core as oc
     out = []
     for r in races:
         hs = [h for h in r['horses'] if h.get('speed') is not None]
         r2 = dict(r, horses=hs)
         sim.n_sim = 40000
-        win, _, _ = sim.predict(r2, seed=7)
+        win, tri, _ = sim.predict(r2, seed=7)
         js_h = [{'name': h.get('name', ''), 'species': h.get('adult_key'), 'pet_id': h.get('pet_id'),
                  'speed': h['speed'], 'power': h['power'], 'stamina': h['stamina'],
                  'passives': [oc.PASSIVE_CODE_MAP[c] for c in (h.get('passive_skill'), h.get('passive_skill_2'))
                               if c and c != 'none' and c in oc.PASSIVE_CODE_MAP],
                  'equipment': h.get('equipment'), 'charm': h.get('charm')} for h in hs]
         out.append({'sid': r.get('schedule_id'), 'dist': r['distance'], 'track': r.get('surface'),
-                    'horses': js_h, 'inputs': sim.inputs(r2), 'win': [float(x) for x in win]})
+                    'horses': js_h, 'inputs': sim.inputs(r2), 'win': [float(x) for x in win],
+                    # 3連単は収益の大半。勝率が合っていても組の数え方がずれうるので、上位の組も比べる
+                    'tri': [[[int(i) for i in k], float(p)] for k, p in sorted(tri.items(), key=lambda kv: -kv[1])[:10]]})
     sim.n_sim = 8000
     io.open(os.path.join(HERE, '_parity_sim.json'), 'w', encoding='utf-8').write(
         json.dumps(out, ensure_ascii=False))

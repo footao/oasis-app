@@ -1,12 +1,12 @@
 // 区間シミュレータの Python↔JS 一致検証（build_autopilot.py が node で実行する）。
 // 入力（フェーズ別の実効ステ・1区間の消費・初期スタミナ）は完全一致、
-// 勝率は乱数の種が違うので 4万回どうしで ±0.02 以内を見る。
+// 勝率と3連単の上位10組の確率は乱数の種が違うので 4万回どうしで ±0.02 以内を見る。
 const fs = require('fs');
 const path = require('path');
 const OasisModel = require('./bookmarklets/src/model.js');
 const M = JSON.parse(fs.readFileSync(path.join(__dirname, 'model.json'), 'utf8'));
 const F = JSON.parse(fs.readFileSync(path.join(__dirname, '_parity_sim.json'), 'utf8'));
-let worstIn = 0, worstP = 0;
+let worstIn = 0, worstP = 0, worstT = 0, nT = 0;
 for (const r of F) {
   const js = OasisModel.simInputs(r.horses, r.dist, r.track, M);
   js.forEach((x, h) => {
@@ -19,14 +19,17 @@ for (const r of F) {
     worstIn = Math.max(worstIn, Math.abs(x.nz - py.nz[h]), Math.abs(x.rec_low[0] - py.rec_low[h][0]), Math.abs(x.rec_low[1] - py.rec_low[h][1]));
     for (let q = 0; q < 3; q++) worstIn = Math.max(worstIn, Math.abs(x.rec_ph[q] - py.rec_ph[h][q]));
     worstIn = Math.max(worstIn, Math.abs(x.relief - py.relief[h]));
+    if (py.lowst_t) worstIn = Math.max(worstIn, Math.abs(x.lowst_t - py.lowst_t[h]));
     for (let q = 0; q < py.p_c[h].length; q++) { worstIn = Math.max(worstIn, Math.abs(x.p_c[q] - py.p_c[h][q]));
       for (let j = 0; j < 3; j++) worstIn = Math.max(worstIn, Math.abs(x.p_m[q][j] - py.p_m[h][q][j])); }
   });
-  const w = OasisModel.simRace(r.horses, r.dist, r.track, M, 40000, 11).win;
-  w.forEach((p, i) => { worstP = Math.max(worstP, Math.abs(p - r.win[i])); });
+  const sr = OasisModel.simRace(r.horses, r.dist, r.track, M, 40000, 11);
+  sr.win.forEach((p, i) => { worstP = Math.max(worstP, Math.abs(p - r.win[i])); });
+  const tj = new Map((sr.combo || []).map(c => [`${c.i}-${c.j}-${c.k}`, c.p]));
+  for (const [k, p] of (r.tri || [])) { worstT = Math.max(worstT, Math.abs((tj.get(k.join('-')) || 0) - p)); nT++; }
 }
-if (worstIn > 1e-6 || worstP > 0.02) {
-  console.error(`❌ シミュレータ不一致: 入力の最大誤差 ${worstIn.toExponential(2)} / 勝率の最大差 ${worstP.toFixed(3)}`);
+if (worstIn > 1e-6 || worstP > 0.02 || worstT > 0.02) {
+  console.error(`❌ シミュレータ不一致: 入力の最大誤差 ${worstIn.toExponential(2)} / 勝率の最大差 ${worstP.toFixed(3)} / 3連単の最大差 ${worstT.toFixed(3)}`);
   process.exit(1);
 }
-console.log(`✅ シミュレータ 一致（${F.length}レース 入力誤差 ${worstIn.toExponential(1)} / 勝率差 ${worstP.toFixed(3)}）`);
+console.log(`✅ シミュレータ 一致（${F.length}レース 入力誤差 ${worstIn.toExponential(1)} / 勝率差 ${worstP.toFixed(3)} / 3連単 上位${nT}組の差 ${worstT.toFixed(3)}）`);

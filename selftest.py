@@ -966,17 +966,36 @@ def regression_tests():
           and 'const add = big ? Math.min(budgetU - used, CFG.UNFORMED_BIG_UNITS - big.k) : 0;' in _ap
           and 'pk.unformed && pk.p >= CFG.UNFORMED_BIG_P' not in _ap,
           'R2747: 未成立99.9%を1口で21倍→13倍に薄まった / R2758: 成立組90%（他人1口）を13口で止めていた')
-    check('P49 首位の呪いのスタミナ消費増は二重に掛けない（clampdyn が入れている）',
-          rs_mod.LEAD_COST_UP == 1.0 and rs_mod.COST_MODE == 'clampdyn',
-          '1.047 を重ねると 23時マイルのおいらを 60% と見ていた（実戦3戦3勝・残りスタミナ約2）')
+    check('P49 首位の呪いの「スタミナ消費も増加」は rating の上昇とは別に掛ける（消費 ∝ rating の下で +4.7%）',
+          rs_mod.RC_COST and rs_mod.LEAD_COST_UP == 1.047,
+          '消費÷rating のずれ +4.6%（111区間・2026/10/27）。clampdyn のときは 1.0 だった（実効ステの比で二重になるため）')
     check('P50 「残りスタミナ30%以下で」の効果は、その区間だけ発動させる（均さない）',
           'lowst' in rs_mod.POS_KINDS and 'lowst' in rs_mod.POS_DYNAMIC and rs_mod.LOWST_T == 0.3
-          and "'hold1', 'hold2', 'lowst'];" in _model_js and 'Sv[h] <= (S.lowst_t == null ? 0.3 : S.lowst_t) * S0[h]' in _model_js,
+          and "'hold1', 'hold2', 'lowst'];" in _model_js and 'Sv[h] <= x.lowst_t * S0[h]' in _model_js,
           'R2749: 紅蓮点火のいゔを序盤から +5.7% 速いと見て、おいらの勝率を 72%→（修正後）に下げていた')
-    check('P51 フェーズの始めの順位で消費を変える（先頭ほど多い・c0 からの上乗せぶんだけ）',
-          rs_mod.RANK_COST and "'rank_beta': list(" in open(rs_mod.__file__, encoding='utf-8').read()
-          and 'C[h] = clampC(RF[h] * x.c0 * r * RM[h]);' in _model_js and 'RM.fill(1);' in _model_js,
-          '同じ馬・同じ設定どうしで先頭と最後の消費は約1.4倍。前向き258R: 3連単LL −0.022±0.007')
+    check('P51 順位で消費を変えるのは、消費 ∝ rating（RC_COST）を使わないときだけ',
+          "if not rcp and RANK_COST and H > 1" in open(rs_mod.__file__, encoding='utf-8').read()
+          and 'if (!rcK && H > 1 && (k === 0 || segPh[k - 1] !== pi) && rkB[Math.min(pi, 1)])' in _model_js,
+          '順位の効きは rating の代わりだった（rating を入れると順位の係数 0・2026/10/27）')
+    # P54: 消費 ∝ rating。学習データから K とレースの乱数を当て、レース内で馬ごとの 消費÷rating がそろうことを実データで確かめる
+    import json as _json, math as _math, numpy as _np
+    _rows = [_json.loads(l) for l in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'races.jsonl'), encoding='utf-8') if l.strip()]
+    _rows = [r for r in _rows if r.get('race_date', '') >= '2026-08-20' and r.get('distance') in rs_mod.NSEG]
+    _rc = rs_mod._fit_rc(_rows)
+    _dev = []
+    for r in _rows[-120:]:
+        L = oc.STAMINA_COST_LAW[r['distance']]
+        for ph in rs_mod.PH_TL:
+            ys = [_np.median([_math.log(s['stamina_cost'] / s['rating']) for s in h['timeline'][1:] if s.get('phase') == ph and s.get('activated_passives') == []
+                              and s.get('rating') and s.get('stamina_cost') and L['lo'] * 1.001 < s['stamina_cost'] < L['hi'] * 0.999] or [_np.nan])
+                  for h in r['horses'] if h.get('timeline')]
+            ys = [y for y in ys if _np.isfinite(y)]
+            if len(ys) >= 2: _dev += list(_np.array(ys) - _np.median(ys))
+    _sd = float(_np.std(_dev)) if _dev else 1.0
+    check('P54 スタミナ消費はその区間の rating に比例（レース内の 消費÷rating のずれが小さい・K を当てられる）',
+          rs_mod.RC_COST and all((d, 'normal') in _rc for d in rs_mod.NSEG) and _sd < 0.02
+          and all(0.02 < v[2] < 0.2 for v in _rc.values()) and 'C[h] = clampC(Math.exp(rcK[pi] + UR[h]) * rRaw);' in _model_js,
+          f'直近120R でレース内のずれ sd {_sd*100:.2f}%（今までのステの式は 4.5〜5%）。レースの乱数 sd ' + ', '.join(f"{k[0]}{v[2]:.3f}" for k, v in _rc.items() if k[1] == 'normal'))
     check('P52 3連単の口数にケリーを掛けない（期待値最大・1レース20口まで）',
           'TRI_KELLY: false,' in _ap and 'CFG.TRI_KELLY ? (D.kelly_fraction || 0.25) : 1e9' in _ap,
           '10/01〜76R（今のモデル）: ケリーあり・下限20% 実際+1,708万 → ケリーなし・下限10% +1,744万')

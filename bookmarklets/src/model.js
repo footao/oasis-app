@@ -734,6 +734,7 @@ const OasisModel = (() => {
     const rfx = [];                          // rating だけに効くスタミナ倍率（スタミナ評価）
     const recPh = [0, 0, 0];
     let recLow = null;
+    let lstT = null;                         // 「残りスタミナN%以下で」の N（Python: horse_profile の lst_t）
     const addPos = (kind, m, cm) => {
       for (const k of Object.keys(m)) pos[kind][0][k] = (pos[kind][0][k] == null ? 1 : pos[kind][0][k]) * m[k];
       pos[kind][1] *= cm;
@@ -824,7 +825,13 @@ const OasisModel = (() => {
       const cm = kind ? null : desc.match(SIM_CONS);
       if (kind) {
         const pcm = posCost(m, desc);
-        if (dyn.has(kind)) { addPos(kind, m, pcm); return; }
+        if (dyn.has(kind)) {
+          if (kind === 'lowst') {
+            const mt = desc.match(/残りスタミナ(\d+(?:\.\d+)?)[%％]以下/);
+            if (mt) lstT = Math.max(lstT == null ? 0 : lstT, parseFloat(mt[1]) / 100);
+          }
+          addPos(kind, m, pcm); return;
+        }
         avgCost(kind, pcm);
       }
       if (cm) {                      // 「スタミナ消費量が常時N%減少」は消費の倍率（スタミナを盛らない）
@@ -886,7 +893,8 @@ const OasisModel = (() => {
     return { st: st, c0: need / n, cost: cost, s0: Math.floor(sInt * e.stamina / base.stamina + 1e-9),
              g_p: gamble ? gamble[0] : 0, g_m: KS.map(k => gamble ? (gamble[1][k] == null ? 1 : +gamble[1][k]) : 1),
              p_m: SIM_POS.map(kd => KS.map(k => pos[kd][0][k] == null ? 1 : pos[kd][0][k])),
-             p_c: SIM_POS.map(kd => pos[kd][1]), nz: nz, relief: relief, rec_ph: recPh, rec_low: recLow || [0, 0] };
+             p_c: SIM_POS.map(kd => pos[kd][1]), nz: nz, relief: relief, rec_ph: recPh, rec_low: recLow || [0, 0],
+             lowst_t: lstT || (S.lowst_t == null ? 0.3 : S.lowst_t) };
   }
 
   function simInputs(horses, dist, track, M) {
@@ -913,6 +921,9 @@ const OasisModel = (() => {
     const wcv = [0, 1, 2].map(j => M.phase_early[j] * ((M.dist_balance || {})[dist] || [1, 1, 1])[j]);
     const crw = prof.map(x => x.st.map(st => st[0] * wcv[0] + st[1] * wcv[1] + st[2] * wcv[2]));
     const clampC = v => Math.min(Math.max(v, L.lo), L.hi);
+    // 消費はその区間の rating に比例（Python: RC_COST）。[logK 序盤, 中盤, 終盤, レースの乱数の平均, sd]
+    const rcK = S.rc ? S.rc[dist + '|' + (H <= 5 ? 'small' : 'normal')] || null : null;
+    const rcH = S.rc_h || 0, UR = new Float64Array(H);
     // 区間ごとの消費倍率と、その区間から最後までの和（見込みの余りに使う）
     const cmS = prof.map(x => segPh.map(pi => x.cost[pi]));
     const remS = cmS.map(a => { const r = new Array(nseg); let acc = 0; for (let k = nseg - 1; k >= 0; k--) { acc += a[k]; r[k] = acc; } return r; });
@@ -940,6 +951,7 @@ const OasisModel = (() => {
     for (let it = 0; it < NS; it++) {
       RM.fill(1);
       const zr = sdR ? randn() : 0;            // 消費の乱数のレース共通ぶん（Python: COST_COMMON）
+      const ur = rcK ? rcK[3] + rcK[4] * randn() : 0;
       for (let h = 0; h < H; h++) {
         const x = prof[h];
         RF[h] = Math.exp(muC + sdR * zr + sdH * randn());
@@ -950,11 +962,12 @@ const OasisModel = (() => {
         S0[h] = Math.max(Sv[h], 1);
         T[h] = 0; DT[h] = 1; RU[h] = 0;
         if (inRace) HZ[h] = Math.exp(S.horse_sd * randn());
+        if (rcK) UR[h] = ur + rcH * randn();
       }
       for (let k = 0; k < nseg; k++) {
         const pi = segPh[k];
         // フェーズの始めの順位でそのフェーズの消費が変わる（先頭ほど多い・同位置は pet_id 順）。Python: RANK_COST
-        if (H > 1 && (k === 0 || segPh[k - 1] !== pi) && rkB[Math.min(pi, 1)]) {
+        if (!rcK && H > 1 && (k === 0 || segPh[k - 1] !== pi) && rkB[Math.min(pi, 1)]) {
           rOrd.sort((a, b) => (T[a] - T[b]) || (pid[a] - pid[b]));
           for (let r = 0; r < H; r++) RM[rOrd[r]] = Math.exp(rkB[Math.min(pi, 1)] * (0.5 - r / (H - 1)));
         }
@@ -988,7 +1001,7 @@ const OasisModel = (() => {
                           lead, lead && (t2 - T[h]) * spd >= S.solo_m,
                           near * spd >= S.solo_m, RK[h] + 1 > H / 2, DROP[h] === k, DROP[h] >= k - 1,
                           pi === 1 && LOW[1][h] === 1, pi === 2 && LOW[2][h] === 1,
-                          Sv[h] <= (S.lowst_t == null ? 0.3 : S.lowst_t) * S0[h]];   // 残りスタミナ30%以下（Python: LOWST_T）
+                          Sv[h] <= x.lowst_t * S0[h]];   // 残りスタミナ N%以下（Python: lst_tv）
             for (let q = 0; q < SIM_POS.length; q++) if (hasP[h][q] && cond[q]) {
               for (let j = 0; j < 3; j++) mul[j] *= x.p_m[q][j];
               cmul *= x.p_c[q];
@@ -1000,14 +1013,16 @@ const OasisModel = (() => {
             Sv[h] = Math.min(Sv[h] + S0[h] * x.rec_low[1], S0[h]); RU[h] = 1;
           }
           const w = W[pi], st = x.st[pi];
-          const rv = Math.pow(Math.max(st[0] * w[0] * mul[0] + st[1] * w[1] * mul[1] + st[2] * w[2] * mul[2] + w[3], 1), S.v_exp);
+          const rRaw = Math.max(st[0] * w[0] * mul[0] + st[1] * w[1] * mul[1] + st[2] * w[2] * mul[2] + w[3], 1);
+          const rv = Math.pow(rRaw, S.v_exp);
           // 疲労補正は「この先を走り切ったときの見込みの余り ÷ 初期スタミナ」で引く（Python と同じ）
           if (cMode === 'clamp' || cMode === 'clampdyn') C[h] = clampC(RF[h] * x.c0);
           let f0 = fatC ? fatX(Sv[h] / (fatC * (nseg - k))) : fat((Sv[h] - C[h] * remS[h][k]) / S0[h]);
           if (f0 < 1) f0 = 1 - (1 - f0) * x.relief;           // 苦痛慣れ・粘り腰
           const f = Math.pow(f0, S.f_exp);
           DT[h] = HZ[h] / (rv * f * (1 + S.seg_noise * x.nz * randn()));
-          if (cMode === 'clampdyn') {                          // 発動中の効果で上がった実効ステぶん消費も増える
+          if (rcK) C[h] = clampC(Math.exp(rcK[pi] + UR[h]) * rRaw);
+          else if (cMode === 'clampdyn') {                     // 発動中の効果で上がった実効ステぶん消費も増える
             const r = (st[0] * wcv[0] * mul[0] + st[1] * wcv[1] * mul[1] + st[2] * wcv[2] * mul[2]) / crw[h][pi];
             C[h] = clampC(RF[h] * x.c0 * r * RM[h]);
           }

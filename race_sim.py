@@ -124,7 +124,13 @@ SEG_M = 100.0                     # 1区間 100m（全距離）
 # 首位の呪いの「スタミナ消費も増加」。発動中はスピード+9.4%で、COST_MODE='clampdyn' がその分の消費増をもう入れている。
 # 1.047（発動中の区間消費の実測）を重ねると二重になり、先頭を走り切る馬をスタミナ切れと見すぎていた
 # （おいら 23時マイル: 予想の残り0.3〜0.6 / 実際1.7〜2.8）。前向き257R: 単勝LL −0.0030±0.0016・3連単LL −0.0034±0.0020（2026/10/17）
-LEAD_COST_UP = 1.0
+# RC_COST（消費 ∝ rating）の下では、rating の上昇とは別に「スタミナ消費も増加」が実在する（消費÷rating +4.6%・111区間、2026/10/27）
+LEAD_COST_UP = 1.047
+# 1区間の消費 = クランプ(exp(logK[距離,フェーズ] + レースの乱数) × その区間の rating, 下限, 上限) × 消費の倍率（2026/10/27）。
+# 同じレース・フェーズの馬どうしで消費÷rating のずれは sd 0.15〜0.7%（ステから出す今までの式は 4.5〜5%）。順位の効きも rating の代わりだった。
+# 前向き315R: 10月 単勝LL −0.019±0.014・3連単LL −0.024±0.032 / 賭けの再生 10/2〜10/27 +3,591万 → +3,822万
+RC_COST = True
+RC_HORSE_SD = 0.04      # 馬ごとの消費のぶれ（実測は 0.2〜0.7% だが、rating の予想の外れを吸収させる。0.005 / 0.02 / 0.04 で 0.04 が最良）
 
 
 def _pos_kind(text):
@@ -249,8 +255,14 @@ def horse_profile(h, dist, track, spec, same_species, scope_tbl=None):
     # 初期スタミナはゲームと同じく倍率を掛けるたびに切り捨てる（timeline 2,689頭で一致 83.5% → 98.7%。
     # 最後に1回だと調和の加護持ちなどで1多くなり、ギリギリ持つ馬を「持つ」と見ていた: R2805 cry 2026/10/22）
     s_int = [float(h['stamina'])]
+    lst_t = [None]                    # 「残りスタミナN%以下で」の N（25% と 30% がある。全部 30% で発動させると 25%版の終盤の発動 予想54% / 実際37%）
 
-    def add_pos(kind, m, cm, key):
+    def add_pos(kind, m, cm, key, desc=''):
+        if kind == 'lowst':
+            mt = re.search(r'残りスタミナ(\d+(?:\.\d+)?)[%％]以下', desc or '')
+            if mt:
+                t_ = float(mt.group(1)) / 100.0
+                lst_t[0] = t_ if lst_t[0] is None else max(lst_t[0], t_)
         for k, x in m.items():
             pos[kind][0][k] = pos[kind][0].get(k, 1.0) * float(x)
         pos[kind][1] *= cm
@@ -340,7 +352,7 @@ def horse_profile(h, dist, track, spec, same_species, scope_tbl=None):
             pcm = pos_cost(m, sp.get('desc') or '')
             if kind in POS_DYNAMIC:
                 add_pos(kind, m, pcm, h.get('passive_skill') if
-                        oc.PASSIVE_CODE_MAP.get(h.get('passive_skill')) == p else h.get('passive_skill_2'))
+                        oc.PASSIVE_CODE_MAP.get(h.get('passive_skill')) == p else h.get('passive_skill_2'), sp.get('desc') or '')
                 continue
             for pi in range(3):        # 均す場合も、消費の増減は発動している割合ぶんだけ
                 cost[pi] *= 1.0 + (pcm - 1.0) * POS_DUTY[kind]
@@ -380,7 +392,7 @@ def horse_profile(h, dist, track, spec, same_species, scope_tbl=None):
         if kind:
             pcm = pos_cost(m, desc)
             if kind in POS_DYNAMIC:
-                add_pos(kind, m, pcm, key)
+                add_pos(kind, m, pcm, key, desc)
                 return
             for pi in range(3):        # 先導祈願の「先頭の間 消費 −4%」を全区間に掛けていた（〜10/07）
                 cost[pi] *= 1.0 + (pcm - 1.0) * POS_DUTY[kind]
@@ -444,7 +456,56 @@ def horse_profile(h, dist, track, spec, same_species, scope_tbl=None):
             item_clause(label if j == 0 else '', t, str(it.get('effect_key') or '') if j == 0 else '')
     for k in base:
         base[k] = max(base[k], 1.0)
-    return dict(base=base, fx=fx, cost=cost, gamble=gamble, pos=pos, nz=nz, rec=rec, relief=relief, rfx=rfx, s_int=s_int[0])
+    return dict(base=base, fx=fx, cost=cost, gamble=gamble, pos=pos, nz=nz, rec=rec, relief=relief, rfx=rfx, s_int=s_int[0], lowst_t=(lst_t[0] or LOWST_T))
+
+
+def _rc_group(n_horses):
+    """少頭数（23時など）はレースの消費が 9〜20% 少ないので、K とレースの乱数を分けて当てる。"""
+    return 'small' if n_horses <= 5 else 'normal'
+
+
+def _fit_rc(races):
+    """RC_COST の K[距離,フェーズ] とレースの乱数（平均・sd）を timeline から当てる。
+    レースの乱数は、上下限に当たらない馬の 消費÷rating から。全頭が上限（下限）に張り付いたレースは打ち切りとして _tobit で。"""
+    obs = {}
+    for r in races:
+        d = r.get('distance')
+        if d not in NSEG or str(r.get('harvested_at', ''))[:10] > str(r.get('race_date', '')):
+            continue
+        L = oc.STAMINA_COST_LAW[d]
+        hs = [h for h in (r.get('horses') or []) if h.get('speed') is not None]
+        key = (d, _rc_group(len(hs)))
+        for h in hs:
+            tl = h.get('timeline') or []
+            for pi, ph in enumerate(PH_TL):
+                v = [(s['stamina_cost'], s['rating']) for s in tl[1:] if s.get('phase') == ph and s.get('activated_passives') == []
+                     and s.get('rating') and s.get('stamina_cost')]
+                if not v:
+                    continue
+                c, rt = float(np.median([a for a, _ in v])), float(np.median([b for _, b in v]))
+                kind = '>' if c >= L['hi'] * 0.999 else ('<' if c <= L['lo'] * 1.001 else '=')
+                obs.setdefault(key, []).append((r.get('schedule_id'), pi, kind, math.log(c / rt)))
+    out = {}
+    for key, v in obs.items():
+        if sum(1 for o in v if o[2] == '=') < 30:
+            continue
+        lk = np.array([float(np.median([y for (_, p, k, y) in v if p == pi and k == '='] or [0.0])) for pi in range(3)])
+        for it in range(4):
+            byr = {}
+            for (sid, p, k, y) in v:
+                byr.setdefault(sid, []).append((k, y - lk[p]))
+            uu = {sid: float(np.median([a for k, a in w if k == '='])) for sid, w in byr.items() if any(k == '=' for k, _ in w)}
+            if it < 3:
+                for pi in range(3):
+                    fr = [y - uu[sid] for (sid, p, k, y) in v if p == pi and k == '=' and sid in uu]
+                    if fr:
+                        lk[pi] = float(np.median(fr))
+        eq = [uu[sid] for sid in uu]
+        gt = [max(a for _, a in w) for sid, w in byr.items() if sid not in uu and all(k == '>' for k, _ in w)]
+        lt = [min(a for _, a in w) for sid, w in byr.items() if sid not in uu and all(k == '<' for k, _ in w)]
+        mu, sd = _tobit(eq, gt, lt)
+        out[key] = (lk.tolist(), float(mu), float(sd))
+    return out
 
 
 def _tobit(eq, gt, lt):
@@ -530,7 +591,8 @@ class RaceSim:
                              p_c=[float(pf['pos'][kd][1]) for kd in POS_KINDS],
                              p_key=[pf['pos'][kd][2] for kd in POS_KINDS],
                              nz=pf['nz'], relief=pf['relief'], rec_ph=[sum(x for q, _, x in pf['rec'] if q == pi) for pi in range(3)],
-                             rec_low=next(([t, x] for q, t, x in pf['rec'] if q is None), [0.0, 0.0])))
+                             rec_low=next(([t, x] for q, t, x in pf['rec'] if q is None), [0.0, 0.0]),
+                             lowst_t=pf['lowst_t']))
         return dict(dist=dist, track=track, rows=rows)
 
     def inputs(self, r):
@@ -541,7 +603,8 @@ class RaceSim:
                 'st': [x['st'].round(9).tolist() for x in rows], 'c0': [round(x['c0'], 9) for x in rows],
                 'cost': [[round(c, 9) for c in x['cost']] for x in rows], 's0': [x['s0'] for x in rows],
                 'g_p': [x['g_p'] for x in rows], 'g_m': [x['g_m'] for x in rows], 'p_m': [x['p_m'] for x in rows], 'p_c': [x['p_c'] for x in rows],
-                'nz': [x['nz'] for x in rows], 'relief': [x['relief'] for x in rows], 'rec_ph': [x['rec_ph'] for x in rows], 'rec_low': [x['rec_low'] for x in rows]}
+                'nz': [x['nz'] for x in rows], 'relief': [x['relief'] for x in rows], 'rec_ph': [x['rec_ph'] for x in rows], 'rec_low': [x['rec_low'] for x in rows],
+                'lowst_t': [x['lowst_t'] for x in rows]}
 
     # ---- 学習: rating の式・消費のぶれ・失速の表 ----
     def fit(self, races):
@@ -666,6 +729,7 @@ class RaceSim:
             else:
                 rb.append(0.0)
         self.rank_beta = tuple(rb) if RANK_COST else (0.0, 0.0)
+        self.rc = _fit_rc(races) if RC_COST else {}
         return self
 
     def _pas_special(self):
@@ -722,6 +786,8 @@ class RaceSim:
                 'n_sim': self.n_sim, 'lowst_labels': sorted(LOWST_LABELS), 'lead_labels': sorted(LEAD_LABELS),
                 'lead_duty': LEAD_DUTY, 'lowst_duty': LOWST_DUTY, 'lowst_t': LOWST_T,
                 'rank_beta': list(getattr(self, 'rank_beta', (0.0, 0.0))),
+                'rc': {f'{d_}|{g_}': list(v[0]) + [v[1], v[2]] for (d_, g_), v in getattr(self, 'rc', {}).items()},
+                'rc_h': RC_HORSE_SD,
                 'cost_passives': {k: [v[0], v[1]] for k, v in COST_PASSIVES.items()}, 'gamble': GAMBLE,
                 # JS は一様乱数を持たないので、勝負師の抽選は「正規乱数 < この値」で行う（確率は同じ）
                 'tri_calib': list(TRI_CALIB),
@@ -776,12 +842,17 @@ class RaceSim:
             ph_dt, act, fmin = np.zeros((3, NS, H)), [{}, {}, {}], np.full((NS, H), 9.0)
         relv = np.array([x['relief'] for x in rows])[None, :]
         rank_prev = None
+        lst_tv = np.array([x['lowst_t'] for x in rows])[None, :]
+        rcp = getattr(self, 'rc', {}).get((d, _rc_group(H))) if RC_COST else None
+        if rcp:   # レースの乱数（全フェーズ共通）＋馬ごとのぶれ
+            rc_lk = np.array(rcp[0])
+            rc_u = rcp[1] + rcp[2] * rng.standard_normal((NS, 1)) + RC_HORSE_SD * rng.standard_normal((NS, H))
         last_drop = np.full((NS, H), -10)
         low_at = np.zeros((3, NS, H), bool)                                  # フェーズの始めに下位半分だったか
         rmul = np.ones((NS, H))
         rb = getattr(self, 'rank_beta', (0.0, 0.0))
         for k, pi in enumerate(ph_of):
-            if RANK_COST and H > 1 and (k == 0 or ph_of[k - 1] != pi) and rb[min(pi, 1)]:
+            if not rcp and RANK_COST and H > 1 and (k == 0 or ph_of[k - 1] != pi) and rb[min(pi, 1)]:
                 # フェーズの始めの順位で、そのフェーズの消費が決まる（先頭ほど多い）。同位置は pet_id 順
                 rk_ = np.empty((NS, H), int)
                 np.put_along_axis(rk_, np.lexsort((np.broadcast_to(pid, (NS, H)), T), axis=1),
@@ -841,7 +912,7 @@ class RaceSim:
                         'over2': last_drop >= k - 1,
                         'hold1': low_at[1] if pi == 1 else np.zeros((NS, H), bool),
                         'hold2': low_at[2] if pi == 2 else np.zeros((NS, H), bool),
-                        'lowst': s <= LOWST_T * S0}
+                        'lowst': s <= lst_tv * S0}
                 for j, hm in has:
                     a_ = hm & cond[POS_KINDS[j]]
                     if detail:
@@ -855,7 +926,9 @@ class RaceSim:
             if detail:
                 ph_dt[pi] += dt
                 fmin = np.minimum(fmin, f)
-            if COST_DYNAMIC:                                                 # 発動中の効果で上がった実効ステぶん消費も増える
+            if rcp:                                                          # 消費はこの区間の rating に比例（発動中の効果込み）
+                c = np.clip(np.exp(rc_lk[pi] + rc_u) * rr, L['lo'], L['hi'])
+            elif COST_DYNAMIC:                                               # 発動中の効果で上がった実効ステぶん消費も増える
                 c = np.clip(rf * np.einsum('nhj,hj->nh', mult, st[:, pi, :] * wc[None, :]), L['lo'], L['hi'])
             elif COST_MODE == 'clampdyn':
                 c = np.clip(rf * c0v * np.einsum('nhj,hj->nh', mult, st[:, pi, :] * wc[None, :]) / craw[None, :, pi] * rmul,
