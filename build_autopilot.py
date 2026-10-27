@@ -113,6 +113,21 @@ def main(log_path=None):
                  + model_js + '\n' + auto_js + '\n})();\n')
     io.open(os.path.join(HERE, 'autopilot.bundle.js'), 'w', encoding='utf-8').write(bundle_js)
     print(f'   → autopilot.bundle.js  {len(bundle_js.encode()):,} bytes')
+    # ダッシュボードのブックマークレット版: dashboard/index.html をそのままレースサイトのページの上に出す
+    dash = os.path.join(HERE, 'dashboard', 'index.html')
+    if os.path.exists(dash):
+        h = io.open(dash, encoding='utf-8').read()
+        css = h.split('<style>', 1)[1].split('</style>', 1)[0]
+        body = h.split('<main>', 1)[1].split('</main>', 1)[0]
+        js = h.split('<script>', 1)[1].split('</script>', 1)[0]
+        dash_js = ('/* おあしすっち ダッシュボード（ブックマークレット版・dashboard/index.html から自動生成）*/\n'
+                   '(()=>{window.__OASIS_MODEL=' + mj + ';window.__OASIS_DASH_EMBED=1;\n' + model_js + '\n'
+                   'document.title="おあしすっち ダッシュボード";'
+                   'document.head.insertAdjacentHTML("beforeend",' + json.dumps('<style>' + css + '</style>', ensure_ascii=False) + ');'
+                   'document.body.innerHTML=' + json.dumps('<main>' + body + '</main>', ensure_ascii=False) + ';\n'
+                   + js + '\n})();\n')
+        io.open(os.path.join(HERE, 'dashboard', 'dash.bundle.js'), 'w', encoding='utf-8').write(dash_js)
+        print(f'   → dashboard/dash.bundle.js  {len(dash_js.encode()):,} bytes')
 
     step(3, 'HTML を作り直す')
     combined = '(()=>{' + model_js + ' ' + auto_js + '})();'
@@ -168,8 +183,10 @@ def main(log_path=None):
             break
 
     step(5, '構文チェック')
-    for f, label in [('autopilot.bundle.js', 'バンドル')]:
+    for f, label in [('autopilot.bundle.js', 'バンドル'), (os.path.join('dashboard', 'dash.bundle.js'), 'ダッシュボード')]:
         p = os.path.join(HERE, f)
+        if not os.path.exists(p):
+            continue
         try:
             r = subprocess.run(['node', '--check', p], capture_output=True, text=True,
                                encoding='utf-8', errors='replace')

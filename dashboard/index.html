@@ -102,6 +102,12 @@ td.tag { text-align: left; font-size: 12px; }
     ★ 的中率90%以上（bot は残りの口数を全部入れる）。
     灰色は条件を満たさない組。実際の口数は予算と期待値の配分で決まるので、候補でも買わないことがあります。<br>3連単の的中率は組ごとに補正した値（bot と同じ）なので、足すと100%を超えることがあります。
   </div>
+  <div class="panel legend" id="bmPanel">
+    <details><summary>📊 ブックマークレット版（このページで API に届かないとき）</summary>
+    レースサイトのページで押すと、そのページの上にこのダッシュボードを出します（戻るときはページを再読み込み）。下の1行をブックマークの URL に貼ってください。Safari では先頭の <code>javascript:</code> が消えていないか確認を。
+    <textarea readonly rows="4" style="width:100%;margin-top:6px;font:12px monospace" onclick="this.select()">javascript:(t=&gt;{var s=document.createElement(&#x27;script&#x27;);s.src=&#x27;https://raw.githack.com/footao/oasis-app/main/dashboard/dash.bundle.js?&#x27;+t;s.onerror=function(){var b=document.createElement(&#x27;script&#x27;);b.src=&#x27;https://cdn.jsdelivr.net/gh/footao/oasis-app@main/dashboard/dash.bundle.js?&#x27;+t;document.body.appendChild(b)};document.body.appendChild(s)})(Date.now())</textarea>
+    </details>
+  </div>
 </main>
 
 <script>
@@ -112,9 +118,12 @@ const pct = (p, d = 1) => Number.isFinite(p) ? (p * 100).toFixed(d) + '%' : '—
 const num = (v, d = 2) => Number.isFinite(v) ? (+v).toFixed(d) : '—';
 const yen = v => Number.isFinite(v) ? Math.round(v).toLocaleString() : '—';
 const LS = 'oasis_dashboard_v1';
-// Mac 版（oasis_dashboard.py が中継）か Web 版（GitHub Pages から API を直接呼ぶ）か
-const ON_PC = /^(127\.0\.0\.1|localhost)$/.test(location.hostname);
-const API = ON_PC ? '' : 'https://api.oasis.red';
+// 3つの動き方: Mac 版（oasis_dashboard.py が中継）/ Web 版（GitHub Pages から API を直接呼ぶ）/
+// ブックマークレット版（レースサイトのページの上に出す。API はそのページから呼ぶので必ず通る）
+const EMBED = !!window.__OASIS_DASH_EMBED;
+const ON_PC = !EMBED && /^(127\.0\.0\.1|localhost)$/.test(location.hostname);
+let API = ON_PC ? '' : null;          // null = まだ決まっていない（resolveApi で決める）
+let apiTry = null;
 const MODEL_JS = ON_PC ? '/model.js' : '../bookmarklets/src/model.js';   // Pages: …/oasis-app/dashboard/ から見たリポジトリ直下
 const MODEL_JSON = ON_PC ? '/model.json' : '../model.json';
 const PAR = 20, ODDS_MAX_REQ = 1200, AUTO_SEC = 30;
@@ -122,9 +131,26 @@ const PAR = 20, ODDS_MAX_REQ = 1200, AUTO_SEC = 30;
 let M = null, AUTH = null, SID = null, busy = false, autoTimer = null, raceAt = null, showN = 20, view = null, gen = 0;
 
 async function jget(u) {
-  try { const r = await fetch(u.startsWith('/api/') ? API + u : u, { cache: 'no-store' }); if (!r.ok) return null; return await r.json(); }
+  if (u.startsWith('/api/')) { if (API === null && !(await resolveApi())) return null; u = API + u; }
+  try { const r = await fetch(u, { cache: 'no-store' }); if (!r.ok) return null; return await r.json(); }
   catch (e) { return null; }
 }
+// 通じる API の場所を探す（bot の resolveApi と同じ考え方）。最後に終わったはずのレースで確かめる
+function resolveApi() {
+  if (!apiTry) apiTry = (async () => {
+    const cands = EMBED ? [location.origin, 'https://api.oasis.red'] : ['https://api.oasis.red', AUTH && AUTH.site].filter(Boolean);
+    for (const b of cands) {
+      try {
+        const r = await fetch(`${b}/api/race/by-id/${encodeURIComponent(AUTH.guild)}/${estimateSid(Date.now()) - 1}?user=${encodeURIComponent(AUTH.user)}`, { cache: 'no-store' });
+        if (r.ok && Array.isArray((await r.json()).pets)) { API = b; return true; }
+      } catch (e) {}
+    }
+    apiTry = null;                    // 次の更新でもう一度試す
+    return false;
+  })();
+  return apiTry;
+}
+const NO_API = 'このページからはレースサイトの API に届きません。レースサイトのページを開いて「📊 ダッシュボード」ブックマークレットを押してください。';
 function status(msg, err) { const s = $('status'); s.textContent = msg; s.className = err ? 'err' : ''; }
 function store(obj) { try { localStorage.setItem(LS, JSON.stringify(obj)); } catch (e) {} }
 function restore() { try { return JSON.parse(localStorage.getItem(LS) || 'null'); } catch (e) { return null; } }
@@ -134,7 +160,8 @@ function parseUrl(s) {
   try {
     const u = new URL(String(s).trim());
     const p = u.searchParams;
-    const a = { guild: p.get('guild'), user: p.get('user'), sid: parseInt(p.get('race') || p.get('schedule_id'), 10) };
+    const a = { guild: p.get('guild'), user: p.get('user'), sid: parseInt(p.get('race') || p.get('schedule_id'), 10),
+                site: /^https:/.test(u.origin) && !/github\.io$/.test(u.hostname) ? u.origin : (p.get('site') || null) };
     return (a.guild && a.user) ? a : null;
   } catch (e) { return null; }
 }
@@ -159,7 +186,7 @@ async function loadModel() {
     s.src = `${MODEL_JS}?t=${Date.now()}`; s.onload = ok; s.onerror = () => ng(new Error('model.js を読めません'));
     document.head.appendChild(s);
   });
-  M = await jget(`${MODEL_JSON}?t=${Date.now()}`);
+  M = window.__OASIS_MODEL || await jget(`${MODEL_JSON}?t=${Date.now()}`);
   if (!M || !M.sim || !M.sim.w) throw new Error('model.json を読めません');
   if (typeof OasisModel === 'undefined' || !OasisModel.predictSim) throw new Error('model.js が古いか読めません（predictSim がありません）');
   $('build').textContent = ` 学習 ${M.n_races}レース / build ${String(M.trained_at || '').replace('T', ' ').slice(0, 16)}`;
@@ -306,6 +333,7 @@ async function refresh() {
   try {
     if (!M) await loadModel();
     const info = await jget(`/api/race/by-id/${encodeURIComponent(AUTH.guild)}/${SID}?user=${encodeURIComponent(AUTH.user)}`);
+    if (API === null) { status(NO_API, true); return; }
     if (!info || !Array.isArray(info.pets) || !info.pets.length) {
       status(`R${SID} のデータがありません（まだ組まれていないか、番号が違います）`, true);
       ['racePanel', 'winPanel', 'triPanel'].forEach(id => $(id).hidden = true);
@@ -372,10 +400,11 @@ async function findOpen(from) {
 function setSid(sid) {
   SID = sid; showN = 20;
   $('sidLabel').textContent = `R${sid}`;
-  store({ guild: AUTH.guild, user: AUTH.user, sid: sid });
+  store({ guild: AUTH.guild, user: AUTH.user, sid: sid, site: AUTH.site || null });
   // このページの URL にも guild・user・race だけ載せる（トークンは載せない）。ブックマークすれば次からそのまま開ける
   const q = new URLSearchParams({ guild: AUTH.guild, user: AUTH.user, race: String(sid) });
-  try { history.replaceState(null, '', `${location.pathname}?${q}`); } catch (e) {}
+  if (AUTH.site) q.set('site', AUTH.site);
+  if (!EMBED) try { history.replaceState(null, '', `${location.pathname}?${q}`); } catch (e) {}   // レースサイトの URL は触らない
   refresh();
 }
 
@@ -383,7 +412,7 @@ $('go').onclick = () => {
   const a = parseUrl($('url').value);
   if (!a) { status('URL から guild と user を読み取れませんでした（レースサイトのリンクをそのまま貼ってください）', true); return; }
   $('url').value = '';               // トークン入りの URL を画面に残さない
-  AUTH = { guild: a.guild, user: a.user };
+  AUTH = { guild: a.guild, user: a.user, site: a.site || (AUTH && AUTH.site) || null };
   setSid(Number.isFinite(a.sid) ? a.sid : (SID || 0));
 };
 $('url').addEventListener('keydown', e => { if (e.key === 'Enter') $('go').click(); });
@@ -395,6 +424,7 @@ $('auto').onchange = () => {
   clearInterval(autoTimer); autoTimer = null;
   if ($('auto').checked) autoTimer = setInterval(() => { if (!busy) refresh(); }, AUTO_SEC * 1000);
 };
+if (EMBED) $('bmPanel').hidden = true;
 setInterval(tick, 1000);
 
 (async () => {
@@ -402,9 +432,10 @@ setInterval(tick, 1000);
   // 開いた URL（ブックマーク）か、このブラウザに覚えている guild・user で、今の時刻の最新レースを開く。トークンは使わない
   const a = parseUrl(location.href) || restore();
   if (a && a.guild && a.user) {
-    AUTH = { guild: a.guild, user: a.user };
-    try { history.replaceState(null, '', location.pathname); } catch (e) {}   // トークンを早めにアドレスバーから消す
+    AUTH = { guild: a.guild, user: a.user, site: a.site || null };
+    if (!EMBED) try { history.replaceState(null, '', location.pathname); } catch (e) {}   // トークンを早めにアドレスバーから消す
     status('最新のレースを探しています…');
+    if (API === null && !(await resolveApi())) { $('sidLabel').textContent = ''; status(NO_API, true); return; }
     setSid(await findOpen(estimateSid(Date.now())));
   } else {
     status('レースサイトのURLを貼って「読み込む」を押してください');
