@@ -141,8 +141,8 @@ function resolveApi() {
     const cands = EMBED ? [location.origin, 'https://api.oasis.red'] : ['https://api.oasis.red', AUTH && AUTH.site].filter(Boolean);
     for (const b of cands) {
       try {
-        const r = await fetch(`${b}/api/race/by-id/${encodeURIComponent(AUTH.guild)}/${estimateSid(Date.now()) - 1}?user=${encodeURIComponent(AUTH.user)}`, { cache: 'no-store' });
-        if (r.ok && Array.isArray((await r.json()).pets)) { API = b; return true; }
+        const r = await fetch(`${b}/api/race/by-id/${encodeURIComponent(AUTH.guild)}/${estimateSid(Date.now(), true)}?user=${encodeURIComponent(AUTH.user)}`, { cache: 'no-store' });
+        if (r.ok) { await r.json(); API = b; return true; }   // JSON の返事が来れば通じている（来なければ catch へ）
       } catch (e) {}
     }
     apiTry = null;                    // 次の更新でもう一度試す
@@ -377,24 +377,37 @@ async function refresh() {
   }
 }
 
-// 今の時刻から「次に走るレース」の番号を見積もる。レースは JST 9/12/15/18/21/23時で、番号は1日に12ずつ進む
+// 今の時刻から「次に走るレース」（last なら「最後に始まったレース」）の番号を見積もる。レースは JST 9/12/15/18/21/23時で、番号は1日に12ずつ進む
 // （10/27 9時 = R2864）。見積もりがずれても findOpen が先へ探して受付中のレースに合わせる
 // shortcut: 開催時刻・番号の進み方は 10月の実績から決め打ち。ゲーム側で変わったら SLOTS / ANCHOR を直す
 const SLOTS = [9, 12, 15, 18, 21, 23], PER_DAY = 12, ANCHOR = { sid: 2864, day: Date.UTC(2026, 9, 27) };
-function estimateSid(now) {
+function estimateSid(now, last) {
   const j = new Date(now + 9 * 3600e3);                       // JST の日付・時刻を UTC の欄で読む
+  const h = j.getUTCHours();
   let day = Date.UTC(j.getUTCFullYear(), j.getUTCMonth(), j.getUTCDate());
-  let slot = SLOTS.findIndex(h => j.getUTCHours() < h);      // まだ始まっていない最初のレース
-  if (slot < 0) { slot = 0; day += 864e5; }                  // 23時を過ぎたら翌日の9時
+  let slot = last ? SLOTS.filter(s => s <= h).length - 1      // last: もう始まった最後のレース
+                  : SLOTS.findIndex(s => h < s);              // 既定: まだ始まっていない最初のレース
+  if (!last && slot < 0) { slot = 0; day += 864e5; }         // 23時を過ぎたら翌日の9時
+  if (last && slot < 0) { slot = SLOTS.length - 1; day -= 864e5; }   // 9時より前なら前日の23時
   return ANCHOR.sid + PER_DAY * Math.round((day - ANCHOR.day) / 864e5) + slot;
 }
-// 見積もった番号から先へ、受付中のレースを探す（bot の findRace と同じく10レース先まで）。なければ見積もりのまま
-async function findOpen(from) {
-  for (let d = 0; d <= 10; d++) {
-    const info = await jget(`/api/race/by-id/${encodeURIComponent(AUTH.guild)}/${from + d}?user=${encodeURIComponent(AUTH.user)}`);
-    if (info && info.phase === 'betting' && Array.isArray(info.pets) && info.pets.length) return from + d;
+// 開くレースを決める: 受付中のレースがあればそれ（見積もりから10レース先まで）。
+// なければ（夜中など開催していない時間）一つ前の、もう組まれているレース。
+// 受付は発走の1時間前から。それより前は先を探しても無いので、問い合わせを省いてすぐ前のレースへ
+const OPEN_MIN = 60;
+async function findOpen(now) {
+  const j = new Date(now + 9 * 3600e3), m = j.getUTCHours() * 60 + j.getUTCMinutes();
+  const nextStart = (SLOTS.find(h => m < h * 60) ?? SLOTS[0] + 24) * 60;
+  const opened = nextStart - m <= OPEN_MIN + 10;             // 時計のずれに10分の余裕
+  const next = estimateSid(now), prev = estimateSid(now, true);
+  const info = sid => jget(`/api/race/by-id/${encodeURIComponent(AUTH.guild)}/${sid}?user=${encodeURIComponent(AUTH.user)}`);
+  const has = r => r && Array.isArray(r.pets) && r.pets.length;
+  for (let d = 0; opened && d <= 10; d++) {
+    const r = await info(next + d);
+    if (has(r) && r.phase === 'betting') return next + d;
   }
-  return from;
+  for (let d = 0; d <= PER_DAY; d++) if (has(await info(prev - d))) return prev - d;
+  return prev;
 }
 
 function setSid(sid) {
@@ -436,7 +449,7 @@ setInterval(tick, 1000);
     if (!EMBED) try { history.replaceState(null, '', location.pathname); } catch (e) {}   // トークンを早めにアドレスバーから消す
     status('最新のレースを探しています…');
     if (API === null && !(await resolveApi())) { $('sidLabel').textContent = ''; status(NO_API, true); return; }
-    setSid(await findOpen(estimateSid(Date.now())));
+    setSid(await findOpen(Date.now()));
   } else {
     status('レースサイトのURLを貼って「読み込む」を押してください');
   }
