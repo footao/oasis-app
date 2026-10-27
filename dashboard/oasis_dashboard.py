@@ -87,7 +87,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         try:
             if path in ('/', '/index.html'):
-                with open(os.path.join(HERE, 'dashboard.html'), 'rb') as f:
+                with open(os.path.join(HERE, 'index.html'), 'rb') as f:
                     return self._send(200, f.read(), 'text/html; charset=utf-8')
             if path in REMOTE:
                 ctype = 'application/javascript; charset=utf-8' if path.endswith('.js') else 'application/json; charset=utf-8'

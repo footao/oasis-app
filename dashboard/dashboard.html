@@ -83,17 +83,17 @@ td.tag { text-align: left; font-size: 12px; }
     <div class="race-head" id="raceHead"></div>
   </div>
 
-  <div class="panel" id="winPanel" hidden>
-    <h2>単勝（勝つ確率が高い順）</h2>
-    <div class="wrap"><table id="win"></table></div>
-    <div class="note">単勝プールは試し買いしないと分からないので、bot の候補の判定は表示オッズで出しています（bot は実測したプールで計算します）。</div>
-  </div>
-
   <div class="panel" id="triPanel" hidden>
     <h2>3連単（的中率が高い順）</h2>
     <div class="kv" id="triInfo"></div>
     <div class="wrap"><table id="tri"></table></div>
     <div class="row" style="margin-top:8px"><button id="more">もっと見る（+20組）</button></div>
+  </div>
+
+  <div class="panel" id="winPanel" hidden>
+    <h2>単勝（勝つ確率が高い順）</h2>
+    <div class="wrap"><table id="win"></table></div>
+    <div class="note">単勝プールは試し買いしないと分からないので、bot の候補の判定は表示オッズで出しています（bot は実測したプールで計算します）。</div>
   </div>
 
   <div class="panel legend">
@@ -140,6 +140,7 @@ const coKey = () => `${LS}_co_${AUTH && AUTH.guild}`;
 const getCO = () => { try { return Math.max(0, Math.round(Number(localStorage.getItem(coKey())) || 0)); } catch (e) { return 0; } };
 const setCO = v => { try { localStorage.setItem(coKey(), String(Math.max(0, Math.round(v)))); } catch (e) {} };
 
+const TRI_SHOW_MIN = 0.01;   // 3連単はこれ未満の的中率を表示しない
 const D = () => (M && M.defaults) || {};
 const TH = () => ({
   minP: D().min_prob ?? 0.10, edge: D().edge_min ?? 0.01,
@@ -218,18 +219,18 @@ function tick() {
   el.innerHTML = s > 0 ? `発走まで <b>${Math.floor(s / 60)}分${String(s % 60).padStart(2, '0')}秒</b>` : '発走済み';
 }
 
-function renderWin(pets, win) {
+function renderWin(pets, win, open) {
   const t = TH();
   const ods = pets.map(h => +h.odds);
   const real = ods.filter(od => Number.isFinite(od) && od > 0 && od !== t.unbet);
   const inv = real.reduce((a, od) => a + 1 / od, 0);
   const idx = pets.map((_, i) => i).sort((a, b) => win[b] - win[a]);
   const maxP = Math.max(...win, 1e-9);
-  let html = '<tr><th class="name">馬</th><th>勝率</th><th>単勝オッズ</th><th>期待値</th><th class="hide-sm">市場の勝率</th><th class="name"></th></tr>';
+  let html = `<tr><th class="name">馬</th><th>勝率</th><th>${open ? '単勝オッズ' : '最終オッズ'}</th><th>期待値</th><th class="hide-sm">市場の勝率</th><th class="name"></th></tr>`;
   for (const i of idx) {
     const p = win[i], od = ods[i], unbet = od === t.unbet;
     const ev = (!unbet && Number.isFinite(od)) ? p * od : NaN;
-    const cand = !unbet && p >= t.winP && ev - 1 >= t.winEdge;
+    const cand = open && !unbet && p >= t.winP && ev - 1 >= t.winEdge;
     const cls = cand ? 'buy' : (p < 0.01 ? 'dim' : '');
     const mk = (!unbet && Number.isFinite(od) && inv > 0) ? (1 / od) / inv : NaN;
     html += `<tr class="${cls}"><td class="name">${esc(pets[i].display_name || pets[i].name)}</td>`
@@ -248,13 +249,17 @@ function renderTri() {
   const nm = i => esc(pets[i].display_name || pets[i].name);
   const f = (M.trifecta_seed_bug_active && pool0 > t.seed) ? pool0 / (pool0 - t.seed) : 1;
   let html = '<tr><th>#</th><th class="name">組（1着 → 2着 → 3着）</th><th>的中率</th><th>オッズ</th><th class="hide-sm">実効（1口）</th><th>期待値</th><th class="name"></th></tr>';
-  combo.slice(0, showN).forEach((c, r) => {
+  const shown = combo.filter(c => c.p >= TRI_SHOW_MIN);   // 的中率の低い組は出さない
+  if (!shown.length) html += `<tr><td colspan="7" class="sub">的中率${pct(TRI_SHOW_MIN, 0)}以上の組はありません</td></tr>`;
+  shown.slice(0, showN).forEach((c, r) => {
     const k = `${c.i}-${c.j}-${c.k}`;
     const raw = sw ? sw.odds.get(k) : undefined;
     const od = raw ? raw * f : undefined;
     let oddsTxt, eff = NaN, cls = '', tag = '';
     const big = Math.round(c.p * 1000) / 1000 >= t.big;
-    if (od) {
+    if (!view.open) {
+      oddsTxt = '—';
+    } else if (od) {
       eff = (P + t.U) / (P / od + t.U);
       oddsTxt = num(od, 1);
       if (c.p >= t.minP && c.p * eff - 1 >= t.edge) { cls = 'buy'; tag = 'bot の候補'; }
@@ -275,11 +280,13 @@ function renderTri() {
       + `<td>${Number.isFinite(eff) ? num(c.p * eff, 2) : '—'}</td><td class="tag">${tag}</td></tr>`;
   });
   $('tri').innerHTML = html;
-  $('more').hidden = combo.length <= showN;
+  $('more').hidden = shown.length <= showN;
+  const hid = combo.length - shown.length ? `・的中率${pct(TRI_SHOW_MIN, 0)}未満の${(combo.length - shown.length).toLocaleString()}組は省略` : '';
   const prog = sw ? `オッズ ${Math.min(sw.done, combo.length).toLocaleString()} / ${combo.length.toLocaleString()}組を確認`
     + (sw.confirmed ? '（金の乗った組は取り切り）' : '') + (sw.failed.size ? `・取得失敗 ${sw.failed.size}組` : '') : 'オッズを取得中…';
+  if (!view.open) { $('triInfo').textContent = '受付中ではないので3連単のオッズは出しません（プールが初期値で返るため）。的中率だけ表示しています' + hid + '。'; return; }
   $('triInfo').innerHTML = `3連単プール <b>${yen(pool0)}</b> rrc`
-    + (sw && sw.CO ? `（うちキャリーオーバー ${yen(sw.CO)}）` : '') + `・${prog}`;
+    + (sw && sw.CO ? `（うちキャリーオーバー ${yen(sw.CO)}）` : '') + `・${prog}${hid}`;
 }
 
 async function refresh() {
@@ -304,12 +311,14 @@ async function refresh() {
     const skipped = [];
     const horses = OasisModel.racePets(pets, M, dist, track, skipped);
     const pr = OasisModel.predictSim(pets, horses, dist, track, M, SID);   // bot と同じ（乱数の種もレース番号）
-    renderWin(pets, pr.win);
+    const open = info.phase === 'betting';   // 受付中以外は単勝が最終オッズ、3連単プールは初期値で返る
+    renderWin(pets, pr.win, open);
     $('winPanel').hidden = false;
     const triOk = pets.length >= (M.min_field_trifecta || 8);
-    view = { pets, combo: pr.combo, triOk, pool0: 0, sweep: null };
+    view = { pets, combo: pr.combo, triOk, open, pool0: 0, sweep: null };
     $('triPanel').hidden = !triOk;
-    if (triOk) {
+    if (triOk && !open) renderTri();
+    if (triOk && open) {
       const pj = await jget(`/api/trifecta/pool?guild=${encodeURIComponent(AUTH.guild)}&schedule_id=${SID}`);
       if (!pj) { status('3連単プールを取得できませんでした（確率だけ表示）', true); renderTri(); return; }
       view.pool0 = pj.pool || 0;

@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>おあしすっち ダッシュボード</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #6b7280; --line: #e3e6eb;
+  --buy: #e3f5e8; --buy-ink: #146c2e; --sleeve: #fdf3d8; --sleeve-ink: #8a5a00;
+  --dim: #9aa1ab; --accent: #2f6fd6; --warn: #b42318; --bar: #2f6fd6;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151b; --panel: #1b2029; --text: #e6e9ef; --muted: #98a1ae; --line: #2a313c;
+    --buy: #16341f; --buy-ink: #7fd99a; --sleeve: #3a2f12; --sleeve-ink: #f0c35a;
+    --dim: #6b7380; --accent: #6ea0ff; --warn: #ff8a80; --bar: #6ea0ff;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+       font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+main { max-width: 980px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 18px; margin: 0 0 2px; }
+h2 { font-size: 15px; margin: 0 0 8px; }
+.sub { color: var(--muted); font-size: 12px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-top: 12px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+input[type=text] { flex: 1 1 320px; min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+                   background: var(--bg); color: var(--text); font-size: 14px; }
+button { padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text);
+         cursor: pointer; font-size: 14px; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: .5; cursor: default; }
+label { user-select: none; cursor: pointer; }
+#status { margin-top: 8px; color: var(--muted); font-size: 13px; min-height: 1.5em; }
+#status.err { color: var(--warn); }
+.race-head { display: flex; gap: 16px; flex-wrap: wrap; align-items: baseline; }
+.race-head .big { font-size: 20px; font-weight: 700; }
+.kv { color: var(--muted); }
+.kv b { color: var(--text); font-weight: 600; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+td.name, th.name { text-align: left; white-space: normal; }
+tr.buy td { background: var(--buy); }
+tr.buy td.tag { color: var(--buy-ink); font-weight: 600; }
+tr.sleeve td { background: var(--sleeve); }
+tr.sleeve td.tag { color: var(--sleeve-ink); font-weight: 600; }
+tr.dim td { color: var(--dim); }
+td.tag { text-align: left; font-size: 12px; }
+.pbar { display: inline-block; height: 6px; border-radius: 3px; background: var(--bar); vertical-align: middle; margin-right: 6px; opacity: .75; }
+.wrap { overflow-x: auto; }
+.legend { font-size: 12px; color: var(--muted); }
+.legend span { display: inline-block; padding: 1px 6px; border-radius: 4px; margin-right: 4px; }
+.lg-buy { background: var(--buy); color: var(--buy-ink); }
+.lg-sleeve { background: var(--sleeve); color: var(--sleeve-ink); }
+.note { font-size: 12px; color: var(--muted); margin-top: 6px; }
+@media (max-width: 600px) { th, td { padding: 5px 4px; font-size: 13px; } .hide-sm { display: none; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>おあしすっち ダッシュボード</h1>
+  <div class="sub">見るだけ（購入・試し買いはしません）。計算は bot と同じ model.js / model.json。<span id="build"></span></div>
+
+  <div class="panel">
+    <div class="row">
+      <input type="text" id="url" placeholder="レースサイトのURL（トークン入りのまま貼ってOK・トークンは使いません）" autocomplete="off">
+      <button class="primary" id="go">読み込む</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="prev" disabled>◀ 前のレース</button>
+      <span id="sidLabel" class="kv"></span>
+      <button id="next" disabled>次のレース ▶</button>
+      <button id="refresh" disabled>更新</button>
+      <label><input type="checkbox" id="auto"> 自動更新（30秒ごと）</label>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div class="panel" id="racePanel" hidden>
+    <div class="race-head" id="raceHead"></div>
+  </div>
+
+  <div class="panel" id="triPanel" hidden>
+    <h2>3連単（的中率が高い順）</h2>
+    <div class="kv" id="triInfo"></div>
+    <div class="wrap"><table id="tri"></table></div>
+    <div class="row" style="margin-top:8px"><button id="more">もっと見る（+20組）</button></div>
+  </div>
+
+  <div class="panel" id="winPanel" hidden>
+    <h2>単勝（勝つ確率が高い順）</h2>
+    <div class="wrap"><table id="win"></table></div>
+    <div class="note">単勝プールは試し買いしないと分からないので、bot の候補の判定は表示オッズで出しています（bot は実測したプールで計算します）。</div>
+  </div>
+
+  <div class="panel legend">
+    <span class="lg-buy">bot の候補</span>的中率・期待値が bot の買う条件を満たす（成立組・単勝）
+    <span class="lg-sleeve">未成立の候補</span>誰も買っていない組で、bot の未成立枠の条件を満たす
+    ★ 的中率90%以上（bot は残りの口数を全部入れる）。
+    灰色は条件を満たさない組。実際の口数は予算と期待値の配分で決まるので、候補でも買わないことがあります。<br>3連単の的中率は組ごとに補正した値（bot と同じ）なので、足すと100%を超えることがあります。
+  </div>
+</main>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const pct = (p, d = 1) => Number.isFinite(p) ? (p * 100).toFixed(d) + '%' : '—';
+const num = (v, d = 2) => Number.isFinite(v) ? (+v).toFixed(d) : '—';
+const yen = v => Number.isFinite(v) ? Math.round(v).toLocaleString() : '—';
+const LS = 'oasis_dashboard_v1';
+// Mac 版（oasis_dashboard.py が中継）か Web 版（GitHub Pages から API を直接呼ぶ）か
+const ON_PC = /^(127\.0\.0\.1|localhost)$/.test(location.hostname);
+const API = ON_PC ? '' : 'https://api.oasis.red';
+const MODEL_JS = ON_PC ? '/model.js' : '../bookmarklets/src/model.js';   // Pages: …/oasis-app/dashboard/ から見たリポジトリ直下
+const MODEL_JSON = ON_PC ? '/model.json' : '../model.json';
+const PAR = 20, ODDS_MAX_REQ = 1200, AUTO_SEC = 30;
+
+let M = null, AUTH = null, SID = null, busy = false, autoTimer = null, raceAt = null, showN = 20, view = null, gen = 0;
+
+async function jget(u) {
+  try { const r = await fetch(u.startsWith('/api/') ? API + u : u, { cache: 'no-store' }); if (!r.ok) return null; return await r.json(); }
+  catch (e) { return null; }
+}
+function status(msg, err) { const s = $('status'); s.textContent = msg; s.className = err ? 'err' : ''; }
+function store(obj) { try { localStorage.setItem(LS, JSON.stringify(obj)); } catch (e) {} }
+function restore() { try { return JSON.parse(localStorage.getItem(LS) || 'null'); } catch (e) { return null; } }
+
+// トークンは使わない（読み取りの API には要らない）ので、guild・user・race だけ取り出して捨てる
+function parseUrl(s) {
+  try {
+    const u = new URL(String(s).trim());
+    const p = u.searchParams;
+    const a = { guild: p.get('guild'), user: p.get('user'), sid: parseInt(p.get('race') || p.get('schedule_id'), 10) };
+    return (a.guild && a.user) ? a : null;
+  } catch (e) { return null; }
+}
+
+// キャリーオーバー（全組を見て、賭け金で説明できない残り）。bot と同じ考え方で guild ごとに覚える
+const coKey = () => `${LS}_co_${AUTH && AUTH.guild}`;
+const getCO = () => { try { return Math.max(0, Math.round(Number(localStorage.getItem(coKey())) || 0)); } catch (e) { return 0; } };
+const setCO = v => { try { localStorage.setItem(coKey(), String(Math.max(0, Math.round(v)))); } catch (e) {} };
+
+const TRI_SHOW_MIN = 0.01;   // 3連単はこれ未満の的中率を表示しない
+const D = () => (M && M.defaults) || {};
+const TH = () => ({
+  minP: D().min_prob ?? 0.10, edge: D().edge_min ?? 0.01,
+  ufP: D().unformed_p_min ?? 0.10, ufEdge: D().unformed_edge_min ?? 0.30,
+  winP: M.win_min_prob ?? 0.40, winEdge: D().win_edge_min ?? 0.15, big: 0.90,
+  unbet: M.unbet_odds ?? 1.5, seed: M.trifecta_pool_seed ?? 200000, U: M.stake_unit || 10000,
+});
+
+async function loadModel() {
+  if (typeof OasisModel === 'undefined') await new Promise((ok, ng) => {
+    const s = document.createElement('script');
+    s.src = `${MODEL_JS}?t=${Date.now()}`; s.onload = ok; s.onerror = () => ng(new Error('model.js を読めません'));
+    document.head.appendChild(s);
+  });
+  M = await jget(`${MODEL_JSON}?t=${Date.now()}`);
+  if (!M || !M.sim || !M.sim.w) throw new Error('model.json を読めません');
+  if (typeof OasisModel === 'undefined' || !OasisModel.predictSim) throw new Error('model.js が古いか読めません（predictSim がありません）');
+  $('build').textContent = ` 学習 ${M.n_races}レース / build ${String(M.trained_at || '').replace('T', ' ').slice(0, 16)}`;
+}
+
+// 3連単のオッズ: 確率の高い組から20組ずつ。金の乗った組を取り切ったら止める（bot の fetchOdds と同じ打ち切り）
+async function sweepOdds(myGen, sid, pets, combo, pool0, onBatch) {
+  const t = TH();
+  const out = { odds: new Map(), failed: new Set(), done: 0, confirmed: false, seen: 0 };
+  const P = pool0 > 0 ? pool0 : t.seed;
+  let CO = getCO();
+  let BASE = Math.max(pool0 - t.seed - CO, 0);
+  const q = (c, i) => `/api/trifecta/odds?guild=${encodeURIComponent(AUTH.guild)}&schedule_id=${sid}`
+    + `&first=${pets[c.i].pet_id}&second=${pets[c.j].pet_id}&third=${pets[c.k].pet_id}`;
+  const run = async (limit) => {
+    const queue = combo.slice(out.done);
+    while (queue.length && out.done < limit) {
+      if (myGen !== gen) return false;
+      const batch = queue.splice(0, PAR);
+      const got = await Promise.all(batch.map(async c => { const d = await jget(q(c)); return { c, d }; }));
+      for (const g of got) if (!g.d) g.d = await jget(q(g.c));        // 1回だけ取り直す
+      for (const g of got) {
+        const k = `${g.c.i}-${g.c.j}-${g.c.k}`;
+        if (!g.d) { out.failed.add(k); continue; }
+        if (typeof g.d.odds === 'number') out.odds.set(k, g.d.odds);
+      }
+      out.done += batch.length;
+      out.seen = 0;
+      for (const od of out.odds.values()) out.seen += Math.round(P / od / t.U) * t.U;
+      onBatch(out);
+      if (BASE > 0 && BASE - out.seen < t.U) { out.confirmed = !out.failed.size; return true; }
+    }
+    if (out.done >= combo.length) out.confirmed = !out.failed.size;
+    return true;
+  };
+  if (BASE >= t.U) {
+    await run(ODDS_MAX_REQ);
+  } else {
+    await run(PAR);                           // 「賭け0件」の裏取り（覚えていた CO が古いときに気づく）
+    if (out.odds.size) { setCO(0); CO = 0; BASE = Math.max(pool0 - t.seed, 0); await run(ODDS_MAX_REQ); }
+    else out.confirmed = !out.failed.size;
+  }
+  if (myGen === gen && out.done >= combo.length && out.odds.size && !out.failed.size) {
+    setCO(Math.max(Math.round((pool0 - t.seed - out.seen) / t.U) * t.U, 0));
+  }
+  out.CO = getCO();
+  return out;
+}
+
+function renderHead(info, sid) {
+  const n = info.pets.length;
+  raceAt = (info.race_date && info.race_time) ? new Date(`${info.race_date}T${String(info.race_time).padStart(5, '0')}:00+09:00`) : null;
+  const phase = { betting: '受付中', closed: '締切', finished: '終了' }[info.phase] || (info.phase || '—');
+  $('raceHead').innerHTML =
+    `<span class="big">R${sid}</span>`
+    + `<span class="kv">${esc(info.race_date || '')} <b>${esc(info.race_time || '')}</b></span>`
+    + `<span class="kv">${esc(info.distance || '')}・${esc(info.surface || '')}・<b>${n}頭</b></span>`
+    + `<span class="kv">状態 <b>${esc(phase)}</b></span>`
+    + `<span class="kv" id="countdown"></span>`;
+  tick();
+}
+function tick() {
+  const el = $('countdown');
+  if (!el || !raceAt) return;
+  const s = Math.round((raceAt - Date.now()) / 1000);
+  el.innerHTML = s > 0 ? `発走まで <b>${Math.floor(s / 60)}分${String(s % 60).padStart(2, '0')}秒</b>` : '発走済み';
+}
+
+function renderWin(pets, win, open) {
+  const t = TH();
+  const ods = pets.map(h => +h.odds);
+  const real = ods.filter(od => Number.isFinite(od) && od > 0 && od !== t.unbet);
+  const inv = real.reduce((a, od) => a + 1 / od, 0);
+  const idx = pets.map((_, i) => i).sort((a, b) => win[b] - win[a]);
+  const maxP = Math.max(...win, 1e-9);
+  let html = `<tr><th class="name">馬</th><th>勝率</th><th>${open ? '単勝オッズ' : '最終オッズ'}</th><th>期待値</th><th class="hide-sm">市場の勝率</th><th class="name"></th></tr>`;
+  for (const i of idx) {
+    const p = win[i], od = ods[i], unbet = od === t.unbet;
+    const ev = (!unbet && Number.isFinite(od)) ? p * od : NaN;
+    const cand = open && !unbet && p >= t.winP && ev - 1 >= t.winEdge;
+    const cls = cand ? 'buy' : (p < 0.01 ? 'dim' : '');
+    const mk = (!unbet && Number.isFinite(od) && inv > 0) ? (1 / od) / inv : NaN;
+    html += `<tr class="${cls}"><td class="name">${esc(pets[i].display_name || pets[i].name)}</td>`
+      + `<td><span class="pbar" style="width:${Math.round(40 * p / maxP)}px"></span>${pct(p)}</td>`
+      + `<td>${unbet ? '<span class="sub">未投票</span>' : num(od)}</td>`
+      + `<td>${Number.isFinite(ev) ? num(ev) : '—'}</td><td class="hide-sm">${pct(mk)}</td>`
+      + `<td class="tag">${cand ? 'bot の候補' : ''}</td></tr>`;
+  }
+  $('win').innerHTML = html;
+}
+
+function renderTri() {
+  if (!view || !view.triOk) return;
+  const t = TH(), { pets, combo, pool0 } = view, sw = view.sweep;
+  const P = pool0 > 0 ? pool0 : t.seed;
+  const nm = i => esc(pets[i].display_name || pets[i].name);
+  const f = (M.trifecta_seed_bug_active && pool0 > t.seed) ? pool0 / (pool0 - t.seed) : 1;
+  let html = '<tr><th>#</th><th class="name">組（1着 → 2着 → 3着）</th><th>的中率</th><th>オッズ</th><th class="hide-sm">実効（1口）</th><th>期待値</th><th class="name"></th></tr>';
+  const shown = combo.filter(c => c.p >= TRI_SHOW_MIN);   // 的中率の低い組は出さない
+  if (!shown.length) html += `<tr><td colspan="7" class="sub">的中率${pct(TRI_SHOW_MIN, 0)}以上の組はありません</td></tr>`;
+  shown.slice(0, showN).forEach((c, r) => {
+    const k = `${c.i}-${c.j}-${c.k}`;
+    const raw = sw ? sw.odds.get(k) : undefined;
+    const od = raw ? raw * f : undefined;
+    let oddsTxt, eff = NaN, cls = '', tag = '';
+    const big = Math.round(c.p * 1000) / 1000 >= t.big;
+    if (!view.open) {
+      oddsTxt = '—';
+    } else if (od) {
+      eff = (P + t.U) / (P / od + t.U);
+      oddsTxt = num(od, 1);
+      if (c.p >= t.minP && c.p * eff - 1 >= t.edge) { cls = 'buy'; tag = 'bot の候補'; }
+    } else if (sw && sw.failed.has(k)) {
+      oddsTxt = '<span class="sub">取得失敗</span>';
+    } else if (sw && sw.confirmed) {
+      eff = (P + t.U) / t.U;
+      oddsTxt = '未成立';
+      if (c.p >= t.ufP && c.p * eff - 1 >= t.ufEdge) { cls = 'sleeve'; tag = '未成立の候補'; }
+    } else {
+      oddsTxt = `<span class="sub">${sw && r < sw.done ? 'オッズなし（確認中）' : '取得中…'}</span>`;
+    }
+    if (!cls && c.p < t.minP) cls = 'dim';
+    if (big && (cls === 'buy' || cls === 'sleeve')) tag = '★ ' + tag;
+    html += `<tr class="${cls}"><td>${r + 1}</td><td class="name">${nm(c.i)} → ${nm(c.j)} → ${nm(c.k)}</td>`
+      + `<td><span class="pbar" style="width:${Math.round(40 * c.p / Math.max(combo[0].p, 1e-9))}px"></span>${pct(c.p)}</td>`
+      + `<td>${oddsTxt}</td><td class="hide-sm">${Number.isFinite(eff) ? num(eff, 2) : '—'}</td>`
+      + `<td>${Number.isFinite(eff) ? num(c.p * eff, 2) : '—'}</td><td class="tag">${tag}</td></tr>`;
+  });
+  $('tri').innerHTML = html;
+  $('more').hidden = shown.length <= showN;
+  const hid = combo.length - shown.length ? `・的中率${pct(TRI_SHOW_MIN, 0)}未満の${(combo.length - shown.length).toLocaleString()}組は省略` : '';
+  const prog = sw ? `オッズ ${Math.min(sw.done, combo.length).toLocaleString()} / ${combo.length.toLocaleString()}組を確認`
+    + (sw.confirmed ? '（金の乗った組は取り切り）' : '') + (sw.failed.size ? `・取得失敗 ${sw.failed.size}組` : '') : 'オッズを取得中…';
+  if (!view.open) { $('triInfo').textContent = '受付中ではないので3連単のオッズは出しません（プールが初期値で返るため）。的中率だけ表示しています' + hid + '。'; return; }
+  $('triInfo').innerHTML = `3連単プール <b>${yen(pool0)}</b> rrc`
+    + (sw && sw.CO ? `（うちキャリーオーバー ${yen(sw.CO)}）` : '') + `・${prog}${hid}`;
+}
+
+async function refresh() {
+  if (!AUTH || SID == null || busy) return;
+  busy = true; const myGen = ++gen;
+  ['refresh', 'prev', 'next', 'go'].forEach(id => $(id).disabled = true);
+  status('レース情報を取得しています…');
+  try {
+    if (!M) await loadModel();
+    const info = await jget(`/api/race/by-id/${encodeURIComponent(AUTH.guild)}/${SID}?user=${encodeURIComponent(AUTH.user)}`);
+    if (!info || !Array.isArray(info.pets) || !info.pets.length) {
+      status(`R${SID} のデータがありません（まだ組まれていないか、番号が違います）`, true);
+      ['racePanel', 'winPanel', 'triPanel'].forEach(id => $(id).hidden = true);
+      return;
+    }
+    const pets = info.pets, dist = info.distance || '', track = info.surface || '';
+    if (!M.sim.w[dist]) { status(`距離「${dist}」はモデルにありません`, true); return; }
+    renderHead(info, SID);
+    $('racePanel').hidden = false;
+    status('計算しています…');
+    await new Promise(r => setTimeout(r, 0));
+    const skipped = [];
+    const horses = OasisModel.racePets(pets, M, dist, track, skipped);
+    const pr = OasisModel.predictSim(pets, horses, dist, track, M, SID);   // bot と同じ（乱数の種もレース番号）
+    const open = info.phase === 'betting';   // 受付中以外は単勝が最終オッズ、3連単プールは初期値で返る
+    renderWin(pets, pr.win, open);
+    $('winPanel').hidden = false;
+    const triOk = pets.length >= (M.min_field_trifecta || 8);
+    view = { pets, combo: pr.combo, triOk, open, pool0: 0, sweep: null };
+    $('triPanel').hidden = !triOk;
+    if (triOk && !open) renderTri();
+    if (triOk && open) {
+      const pj = await jget(`/api/trifecta/pool?guild=${encodeURIComponent(AUTH.guild)}&schedule_id=${SID}`);
+      if (!pj) { status('3連単プールを取得できませんでした（確率だけ表示）', true); renderTri(); return; }
+      view.pool0 = pj.pool || 0;
+      renderTri();
+      status('3連単のオッズを取得しています…');
+      view.sweep = await sweepOdds(myGen, SID, pets, pr.combo, view.pool0, s => { if (myGen === gen) { view.sweep = s; renderTri(); } });
+      if (myGen !== gen) return;
+      renderTri();
+    }
+    const at = new Date().toLocaleTimeString('ja-JP');
+    status(`最終更新 ${at}` + (skipped.length ? `・反映しなかった効果: ${[...new Set(skipped)].join(' / ')}` : '')
+           + (triOk ? '' : '・8頭未満なので3連単はありません'));
+  } catch (e) {
+    status(`エラー: ${e.message || e}`, true);
+  } finally {
+    busy = false;
+    ['refresh', 'prev', 'next', 'go'].forEach(id => $(id).disabled = !AUTH && id !== 'go');
+    $('go').disabled = false;
+  }
+}
+
+// 前に見ていたレースから先へ、受付中のレースを探す（bot の findRace と同じく10レース先まで）。なければ元の番号
+async function findOpen(from) {
+  for (let d = 0; d <= 10; d++) {
+    const info = await jget(`/api/race/by-id/${encodeURIComponent(AUTH.guild)}/${from + d}?user=${encodeURIComponent(AUTH.user)}`);
+    if (!info || !Array.isArray(info.pets) || !info.pets.length) break;
+    if (info.phase === 'betting') return from + d;
+  }
+  return from;
+}
+
+function setSid(sid) {
+  SID = sid; showN = 20;
+  $('sidLabel').textContent = `R${sid}`;
+  store({ guild: AUTH.guild, user: AUTH.user, sid: sid });
+  // このページの URL にも guild・user・race だけ載せる（トークンは載せない）。ブックマークすれば次からそのまま開ける
+  const q = new URLSearchParams({ guild: AUTH.guild, user: AUTH.user, race: String(sid) });
+  try { history.replaceState(null, '', `${location.pathname}?${q}`); } catch (e) {}
+  refresh();
+}
+
+$('go').onclick = () => {
+  const a = parseUrl($('url').value);
+  if (!a) { status('URL から guild と user を読み取れませんでした（レースサイトのリンクをそのまま貼ってください）', true); return; }
+  $('url').value = '';               // トークン入りの URL を画面に残さない
+  AUTH = { guild: a.guild, user: a.user };
+  setSid(Number.isFinite(a.sid) ? a.sid : (SID || 0));
+};
+$('url').addEventListener('keydown', e => { if (e.key === 'Enter') $('go').click(); });
+$('refresh').onclick = () => refresh();
+$('prev').onclick = () => { if (SID > 0) setSid(SID - 1); };
+$('next').onclick = () => setSid(SID + 1);
+$('more').onclick = () => { showN += 20; renderTri(); };
+$('auto').onchange = () => {
+  clearInterval(autoTimer); autoTimer = null;
+  if ($('auto').checked) autoTimer = setInterval(() => { if (!busy) refresh(); }, AUTO_SEC * 1000);
+};
+setInterval(tick, 1000);
+
+(async () => {
+  try { await loadModel(); } catch (e) { status(`エラー: ${e.message || e}`, true); return; }
+  // 開いた URL（ブックマーク）→ このブラウザに覚えている分 の順に使う。トークンが付いていても使わない
+  const fromUrl = parseUrl(location.href), saved = restore();
+  const same = saved && fromUrl && saved.guild === fromUrl.guild && saved.user === fromUrl.user;
+  const a = fromUrl || saved;
+  const sids = [fromUrl && fromUrl.sid, (same || !fromUrl) && saved && saved.sid].filter(Number.isFinite);
+  if (a && a.guild && a.user && sids.length) {
+    AUTH = { guild: a.guild, user: a.user };
+    status('受付中のレースを探しています…');
+    setSid(await findOpen(Math.max(...sids)));
+  } else if (a && a.guild && a.user) {
+    AUTH = { guild: a.guild, user: a.user };
+    try { history.replaceState(null, '', location.pathname); } catch (e) {}
+    status('レース番号が分からないので、レースサイトのURLを一度貼ってください');
+  } else {
+    status('レースサイトのURLを貼って「読み込む」を押してください');
+  }
+})();
+</script>
+</body>
+</html>
