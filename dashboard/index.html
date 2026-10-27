@@ -349,12 +349,22 @@ async function refresh() {
   }
 }
 
-// 前に見ていたレースから先へ、受付中のレースを探す（bot の findRace と同じく10レース先まで）。なければ元の番号
+// 今の時刻から「次に走るレース」の番号を見積もる。レースは JST 9/12/15/18/21/23時で、番号は1日に12ずつ進む
+// （10/27 9時 = R2864）。見積もりがずれても findOpen が先へ探して受付中のレースに合わせる
+// shortcut: 開催時刻・番号の進み方は 10月の実績から決め打ち。ゲーム側で変わったら SLOTS / ANCHOR を直す
+const SLOTS = [9, 12, 15, 18, 21, 23], PER_DAY = 12, ANCHOR = { sid: 2864, day: Date.UTC(2026, 9, 27) };
+function estimateSid(now) {
+  const j = new Date(now + 9 * 3600e3);                       // JST の日付・時刻を UTC の欄で読む
+  let day = Date.UTC(j.getUTCFullYear(), j.getUTCMonth(), j.getUTCDate());
+  let slot = SLOTS.findIndex(h => j.getUTCHours() < h);      // まだ始まっていない最初のレース
+  if (slot < 0) { slot = 0; day += 864e5; }                  // 23時を過ぎたら翌日の9時
+  return ANCHOR.sid + PER_DAY * Math.round((day - ANCHOR.day) / 864e5) + slot;
+}
+// 見積もった番号から先へ、受付中のレースを探す（bot の findRace と同じく10レース先まで）。なければ見積もりのまま
 async function findOpen(from) {
   for (let d = 0; d <= 10; d++) {
     const info = await jget(`/api/race/by-id/${encodeURIComponent(AUTH.guild)}/${from + d}?user=${encodeURIComponent(AUTH.user)}`);
-    if (!info || !Array.isArray(info.pets) || !info.pets.length) break;
-    if (info.phase === 'betting') return from + d;
+    if (info && info.phase === 'betting' && Array.isArray(info.pets) && info.pets.length) return from + d;
   }
   return from;
 }
@@ -389,19 +399,13 @@ setInterval(tick, 1000);
 
 (async () => {
   try { await loadModel(); } catch (e) { status(`エラー: ${e.message || e}`, true); return; }
-  // 開いた URL（ブックマーク）→ このブラウザに覚えている分 の順に使う。トークンが付いていても使わない
-  const fromUrl = parseUrl(location.href), saved = restore();
-  const same = saved && fromUrl && saved.guild === fromUrl.guild && saved.user === fromUrl.user;
-  const a = fromUrl || saved;
-  const sids = [fromUrl && fromUrl.sid, (same || !fromUrl) && saved && saved.sid].filter(Number.isFinite);
-  if (a && a.guild && a.user && sids.length) {
+  // 開いた URL（ブックマーク）か、このブラウザに覚えている guild・user で、今の時刻の最新レースを開く。トークンは使わない
+  const a = parseUrl(location.href) || restore();
+  if (a && a.guild && a.user) {
     AUTH = { guild: a.guild, user: a.user };
-    status('受付中のレースを探しています…');
-    setSid(await findOpen(Math.max(...sids)));
-  } else if (a && a.guild && a.user) {
-    AUTH = { guild: a.guild, user: a.user };
-    try { history.replaceState(null, '', location.pathname); } catch (e) {}
-    status('レース番号が分からないので、レースサイトのURLを一度貼ってください');
+    try { history.replaceState(null, '', location.pathname); } catch (e) {}   // トークンを早めにアドレスバーから消す
+    status('最新のレースを探しています…');
+    setSid(await findOpen(estimateSid(Date.now())));
   } else {
     status('レースサイトのURLを貼って「読み込む」を押してください');
   }
