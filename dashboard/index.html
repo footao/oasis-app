@@ -239,7 +239,7 @@ async function sweepOdds(myGen, sid, pets, combo, pool0, onBatch) {
 function renderHead(info, sid) {
   const n = info.pets.length;
   raceAt = (info.race_date && info.race_time) ? new Date(`${info.race_date}T${String(info.race_time).padStart(5, '0')}:00+09:00`) : null;
-  const phase = { betting: '受付中', closed: '締切', finished: '終了' }[info.phase] || (info.phase || '—');
+  const phase = { entry: 'エントリー中', betting: '受付中', closed: '締切', finished: '終了' }[info.phase] || (info.phase || '—');
   $('raceHead').innerHTML =
     `<span class="big">R${sid}</span>`
     + `<span class="kv">${esc(info.race_date || '')} <b>${esc(info.race_time || '')}</b></span>`
@@ -335,7 +335,9 @@ async function refresh() {
     const info = await jget(`/api/race/by-id/${encodeURIComponent(AUTH.guild)}/${SID}?user=${encodeURIComponent(AUTH.user)}`);
     if (API === null) { status(NO_API, true); return; }
     if (!info || !Array.isArray(info.pets) || !info.pets.length) {
-      status(`R${SID} のデータがありません（まだ組まれていないか、番号が違います）`, true);
+      // サイトの仕様: レース情報は前日と今日の分しか残らない（それより前は 404）。先のレースは出走馬が決まるまで空
+      status(SID > estimateSid(Date.now(), true) ? `R${SID} はまだ出走馬が決まっていません`
+             : `R${SID} はサイトに残っていません（レースサイトが見せるのは前日と今日のレースだけです）`, true);
       ['racePanel', 'winPanel', 'triPanel'].forEach(id => $(id).hidden = true);
       return;
     }
