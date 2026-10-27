@@ -1048,8 +1048,38 @@ const OasisModel = (() => {
     return { win: Array.from(win, x => x / NS), combo: comboP, inputs: prof };
   }
 
+  // ---- レースの API データ → 予想（オートパイロットとダッシュボードの共通部分）----
+  // pets: /api/race/by-id の pets。装備・お守りの**加算**ぶんは API の speed に既に入っているので、
+  // applyItems が掛けるのは倍率だけ（Python: parse_unified と同じ切り分け）。
+  function racePets(pets, M, dist, track, skipped) {
+    return pets.map(h => applyItems({
+      name: h.display_name || h.name, species: h.adult_key || null,
+      speed: h.speed, power: h.power, stamina: h.stamina,
+      condition: h.condition_label || '普通',
+      passives: [h.passive_skill, h.passive_skill_2]
+        .map(c => (c && c !== 'none') ? (M.code_map[c] || null) : null).filter(Boolean),
+      equipment: h.equipment, charm: h.charm,
+    }, M, skipped || [], { dist: dist, track: track }));
+  }
+  // 区間シミュレータの勝率と、較正した3連単の組の確率（Python: race_sim.TRI_CALIB。順番は変わらない）。
+  // 3連単は8頭以上のときだけ（7頭以下は組を空で返す）。
+  function predictSim(pets, horses, dist, track, M, sid) {
+    const sr = simRace(pets.map((h, i) => ({
+      name: h.display_name || h.name, species: h.adult_key || null, pet_id: h.pet_id,
+      speed: h.speed, power: h.power, stamina: h.stamina,
+      passives: horses[i].passives, equipment: h.equipment, charm: h.charm,
+    })), dist, track, M, M.sim.n_sim, sid);
+    let combo = pets.length >= (M.min_field_trifecta || 8) ? sr.combo : [];
+    const tc = M.sim.tri_calib;
+    if (tc) combo = combo.map(c => {
+      const q = Math.min(Math.max(c.p, 1e-4), 1 - 1e-4);
+      return Object.assign({}, c, { p: 1 / (1 + Math.exp(-(tc[0] + tc[1] * Math.log(q / (1 - q))))) });
+    });
+    return { win: sr.win, combo: combo };
+  }
+
   return { effectiveStats, sigmaMultiplier, rowFeatures, predictBase, marketFavPick,
-           simInputs, simRace,
+           simInputs, simRace, racePets, predictSim,
            sameSpeciesFlags, simulateTrifecta, horseSigmas, makeRng,
            pctMults, itemMult, applyItems, leadAdjustedBase,
            marketWinProb, diagnoseOddsFloor, winBetPicksPool,

@@ -724,7 +724,7 @@ def regression_tests():
           and _ap.count('pool0 / (pool0 - SEED)') == 1,
           '初期プール金ぶんの補正はバグが生きているときだけ')
     check('P18 autopilot は装備・お守りの倍率を掛ける',
-          'OasisModel.applyItems(' in _ap)
+          'OasisModel.racePets(' in _ap and 'applyItems({' in _model_js)   # 2026/10/27〜 ダッシュボードと共通の racePets
     check('P18 autopilot は単勝も出す',
           'winBetPicksPool(' in _ap and '/api/bet' in _ap)
     # トークンはレースごとに失効する。アームが次のレースを跨いだら「無人で買い続ける」
@@ -798,7 +798,8 @@ def regression_tests():
 
     # 「更新されたか分からない」を潰す。挙動の版とビルド時刻の両方をパネルに出すこと。
     check('P19 autopilot は馬場を装備の判定に渡す',
-          'M, fxSkipped, { dist: dist, track: track }' in _ap,
+          'OasisModel.racePets(pets, M, dist, track, fxSkipped)' in _ap
+          and 'M, skipped || [], { dist: dist, track: track }' in _model_js,
           '芝啜り／泥啜りを馬場で判定できるようにする')
     check('P19 autopilot は版とビルド時刻を表示する',
           "const AP_VER = " in _ap
@@ -1004,7 +1005,7 @@ def regression_tests():
           0 <= _ap_s < _ap_e and '{ budget: budgetU - used, stakeUnit: U_' in _ap,
           '後回しだと期待値最大が20口を使い切って未成立が買えない（R2649 の116倍）。10/01〜76R: 先に確保 +1,741万 / 後回し +1,621万')
     check('P41 3連単の組の確率を較正してから使う',
-          "const tc = M.sim.tri_calib;" in _ap and rs_mod.TRI_CALIB[1] > 1.0,
+          "const tc = M.sim.tri_calib;" in _model_js and 'OasisModel.predictSim(' in _ap and rs_mod.TRI_CALIB[1] > 1.0,
           f'race_sim.TRI_CALIB {rs_mod.TRI_CALIB}（中ほどの控えめ・低いところの高めを直す）')
     _fc = getattr(rs_mod, 'FAT_C', {})
     check('P42 疲労補正はゲームの式（距離の定数 × 残り区間で見込む）',

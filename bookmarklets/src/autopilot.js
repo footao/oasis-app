@@ -473,14 +473,7 @@ async function analyseRace(sid, info, canBuy) {
   // 装備・お守りの**加算**ぶん（SP+25 など）は API の speed に既に入っている。
   // ここで掛けるのは**倍率**だけ（Python: parse_unified と同じ切り分け）。
   const fxSkipped = [];
-  const horses = pets.map(h => OasisModel.applyItems({
-    name: h.display_name || h.name, species: h.adult_key || null,
-    speed: h.speed, power: h.power, stamina: h.stamina,
-    condition: h.condition_label || '普通',
-    passives: [h.passive_skill, h.passive_skill_2]
-      .map(c => (c && c !== 'none') ? (M.code_map[c] || null) : null).filter(Boolean),
-    equipment: h.equipment, charm: h.charm,
-  }, M, fxSkipped, { dist: dist, track: track }));
+  const horses = OasisModel.racePets(pets, M, dist, track, fxSkipped);   // ダッシュボードと共通
   if (fxSkipped.length) {
     log(`R${sid}: 反映しなかった効果 ${esc([...new Set(fxSkipped)].join(' / '))}`, '#ffb74d');
   }
@@ -509,18 +502,9 @@ async function analyseRace(sid, info, canBuy) {
   // 前向き検証189レース: 単勝LL 0.567→0.523 / 上位3頭 75.3%→79.4% / 本命1着 84.7%→86.2%。
   let winP = ridgeWin, combo = ridgeCombo, model = 'ridge';
   if (CFG.USE_SIM && M.sim && M.sim.w && M.sim.w[dist]) {
-    const sr = OasisModel.simRace(pets.map((h, i) => ({
-      name: h.display_name || h.name, species: h.adult_key || null, pet_id: h.pet_id,
-      speed: h.speed, power: h.power, stamina: h.stamina,
-      passives: horses[i].passives, equipment: h.equipment, charm: h.charm,
-    })), dist, track, M, M.sim.n_sim, sid);
+    // 勝率と較正済みの3連単（ダッシュボードと共通。model.js の predictSim）
+    const sr = OasisModel.predictSim(pets, horses, dist, track, M, sid);
     winP = sr.win; combo = triOk ? sr.combo : []; model = 'sim';
-    // 3連単の組の確率を較正（Python: race_sim.TRI_CALIB。順番は変わらない）
-    const tc = M.sim.tri_calib;
-    if (tc) combo = combo.map(c => {
-      const q = Math.min(Math.max(c.p, 1e-4), 1 - 1e-4);
-      return Object.assign({}, c, { p: 1 / (1 + Math.exp(-(tc[0] + tc[1] * Math.log(q / (1 - q))))) });
-    });
     const top = a => a.reduce((b, p, i) => (p > a[b] ? i : b), 0);
     const ts = top(winP), tr = top(ridgeWin), nm = i => esc(pets[i].display_name || pets[i].name);
     log(`R${sid}: 予想は区間シミュレータ（本命 ${nm(ts)} ${fx(winP[ts] * 100, 0)}%`
