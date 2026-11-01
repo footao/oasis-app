@@ -997,6 +997,20 @@ def regression_tests():
           rs_mod.RC_COST and all((d, 'normal') in _rc for d in rs_mod.NSEG) and _sd < 0.02
           and all(0.02 < v[2] < 0.2 for v in _rc.values()) and 'C[h] = clampC(Math.exp(rcK[pi] + UR[h]) * rRaw);' in _model_js,
           f'直近120R でレース内のずれ sd {_sd*100:.2f}%（今までのステの式は 4.5〜5%）。レースの乱数 sd ' + ', '.join(f"{k[0]}{v[2]:.3f}" for k, v in _rc.items() if k[1] == 'normal'))
+    # P55: ゲームの1区間の時間は「定数 ÷ rating ÷ 疲労補正」で、定数がフェーズで違う。短距離・マイルは序盤が終盤よりはっきり長い
+    _K = {}
+    for r in _rows[-200:]:
+        for h in r['horses']:
+            _tl = h.get('timeline') or []
+            for _a, _b in zip(_tl, _tl[1:]):
+                if _b.get('rating') and _b.get('fatigue_modifier'):
+                    _K.setdefault((r['distance'], _b['phase']), []).append((_b['elapsed'] - _a['elapsed']) * _b['rating'] * _b['fatigue_modifier'])
+    _kr = {d: float(_np.median(_K[(d, 'early')]) / _np.median(_K[(d, 'late')])) for d in ('短距離', 'マイル') if (d, 'early') in _K and (d, 'late') in _K}
+    check('P55 短距離・マイルは序盤の1区間を長く数える（PHASE_K・Python と JS の両方）',
+          len(_kr) == 2 and all(v > 1.3 for v in _kr.values()) and set(rs_mod.PHASE_K) == {'短距離', 'マイル'}
+          and all(v[0] > 1.3 and v[2] == 1.0 for v in rs_mod.PHASE_K.values())
+          and '* phk[pi];' in _model_js and "S.phase_k && S.phase_k[dist]" in _model_js,
+          '実測の 序盤/終盤 ' + ', '.join(f'{d} {v:.2f}' for d, v in _kr.items()) + '（中距離・長距離は 1 未満なので入れない）')
     check('P52 3連単の口数にケリーを掛けない（期待値最大・1レース20口まで）',
           'TRI_KELLY: false,' in _ap and 'CFG.TRI_KELLY ? (D.kelly_fraction || 0.25) : 1e9' in _ap,
           '10/01〜76R（今のモデル）: ケリーあり・下限20% 実際+1,708万 → ケリーなし・下限10% +1,744万')

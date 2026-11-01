@@ -50,6 +50,10 @@ PH_JA = ('序盤', '中盤', '終盤')
 PH_TL = ('early', 'middle', 'late')
 NSEG = {'短距離': (3, 4, 3), 'マイル': (4, 6, 5), '中距離': (6, 8, 6), '長距離': (7, 10, 8)}
 V_EXP, F_EXP = 0.8709, 0.9136
+# ゲームの1区間の時間はフェーズで違う（短距離・マイルは序盤が長い＝スタートの加速）。終盤を1とした序盤・中盤の倍率。
+# 9/2〜10/1 の timeline で「実際の秒 ÷ シミュの時間」を上位半分の中央値で出した値（2026/11/02）。
+# 前向き 10/2〜11/1: 3連単本命 124→131/143・賭けの再生 +278万。中距離・長距離は終盤のバテが混ざって悪化するので入れない
+PHASE_K = {'短距離': (1.470, 0.882, 1.0), 'マイル': (1.698, 0.928, 1.0)}
 SEG_NOISE = 0.0119
 # 1頭ごとの調子のぶれはレース中の速さに掛ける（ゴールタイムにだけ掛けると、レース中は全馬が実際より
 # 固まって走り、競り合い・先頭の判定がずれる）。前向き197R（採取ミス除く・先頭判定込み）:
@@ -795,6 +799,7 @@ class RaceSim:
                 'pos_kinds': [k for k in POS_KINDS if k in POS_DYNAMIC], 'pos_duty': POS_DUTY,
                 'pos_passives': self._pos_passives(), 'new_pos': sorted(NEW_POS),
                 'pas_special': self._pas_special(), 'fix_ls': FIX_LS, 'cost_mode': COST_MODE,
+                'phase_k': {k: list(v) for k, v in PHASE_K.items()},
                 'lead_cost_up': LEAD_COST_UP, 'duel_m': DUEL_M, 'solo_m': SOLO_M, 'seg_m': SEG_M}
 
     # ---- 予測 ----
@@ -848,6 +853,7 @@ class RaceSim:
             rc_lk = np.array(rcp[0])
             rc_u = rcp[1] + rcp[2] * rng.standard_normal((NS, 1)) + RC_HORSE_SD * rng.standard_normal((NS, H))
         last_drop = np.full((NS, H), -10)
+        phk = PHASE_K.get(d, (1.0, 1.0, 1.0))
         low_at = np.zeros((3, NS, H), bool)                                  # フェーズの始めに下位半分だったか
         rmul = np.ones((NS, H))
         rb = getattr(self, 'rank_beta', (0.0, 0.0))
@@ -921,7 +927,7 @@ class RaceSim:
                     cmul = cmul * np.where(a_, pc[None, :, j], 1.0)
             rr = np.maximum(np.einsum('nhj,hj->nh', mult, st[:, pi, :] * self.W[(d, pi)][0][None, :])
                             + self.W[(d, pi)][1], 1.0)
-            dt = hz / (rr ** V_EXP * f ** F_EXP * (1 + SEG_NOISE * nzv * rng.standard_normal((NS, H))))
+            dt = hz / (rr ** V_EXP * f ** F_EXP * (1 + SEG_NOISE * nzv * rng.standard_normal((NS, H)))) * phk[pi]
             T += dt
             if detail:
                 ph_dt[pi] += dt

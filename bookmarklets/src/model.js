@@ -906,6 +906,7 @@ const OasisModel = (() => {
   // （speed などは API の値そのまま＝装備の加算込み・倍率なし）
   function simRace(horses, dist, track, M, nSim, seed) {
     const S = M.sim, ns = S.nseg[dist], H = horses.length;
+    const phk = (S.phase_k && S.phase_k[dist]) || [1, 1, 1];   // フェーズごとの1区間の時間（Python: PHASE_K）
     const prof = simInputs(horses, dist, track, M);
     const segPh = []; for (let pi = 0; pi < 3; pi++) for (let k = 0; k < ns[pi]; k++) segPh.push(pi);
     const nseg = segPh.length;
@@ -1020,7 +1021,7 @@ const OasisModel = (() => {
           let f0 = fatC ? fatX(Sv[h] / (fatC * (nseg - k))) : fat((Sv[h] - C[h] * remS[h][k]) / S0[h]);
           if (f0 < 1) f0 = 1 - (1 - f0) * x.relief;           // 苦痛慣れ・粘り腰
           const f = Math.pow(f0, S.f_exp);
-          DT[h] = HZ[h] / (rv * f * (1 + S.seg_noise * x.nz * randn()));
+          DT[h] = HZ[h] / (rv * f * (1 + S.seg_noise * x.nz * randn())) * phk[pi];   // フェーズごとの1区間の時間（Python: PHASE_K）
           if (rcK) C[h] = clampC(Math.exp(rcK[pi] + UR[h]) * rRaw);
           else if (cMode === 'clampdyn') {                     // 発動中の効果で上がった実効ステぶん消費も増える
             const r = (st[0] * wcv[0] * mul[0] + st[1] * wcv[1] * mul[1] + st[2] * wcv[2] * mul[2]) / crw[h][pi];

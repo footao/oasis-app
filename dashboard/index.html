@@ -335,9 +335,8 @@ async function refresh() {
     const info = await jget(`/api/race/by-id/${encodeURIComponent(AUTH.guild)}/${SID}?user=${encodeURIComponent(AUTH.user)}`);
     if (API === null) { status(NO_API, true); return; }
     if (!info || !Array.isArray(info.pets) || !info.pets.length) {
-      // サイトの仕様: レース情報は前日と今日の分しか残らない（それより前は 404）。先のレースは出走馬が決まるまで空
       status(SID > estimateSid(Date.now(), true) ? `R${SID} はまだ出走馬が決まっていません`
-             : `R${SID} はサイトに残っていません（レースサイトが見せるのは前日と今日のレースだけです）`, true);
+             : `R${SID} のデータがありません（中止になったか、サイトに残っていないレースです）`, true);
       ['racePanel', 'winPanel', 'triPanel'].forEach(id => $(id).hidden = true);
       return;
     }
@@ -432,8 +431,10 @@ $('go').onclick = () => {
 };
 $('url').addEventListener('keydown', e => { if (e.key === 'Enter') $('go').click(); });
 $('refresh').onclick = () => refresh();
-$('prev').onclick = () => { if (SID > 0) setSid(SID - 1); };
-$('next').onclick = () => setSid(SID + 1);
+// 番号は1日12ずつ進むが、使うのは最初の6つ（9〜23時）だけ。残り6つ（夜中）は欠番なので飛ばす
+const stepSid = (sid, dir) => { do sid += dir; while (((sid - ANCHOR.sid) % PER_DAY + PER_DAY) % PER_DAY >= SLOTS.length); return sid; };
+$('prev').onclick = () => { if (SID > 0) setSid(stepSid(SID, -1)); };
+$('next').onclick = () => setSid(stepSid(SID, 1));
 $('more').onclick = () => { showN += 20; renderTri(); };
 $('auto').onchange = () => {
   clearInterval(autoTimer); autoTimer = null;
