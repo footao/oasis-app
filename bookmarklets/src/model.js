@@ -768,6 +768,7 @@ const OasisModel = (() => {
         const mm = {}; for (const k of Object.keys(m)) if (k !== 'stamina') mm[k] = m[k];
         avg(mm, S.lead_duty);
       }
+      else if (label === '二の脚') phase(m, '中盤', 2 / n);   // 中盤開始後200m＝中盤の最初の2区間（Python と同じ）
       else if (sc === 'tail300') phase(m, '終盤', 3 / n);
       else if (sc === 'phase' || (sc === 'conditional' && SIM_PH.includes(arg))) phase(m, arg, duty);
       else if (sc === 'aptitude') { if (arg === dist || arg === track) avg(m, 1); }
@@ -906,7 +907,6 @@ const OasisModel = (() => {
   // （speed などは API の値そのまま＝装備の加算込み・倍率なし）
   function simRace(horses, dist, track, M, nSim, seed) {
     const S = M.sim, ns = S.nseg[dist], H = horses.length;
-    const phk = (S.phase_k && S.phase_k[dist]) || [1, 1, 1];   // フェーズごとの1区間の時間（Python: PHASE_K）
     const prof = simInputs(horses, dist, track, M);
     const segPh = []; for (let pi = 0; pi < 3; pi++) for (let k = 0; k < ns[pi]; k++) segPh.push(pi);
     const nseg = segPh.length;
@@ -940,7 +940,7 @@ const OasisModel = (() => {
     const randn = makeRng(seed == null ? 1 : seed);
     const NS = nSim || S.n_sim || 8000;
     const win = new Float64Array(H), combo = new Map(), T = new Float64Array(H);
-    const C = new Float64Array(H), ON = new Uint8Array(H), Sv = new Float64Array(H), S0 = new Float64Array(H), DT = new Float64Array(H);
+    const C = new Float64Array(H), ON = new Uint8Array(H), Sv = new Float64Array(H), S0 = new Float64Array(H), DT = new Float64Array(H), RR = new Float64Array(H);
     const HZ = new Float64Array(H).fill(1), RU = new Uint8Array(H), RF = new Float64Array(H);
     const RK = new Int32Array(H), RKP = new Int32Array(H), DROP = new Int32Array(H);
     const LOW = [new Uint8Array(H), new Uint8Array(H), new Uint8Array(H)];
@@ -1021,7 +1021,8 @@ const OasisModel = (() => {
           let f0 = fatC ? fatX(Sv[h] / (fatC * (nseg - k))) : fat((Sv[h] - C[h] * remS[h][k]) / S0[h]);
           if (f0 < 1) f0 = 1 - (1 - f0) * x.relief;           // 苦痛慣れ・粘り腰
           const f = Math.pow(f0, S.f_exp);
-          DT[h] = HZ[h] / (rv * f * (1 + S.seg_noise * x.nz * randn())) * phk[pi];   // フェーズごとの1区間の時間（Python: PHASE_K）
+          DT[h] = HZ[h] / (rv * f * (1 + S.seg_noise * x.nz * randn()));
+          RR[h] = rv;
           if (rcK) C[h] = clampC(Math.exp(rcK[pi] + UR[h]) * rRaw);
           else if (cMode === 'clampdyn') {                     // 発動中の効果で上がった実効ステぶん消費も増える
             const r = (st[0] * wcv[0] * mul[0] + st[1] * wcv[1] * mul[1] + st[2] * wcv[2] * mul[2]) / crw[h][pi];
@@ -1029,7 +1030,11 @@ const OasisModel = (() => {
           }
           Sv[h] -= C[h] * cmS[h][k] * cmul;
         }
-        for (let h = 0; h < H; h++) T[h] += DT[h];      // 全頭の区間が終わってから進める（Python と同じ）
+        // 1区間の時間は場の平均 rating 比（ゲームは 6 × 全頭の rating の平均 ÷ 自分の rating）。全頭の区間が終わってから進める（Python と同じ）
+        let mR = 0;
+        for (let h = 0; h < H; h++) mR += RR[h];
+        mR /= H;
+        for (let h = 0; h < H; h++) { DT[h] *= mR; T[h] += DT[h]; }
       }
       // 1レース1頭ごとの調子のぶれ（区間の乱数だけだと自信過剰になる）
       if (S.horse_sd && !inRace) for (let h = 0; h < H; h++) T[h] *= Math.exp(S.horse_sd * randn());

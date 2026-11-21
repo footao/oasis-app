@@ -48,7 +48,7 @@ const CFG = {
   MODEL_WEIGHT: 1.0,        // λ。model.json の defaults から上書きされる
   // 3連単の的中率下限。model.json の defaults.min_prob が正（単勝には掛からない）。
   // 実ベット52レースで「予測5〜15%」の帯が実測1.1%・回収率24%だったので切る。
-  MIN_PROB: 0.10,
+  MIN_PROB: 0.15,           // 2026/11/21 0.10→0.15
   WIN_ON: true,             // 単勝も買う（NPCの初期金があるのでプールが常にある）
   // 単勝プールの実測（試し買い）。1口ずつ買って前後のオッズの動きから逆算する。
   // **これは実際の購入**なので、アーム中（＝人が購入を許可したレース）でしか走らせない。
@@ -1018,7 +1018,7 @@ function analyseWin(sid, pets, winP, measuredPool, budgetLeft) {
   //   較正が合っており、52レースでも 125%（σ差し戻し後は149%）と稼ぎ頭。絞る理由がない。
   const [picks] = OasisModel.winBetPicksPool(
     key, pBet, fl.odds_eff, pool,
-    kellyBank(), D.kelly_fraction || 0.25, D.win_edge_min || 0.15,
+    kellyBank(), D.kelly_fraction || 0.25, D.win_edge_min ?? 0.05,
     { stakeUnit: WU,
       // ⚠ totalUnits は「このレースの**合計**上限」であって残り枠ではない。
       //   winBetPicksPool は中で budget = min(totalUnits, riskUnits) - 購入済み を

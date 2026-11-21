@@ -49,11 +49,12 @@ import oasis_core as oc
 PH_JA = ('序盤', '中盤', '終盤')
 PH_TL = ('early', 'middle', 'late')
 NSEG = {'短距離': (3, 4, 3), 'マイル': (4, 6, 5), '中距離': (6, 8, 6), '長距離': (7, 10, 8)}
-V_EXP, F_EXP = 0.8709, 0.9136
-# ゲームの1区間の時間はフェーズで違う（短距離・マイルは序盤が長い＝スタートの加速）。終盤を1とした序盤・中盤の倍率。
-# 9/2〜10/1 の timeline で「実際の秒 ÷ シミュの時間」を上位半分の中央値で出した値（2026/11/02）。
-# 前向き 10/2〜11/1: 3連単本命 124→131/143・賭けの再生 +278万。中距離・長距離は終盤のバテが混ざって悪化するので入れない
-PHASE_K = {'短距離': (1.470, 0.882, 1.0), 'マイル': (1.698, 0.928, 1.0)}
+# ゲームの区間タイムは rating^−1 × 疲労補正^−1 ちょうど（10/24）。前は 0.87乗で差を縮めて自信過剰の保険にしていたが、
+# 速い馬（あかり・メビウス）を毎回遅く見ていた。11/21: 1乗に戻し、代わりに HORSE_SD を実測に合わせて広げる
+V_EXP, F_EXP = 1.0, 1.0
+# ゲームの1区間の時間 = 6.000 × 「その区間の出走馬全頭の rating の平均」÷（自分の rating × 疲労補正）×（1 + 乱数 0.84%）。
+# 10/1〜11/20 の全区間で 6.000・ずれ sd 0.86%（＝区間の乱数そのもの・発動中の効果込みの rating でも同じ）。距離やフェーズの
+# 「定数」に見えていたのは場の平均 rating の差で、長距離が 11/4 ごろに変わって見えたのもスタミナ型の馬が増えたため（11/21）
 SEG_NOISE = 0.0119
 # 1頭ごとの調子のぶれはレース中の速さに掛ける（ゴールタイムにだけ掛けると、レース中は全馬が実際より
 # 固まって走り、競り合い・先頭の判定がずれる）。前向き197R（採取ミス除く・先頭判定込み）:
@@ -62,7 +63,13 @@ SEG_NOISE = 0.0119
 HORSE_IN_RACE = True
 # 1頭ごとのレースのぶれ。0.004（10/07 に194Rで決定）→ 0.002（10/21）。その後の修正でモデルが良くなり、ぶれが大きすぎて
 # 単勝の確率が控えめになっていた（予想50〜80%の帯が実際76%）。前向き281R: 単勝LL −0.0157±0.0033（COST_SD_H_K と合わせて）
-HORSE_SD = 0.002
+# 11/21: 0.002 → 0.0075。有力馬のレース全体タイムの「予想とのずれ」は sd 0.82%（9/20〜11/20・737頭）で、区間の乱数だけ
+# （0.84%/√区間数 ≈ 0.25%）では説明できない。前向き 10/25〜11/20 157R（V=1 と合わせて）: 3連単本命 予想101.0→90.5 / 実際 89→86
+# （自信過剰が消える）・3連単LL 0.621→0.598・15口以上の3連単の外れの損 292→187万・賭けの再生 +2,801→+2,806万。単勝LL は 0.094→0.113
+# 11/21 夜: 0.0075 → 0.005。0.0075 は長距離の読み違い（場の平均 rating を入れていなかった）も吸っていた。場の平均を入れて
+# 前向き 10/25〜11/20 157R: 0.0075 / 0.005 / 0.003 で 3連単LL 0.467 / 0.410 / 0.397・本命 予想87.5 / 94.1 / 98.5 → 実際 95 / 95 / 94
+# ・再生 +2,869 / +2,969 / +2,982万。予想と実際が合う 0.005 にする（旧 B: 3連単LL 0.598・再生 +2,806万・単勝LL 0.113→0.106）
+HORSE_SD = 0.005
 COST_SD_H_K = 0.5     # 馬ごとの消費の乱数を、レース内のばらつきから出した値の半分にする（同じ設定の馬は消費がほぼ一定。10/21）
 LOWST_LABELS = {'血走り', '骨砕き', '紅蓮点火', '深淵反転', '禍福転倒', '星海反転'}
 LEAD_LABELS = {'首位の呪い', '王冠過給', '先導祈願', '原海戴冠'}
@@ -304,6 +311,10 @@ def horse_profile(h, dist, track, spec, same_species, scope_tbl=None):
             avg(m, LOWST_DUTY)
         elif label in LEAD_LABELS or sc == 'lead':
             avg({k: x for k, x in m.items() if k != 'stamina'}, LEAD_DUTY)
+        elif label == '二の脚':
+            # 「中盤開始後200m」＝どの距離でも中盤の最初の2区間（timeline で発動 2/4・2/6 を確認）。
+            # 前は spec の duty 0.153 を全距離共通で使い、中盤の38%に均していた（短距離は本当は50%: あかり R2976・R2987）
+            phase(m, '中盤', 2.0 / n)
         elif sc == 'tail300':
             phase(m, '終盤', 3.0 / n)
         elif sc == 'phase' or (sc == 'conditional' and _phase_idx(arg) is not None):
@@ -799,7 +810,6 @@ class RaceSim:
                 'pos_kinds': [k for k in POS_KINDS if k in POS_DYNAMIC], 'pos_duty': POS_DUTY,
                 'pos_passives': self._pos_passives(), 'new_pos': sorted(NEW_POS),
                 'pas_special': self._pas_special(), 'fix_ls': FIX_LS, 'cost_mode': COST_MODE,
-                'phase_k': {k: list(v) for k, v in PHASE_K.items()},
                 'lead_cost_up': LEAD_COST_UP, 'duel_m': DUEL_M, 'solo_m': SOLO_M, 'seg_m': SEG_M}
 
     # ---- 予測 ----
@@ -853,7 +863,6 @@ class RaceSim:
             rc_lk = np.array(rcp[0])
             rc_u = rcp[1] + rcp[2] * rng.standard_normal((NS, 1)) + RC_HORSE_SD * rng.standard_normal((NS, H))
         last_drop = np.full((NS, H), -10)
-        phk = PHASE_K.get(d, (1.0, 1.0, 1.0))
         low_at = np.zeros((3, NS, H), bool)                                  # フェーズの始めに下位半分だったか
         rmul = np.ones((NS, H))
         rb = getattr(self, 'rank_beta', (0.0, 0.0))
@@ -927,7 +936,7 @@ class RaceSim:
                     cmul = cmul * np.where(a_, pc[None, :, j], 1.0)
             rr = np.maximum(np.einsum('nhj,hj->nh', mult, st[:, pi, :] * self.W[(d, pi)][0][None, :])
                             + self.W[(d, pi)][1], 1.0)
-            dt = hz / (rr ** V_EXP * f ** F_EXP * (1 + SEG_NOISE * nzv * rng.standard_normal((NS, H)))) * phk[pi]
+            dt = hz / (rr ** V_EXP * f ** F_EXP * (1 + SEG_NOISE * nzv * rng.standard_normal((NS, H)))) * (rr ** V_EXP).mean(1, keepdims=True)   # 場の平均 rating 比（JS と同じ順）
             T += dt
             if detail:
                 ph_dt[pi] += dt

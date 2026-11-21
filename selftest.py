@@ -997,20 +997,30 @@ def regression_tests():
           rs_mod.RC_COST and all((d, 'normal') in _rc for d in rs_mod.NSEG) and _sd < 0.02
           and all(0.02 < v[2] < 0.2 for v in _rc.values()) and 'C[h] = clampC(Math.exp(rcK[pi] + UR[h]) * rRaw);' in _model_js,
           f'直近120R でレース内のずれ sd {_sd*100:.2f}%（今までのステの式は 4.5〜5%）。レースの乱数 sd ' + ', '.join(f"{k[0]}{v[2]:.3f}" for k, v in _rc.items() if k[1] == 'normal'))
-    # P55: ゲームの1区間の時間は「定数 ÷ rating ÷ 疲労補正」で、定数がフェーズで違う。短距離・マイルは序盤が終盤よりはっきり長い
-    _K = {}
-    for r in _rows[-200:]:
-        for h in r['horses']:
-            _tl = h.get('timeline') or []
-            for _a, _b in zip(_tl, _tl[1:]):
-                if _b.get('rating') and _b.get('fatigue_modifier'):
-                    _K.setdefault((r['distance'], _b['phase']), []).append((_b['elapsed'] - _a['elapsed']) * _b['rating'] * _b['fatigue_modifier'])
-    _kr = {d: float(_np.median(_K[(d, 'early')]) / _np.median(_K[(d, 'late')])) for d in ('短距離', 'マイル') if (d, 'early') in _K and (d, 'late') in _K}
-    check('P55 短距離・マイルは序盤の1区間を長く数える（PHASE_K・Python と JS の両方）',
-          len(_kr) == 2 and all(v > 1.3 for v in _kr.values()) and set(rs_mod.PHASE_K) == {'短距離', 'マイル'}
-          and all(v[0] > 1.3 and v[2] == 1.0 for v in rs_mod.PHASE_K.values())
-          and '* phk[pi];' in _model_js and "S.phase_k && S.phase_k[dist]" in _model_js,
-          '実測の 序盤/終盤 ' + ', '.join(f'{d} {v:.2f}' for d, v in _kr.items()) + '（中距離・長距離は 1 未満なので入れない）')
+    # P55: ゲームの1区間の時間 = 6 × 場の全頭の rating の平均 ÷（自分の rating × 疲労補正）。フェーズ・距離の定数はいらない
+    _q = []
+    for r in _rows[-120:]:
+        _tls = [h.get('timeline') or [] for h in r['horses']]
+        if not all(_tls) or len(set(map(len, _tls))) != 1: continue
+        for k in range(1, len(_tls[0])):
+            _sg = [tl[k] for tl in _tls]
+            if not all(x.get('rating') and x.get('fatigue_modifier') for x in _sg): continue
+            _m = sum(x['rating'] for x in _sg) / len(_sg)
+            _q += [(x['elapsed'] - tl[k - 1]['elapsed']) * x['rating'] * x['fatigue_modifier'] / _m for tl, x in zip(_tls, _sg)]
+    _q = _np.array(_q)
+    _src = open(rs_mod.__file__, encoding='utf-8').read()
+    check('P55 1区間の時間は場の平均 rating 比（Python と JS の両方・フェーズ定数なし）',
+          len(_q) > 1000 and abs(float(_np.median(_q)) - 6.0) < 0.01 and float(_np.median(_np.abs(_np.log(_q / 6.0)))) < 0.01
+          and '* (rr ** V_EXP).mean(1, keepdims=True)' in _src and 'PHASE_K' not in _src
+          and 'DT[h] *= mR; T[h] += DT[h];' in _model_js and 'phk' not in _model_js,
+          f'直近120R {len(_q)}区間: 秒×rating×疲労÷場の平均 = 中央 {float(_np.median(_q)):.3f}・ずれの中央 {100*float(_np.median(_np.abs(_np.log(_q/6.0)))):.2f}%')
+    # P56: 二の脚（中盤開始後200m）は中盤の最初の2区間だけ。短距離 2/4・マイル 2/6・中距離 2/8・長距離 2/10
+    _sg = dict(item_type='equipment', effect_key='gear_second_gear', effect_value=8.0, effect_label='二の脚', effect_description='中盤開始後200mのスピードが8%上昇')
+    _sgv = {d: rs_mod.horse_profile(dict(speed=100.0, power=100.0, stamina=100.0, equipment=_sg), d, '芝', oc.default_spec(), False)['fx'] for d in rs_mod.NSEG}
+    check('P56 二の脚は中盤の最初の2区間だけに効く（距離ごと）',
+          all(v == [(1, {'speed': 1.0 + 0.08 * 2.0 / rs_mod.NSEG[d][1]})] or abs(v[0][1]['speed'] - (1.0 + 0.08 * 2.0 / rs_mod.NSEG[d][1])) < 1e-9 for d, v in _sgv.items())
+          and "else if (label === '二の脚') phase(m, '中盤', 2 / n);" in _model_js,
+          ' / '.join(f"{d} ×{v[0][1]['speed']:.4f}" for d, v in _sgv.items()))
     check('P52 3連単の口数にケリーを掛けない（期待値最大・1レース20口まで）',
           'TRI_KELLY: false,' in _ap and 'CFG.TRI_KELLY ? (D.kelly_fraction || 0.25) : 1e9' in _ap,
           '10/01〜76R（今のモデル）: ケリーあり・下限20% 実際+1,708万 → ケリーなし・下限10% +1,744万')
@@ -1166,8 +1176,8 @@ def regression_tests():
     check('P28 3連単の的中率下限が Python と JS で一致している',
           _js_mp is not None and abs(float(_js_mp.group(1)) - _mp) < 1e-9,
           f"Python {_mp} / JS {_js_mp.group(1) if _js_mp else '見つからない'}")
-    check('P28 3連単の的中率下限は 10/17〜 10%（10%未満は予想3.0回→実際0回）・未成立枠も10%',
-          abs(_mp - 0.10) < 1e-9 and oc.DEFAULT_SETTINGS['unformed_p_min'] >= 0.10,
+    check('P28 3連単の的中率下限は 11/21〜 15%（10/17〜 10%）・未成立枠は10%',
+          abs(_mp - 0.15) < 1e-9 and oc.DEFAULT_SETTINGS['unformed_p_min'] >= 0.10,
           f"min_prob {_mp} / 未成立 {oc.DEFAULT_SETTINGS['unformed_p_min']}"
           '（実ベット52レース: 予測5〜15%の帯は93件・予測9.1%→実測1.1%・回収率24%。'
           '切ると全体123%→140%、σ差し戻し後34レースで139%→147%）')

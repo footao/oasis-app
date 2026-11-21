@@ -176,7 +176,7 @@ const D = () => (M && M.defaults) || {};
 const TH = () => ({
   minP: D().min_prob ?? 0.10, edge: D().edge_min ?? 0.01,
   ufP: D().unformed_p_min ?? 0.10, ufEdge: D().unformed_edge_min ?? 0.30,
-  winP: M.win_min_prob ?? 0.40, winEdge: D().win_edge_min ?? 0.15, big: 0.90,
+  winP: M.win_min_prob ?? 0.40, winEdge: D().win_edge_min ?? 0.05, big: 0.90,
   unbet: M.unbet_odds ?? 1.5, seed: M.trifecta_pool_seed ?? 200000, U: M.stake_unit || 10000,
 });
 
