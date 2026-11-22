@@ -28,6 +28,17 @@ for (const r of F) {
   const tj = new Map((sr.combo || []).map(c => [`${c.i}-${c.j}-${c.k}`, c.p]));
   for (const [k, p] of (r.tri || [])) { worstT = Math.max(worstT, Math.abs((tj.get(k.join('-')) || 0) - p)); nT++; }
 }
+// レース再現: 一番多かった上位3頭になった回を返し、その回の着順が本当にその並びで、通過時刻が増えていくこと
+let repBad = 0;
+for (const r of F.slice(0, 6)) {
+  if (r.horses.length < 3) continue;
+  const sr = OasisModel.simRace(r.horses, r.dist, r.track, M, 2000, 7), H = r.horses.length, c = sr.combo[0];
+  const tr = OasisModel.simRace(r.horses, r.dist, r.track, M, 2000, 7, { want: (c.i * H + c.j) * H + c.k }).trace;
+  const fin = [...Array(H).keys()].sort((a, b) => tr.t[tr.nseg * H + a] - tr.t[tr.nseg * H + b]);
+  if (fin[0] !== c.i || fin[1] !== c.j || fin[2] !== c.k) repBad++;
+  for (let k = 1; k <= tr.nseg; k++) for (let h = 0; h < H; h++) if (!(tr.t[k * H + h] > tr.t[(k - 1) * H + h])) repBad++;
+}
+if (repBad) { console.error(`❌ レース再現の回が予想の並びと合わない（${repBad}件）`); process.exit(1); }
 if (worstIn > 1e-6 || worstP > 0.02 || worstT > 0.02) {
   console.error(`❌ シミュレータ不一致: 入力の最大誤差 ${worstIn.toExponential(2)} / 勝率の最大差 ${worstP.toFixed(3)} / 3連単の最大差 ${worstT.toFixed(3)}`);
   process.exit(1);

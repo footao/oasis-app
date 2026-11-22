@@ -905,7 +905,9 @@ const OasisModel = (() => {
 
   // horses: [{name, species, speed, power, stamina, passives(日本語名), equipment, charm}]
   // （speed などは API の値そのまま＝装備の加算込み・倍率なし）
-  function simRace(horses, dist, track, M, nSim, seed) {
+  // opt.want を渡すと、上位3頭がその組（(1着*H+2着)*H+3着。2頭以下なら1着の番号）になった最初の1回の
+  // 区間ごとの位置とスタミナを返して止まる（ダッシュボードのレース再現用。乱数の種が同じなら同じ回が出る）
+  function simRace(horses, dist, track, M, nSim, seed, opt) {
     const S = M.sim, ns = S.nseg[dist], H = horses.length;
     const prof = simInputs(horses, dist, track, M);
     const segPh = []; for (let pi = 0; pi < 3; pi++) for (let k = 0; k < ns[pi]; k++) segPh.push(pi);
@@ -949,6 +951,8 @@ const OasisModel = (() => {
     const mul = [1, 1, 1];
     const sdR = S.cost_sd_r || 0, sdH = S.cost_sd_h == null ? S.cost_sd : S.cost_sd_h;
     const muC = S.cost_mu + (S.cost_mu_n || 0) * Math.log(H);   // 少頭数ほど消費が少ない（Python: COST_FIELD）
+    const want = opt && opt.want != null ? opt.want : null;
+    const TR = want == null ? null : new Float64Array((nseg + 1) * H), SR = want == null ? null : new Float64Array((nseg + 1) * H);
     for (let it = 0; it < NS; it++) {
       RM.fill(1);
       const zr = sdR ? randn() : 0;            // 消費の乱数のレース共通ぶん（Python: COST_COMMON）
@@ -965,6 +969,7 @@ const OasisModel = (() => {
         if (inRace) HZ[h] = Math.exp(S.horse_sd * randn());
         if (rcK) UR[h] = ur + rcH * randn();
       }
+      if (TR) for (let h = 0; h < H; h++) { TR[h] = 0; SR[h] = Sv[h] / S0[h]; }
       for (let k = 0; k < nseg; k++) {
         const pi = segPh[k];
         // フェーズの始めの順位でそのフェーズの消費が変わる（先頭ほど多い・同位置は pet_id 順）。Python: RANK_COST
@@ -1035,6 +1040,7 @@ const OasisModel = (() => {
         for (let h = 0; h < H; h++) mR += RR[h];
         mR /= H;
         for (let h = 0; h < H; h++) { DT[h] *= mR; T[h] += DT[h]; }
+        if (TR) for (let h = 0; h < H; h++) { TR[(k + 1) * H + h] = T[h]; SR[(k + 1) * H + h] = Sv[h] / S0[h]; }
       }
       // 1レース1頭ごとの調子のぶれ（区間の乱数だけだと自信過剰になる）
       if (S.horse_sd && !inRace) for (let h = 0; h < H; h++) T[h] *= Math.exp(S.horse_sd * randn());
@@ -1046,8 +1052,11 @@ const OasisModel = (() => {
         else if (c3 < 0 || v < T[c3]) { c3 = i; }
       }
       win[a]++;
+      if (want != null && (H >= 3 ? (a * H + b) * H + c3 : a) === want)
+        return { trace: { t: Array.from(TR), s: Array.from(SR), H: H, nseg: nseg, segM: S.seg_m || 100, segPh: segPh, run: it } };
       if (H >= 3) { const key = (a * H + b) * H + c3; combo.set(key, (combo.get(key) || 0) + 1); }
     }
+    if (want != null) return { trace: null };
     const comboP = [];
     for (const [k, v] of combo) comboP.push({ i: Math.floor(k / (H * H)), j: Math.floor(k / H) % H, k: k % H, p: v / NS });
     comboP.sort((x, y) => y.p - x.p);
@@ -1069,23 +1078,32 @@ const OasisModel = (() => {
   }
   // 区間シミュレータの勝率と、較正した3連単の組の確率（Python: race_sim.TRI_CALIB。順番は変わらない）。
   // 3連単は8頭以上のときだけ（7頭以下は組を空で返す）。
+  const simHorses = (pets, horses) => pets.map((h, i) => ({
+    name: h.display_name || h.name, species: h.adult_key || null, pet_id: h.pet_id,
+    speed: h.speed, power: h.power, stamina: h.stamina,
+    passives: horses[i].passives, equipment: h.equipment, charm: h.charm,
+  }));
   function predictSim(pets, horses, dist, track, M, sid) {
-    const sr = simRace(pets.map((h, i) => ({
-      name: h.display_name || h.name, species: h.adult_key || null, pet_id: h.pet_id,
-      speed: h.speed, power: h.power, stamina: h.stamina,
-      passives: horses[i].passives, equipment: h.equipment, charm: h.charm,
-    })), dist, track, M, M.sim.n_sim, sid);
+    const sr = simRace(simHorses(pets, horses), dist, track, M, M.sim.n_sim, sid);
     let combo = pets.length >= (M.min_field_trifecta || 8) ? sr.combo : [];
     const tc = M.sim.tri_calib;
     if (tc) combo = combo.map(c => {
       const q = Math.min(Math.max(c.p, 1e-4), 1 - 1e-4);
       return Object.assign({}, c, { p: 1 / (1 + Math.exp(-(tc[0] + tc[1] * Math.log(q / (1 - q))))) });
     });
-    return { win: sr.win, combo: combo };
+    // 再現用: 一番多かった上位3頭（較正前。2頭以下なら一番多かった1着）
+    const H = pets.length, top = sr.combo[0] || null, w1 = sr.win.indexOf(Math.max(...sr.win));
+    const mode = top ? { want: (top.i * H + top.j) * H + top.k, order: [top.i, top.j, top.k], p: top.p }
+                     : { want: w1, order: [w1], p: sr.win[w1] };
+    return { win: sr.win, combo: combo, mode: mode };
+  }
+  // predictSim と同じ乱数で回し、mode.want の着順になった最初の1回を返す（見つからなければ null）
+  function replaySim(pets, horses, dist, track, M, sid, want) {
+    return simRace(simHorses(pets, horses), dist, track, M, M.sim.n_sim, sid, { want: want }).trace;
   }
 
   return { effectiveStats, sigmaMultiplier, rowFeatures, predictBase, marketFavPick,
-           simInputs, simRace, racePets, predictSim,
+           simInputs, simRace, racePets, predictSim, replaySim,
            sameSpeciesFlags, simulateTrifecta, horseSigmas, makeRng,
            pctMults, itemMult, applyItems, leadAdjustedBase,
            marketWinProb, diagnoseOddsFloor, winBetPicksPool,

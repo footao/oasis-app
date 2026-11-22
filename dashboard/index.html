@@ -56,6 +56,8 @@ td.tag { text-align: left; font-size: 12px; }
 .lg-buy { background: var(--buy); color: var(--buy-ink); }
 .lg-sleeve { background: var(--sleeve); color: var(--sleeve-ink); }
 .note { font-size: 12px; color: var(--muted); margin-top: 6px; }
+#repCv { display: block; width: 100%; margin-top: 8px; border-radius: 8px; }
+#repSeek { flex: 1 1 160px; min-width: 0; }
 @media (max-width: 600px) { th, td { padding: 5px 4px; font-size: 13px; } .hide-sm { display: none; } }
 </style>
 </head>
@@ -94,6 +96,20 @@ td.tag { text-align: left; font-size: 12px; }
     <h2>単勝（勝つ確率が高い順）</h2>
     <div class="wrap"><table id="win"></table></div>
     <div class="note">単勝プールは試し買いしないと分からないので、bot の候補の判定は表示オッズで出しています（bot は実測したプールで計算します）。</div>
+  </div>
+
+  <div class="panel" id="repPanel" hidden>
+    <h2>レース再現</h2>
+    <div class="kv" id="repInfo"></div>
+    <canvas id="repCv" aria-label="レース再現のアニメーション"></canvas>
+    <div class="row" style="margin-top:8px">
+      <button id="repPlay">▶ 再生</button>
+      <button id="repRestart">最初から</button>
+      <select id="repSpeed" aria-label="再生速度"><option value="5">×5</option><option value="10" selected>×10</option><option value="20">×20</option></select>
+      <input type="range" id="repSeek" min="0" max="1000" value="0" aria-label="再生位置">
+      <span class="kv" id="repTime"></span>
+    </div>
+    <div class="note">シミュレーションで一番多かった上位3頭の並びになった1回を再生しています（その展開のよくある1例で、実際のレースとは違います）。名前の下の線は残りスタミナ。</div>
   </div>
 
   <div class="panel legend">
@@ -337,7 +353,7 @@ async function refresh() {
     if (!info || !Array.isArray(info.pets) || !info.pets.length) {
       status(SID > estimateSid(Date.now(), true) ? `R${SID} はまだ出走馬が決まっていません`
              : `R${SID} のデータがありません（中止になったか、サイトに残っていないレースです）`, true);
-      ['racePanel', 'winPanel', 'triPanel'].forEach(id => $(id).hidden = true);
+      ['racePanel', 'winPanel', 'triPanel', 'repPanel'].forEach(id => $(id).hidden = true);
       return;
     }
     const pets = info.pets, dist = info.distance || '', track = info.surface || '';
@@ -352,6 +368,7 @@ async function refresh() {
     const open = info.phase === 'betting';   // 受付中以外は単勝が最終オッズ、3連単プールは初期値で返る
     renderWin(pets, pr.win, open);
     $('winPanel').hidden = false;
+    setReplay(SID, pets, OasisModel.replaySim(pets, horses, dist, track, M, SID, pr.mode.want), pr.mode);
     const triOk = pets.length >= (M.min_field_trifecta || 8);
     view = { pets, combo: pr.combo, triOk, open, pool0: 0, sweep: null };
     $('triPanel').hidden = !triOk;
@@ -377,6 +394,97 @@ async function refresh() {
     $('go').disabled = false;
   }
 }
+
+// ---- レース再現 ----
+// 区間ごとの通過時刻（シミュの単位。×6 でゲームの秒）から各時刻の位置を線形補間して描く
+const REP_SEC = 6;   // ゲームの1区間の秒 = 6 × 場の平均 rating ÷（rating × 疲労）。シミュの時間 × 6 が秒
+let rep = null;      // { sid, pets, tr, mode, t, playing, last, raf }
+function setReplay(sid, pets, tr, mode) {
+  if (!tr) { $('repPanel').hidden = true; rep && cancelAnimationFrame(rep.raf); rep = null; return; }
+  const same = rep && rep.sid === sid;
+  if (rep) cancelAnimationFrame(rep.raf);
+  const H = tr.H, fin = tr.t.slice(tr.nseg * H, (tr.nseg + 1) * H);
+  rep = { sid, pets, tr, mode, fin, end: Math.max(...fin) * REP_SEC + 1.5,
+          t: same ? rep.t : 0, playing: same ? rep.playing : false, last: 0, raf: 0 };
+  const nm = i => esc(pets[i].display_name || pets[i].name);
+  $('repInfo').innerHTML = `一番多かった並び <b>${mode.order.map(nm).join(' → ')}</b>（${pct(mode.p)}）・${tr.nseg * tr.segM}m`;
+  $('repPanel').hidden = false;
+  if (rep.playing) repLoop(); else drawReplay();
+}
+function repPos(h, tau) {          // tau 時点の h の位置（m）
+  const { t, H, nseg, segM } = rep.tr;
+  if (tau >= t[nseg * H + h]) return nseg * segM;
+  let k = 0; while (k < nseg - 1 && t[(k + 1) * H + h] <= tau) k++;
+  const a = t[k * H + h], b = t[(k + 1) * H + h];
+  return segM * (k + Math.max(0, Math.min(1, (tau - a) / (b - a))));
+}
+function repSta(h, tau) {          // tau 時点の残りスタミナの割合（区間の終わりで更新）
+  const { t, s, H, nseg } = rep.tr;
+  let k = 0; while (k < nseg && t[(k + 1) * H + h] <= tau) k++;
+  return Math.max(0, s[k * H + h]);
+}
+function drawReplay() {
+  if (!rep) return;
+  const cv = $('repCv'), css = getComputedStyle(document.documentElement), v = n => css.getPropertyValue(n).trim();
+  const { H, nseg, segM, segPh } = rep.tr, pets = rep.pets, total = nseg * segM;
+  const W = cv.clientWidth || 600, rowH = 26, top = 22, Hc = top + H * rowH + 6, dpr = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(Hc * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(Hc * dpr); cv.style.height = Hc + 'px'; }
+  const c = cv.getContext('2d'); c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.fillStyle = v('--bg'); c.fillRect(0, 0, W, Hc);
+  const L = Math.min(150, Math.max(96, W * 0.24)), R = 12, X = m => L + (W - L - R) * m / total;
+  // フェーズの帯
+  const PH = ['序盤', '中盤', '終盤'];
+  for (let pi = 0; pi < 3; pi++) {
+    const k0 = segPh.indexOf(pi), k1 = segPh.lastIndexOf(pi) + 1;
+    if (k0 < 0) continue;
+    c.fillStyle = pi === 1 ? v('--panel') : v('--line'); c.globalAlpha = pi === 1 ? 1 : 0.35;
+    c.fillRect(X(k0 * segM), top, X(k1 * segM) - X(k0 * segM), H * rowH); c.globalAlpha = 1;
+    c.fillStyle = v('--muted'); c.font = '11px sans-serif'; c.textAlign = 'center';
+    c.fillText(PH[pi], (X(k0 * segM) + X(k1 * segM)) / 2, 14);
+  }
+  c.strokeStyle = v('--warn'); c.lineWidth = 2; c.beginPath(); c.moveTo(X(total), top - 4); c.lineTo(X(total), top + H * rowH); c.stroke();
+  const tau = rep.t / REP_SEC, pos = [...Array(H).keys()].map(h => repPos(h, tau));
+  const done = h => tau >= rep.fin[h];
+  const order = [...Array(H).keys()].sort((a, b) => (done(a) && done(b)) ? rep.fin[a] - rep.fin[b] : (pos[b] - pos[a]) || (rep.fin[a] - rep.fin[b]));
+  const rank = new Array(H); order.forEach((h, r) => rank[h] = r + 1);
+  const gate = [...Array(H).keys()].sort((a, b) => (+pets[a].pet_id || 0) - (+pets[b].pet_id || 0));   // 枠は pet_id 順（ゲームの先頭判定と同じ）
+  gate.forEach((h, row) => {
+    const y = top + row * rowH + rowH / 2, hue = Math.round(360 * h / H);
+    if (row % 2) { c.fillStyle = v('--line'); c.globalAlpha = 0.25; c.fillRect(L, y - rowH / 2, W - L - R, rowH); c.globalAlpha = 1; }
+    const nm = String(pets[h].display_name || pets[h].name);
+    c.fillStyle = v('--text'); c.font = (rank[h] <= 3 ? '600 ' : '') + '12px sans-serif'; c.textAlign = 'left';
+    const lab = (done(h) ? `${rank[h]}着 ` : `${rank[h]}位 `) + nm;
+    c.fillText(lab.length > 14 ? lab.slice(0, 13) + '…' : lab, 4, y + 2);
+    const sw = L - 12, st = repSta(h, tau);          // 残りスタミナ
+    c.fillStyle = v('--line'); c.fillRect(4, y + 6, sw, 3);
+    c.fillStyle = st < 0.15 ? v('--warn') : v('--bar'); c.fillRect(4, y + 6, sw * Math.min(1, st), 3);
+    c.fillStyle = `hsl(${hue} 70% 50%)`; c.beginPath(); c.arc(X(pos[h]), y, 7, 0, 2 * Math.PI); c.fill();
+    c.strokeStyle = v('--panel'); c.lineWidth = 1.5; c.stroke();
+    if (done(h)) { c.fillStyle = v('--muted'); c.font = '11px sans-serif'; c.textAlign = 'right';
+      c.fillText((rep.fin[h] * REP_SEC).toFixed(1) + '秒', X(total) - 10, y + 4); }
+  });
+  $('repTime').textContent = `${Math.min(rep.t, rep.end).toFixed(1)}秒`;
+  $('repSeek').value = String(Math.round(1000 * Math.min(1, rep.t / rep.end)));
+  $('repPlay').textContent = rep.playing ? '❚❚ 一時停止' : '▶ 再生';
+}
+function repLoop() {
+  if (!rep) return;
+  cancelAnimationFrame(rep.raf); rep.last = 0;
+  const step = now => {
+    if (!rep || !rep.playing) return;
+    if (rep.last) rep.t += (now - rep.last) / 1000 * (+$('repSpeed').value || 10);
+    rep.last = now;
+    if (rep.t >= rep.end) { rep.t = rep.end; rep.playing = false; }
+    drawReplay();
+    if (rep.playing) rep.raf = requestAnimationFrame(step);
+  };
+  rep.raf = requestAnimationFrame(step);
+}
+$('repPlay').onclick = () => { if (!rep) return; if (rep.t >= rep.end) rep.t = 0; rep.playing = !rep.playing; rep.playing ? repLoop() : drawReplay(); };
+$('repRestart').onclick = () => { if (!rep) return; rep.t = 0; rep.playing = true; repLoop(); };
+$('repSeek').oninput = e => { if (!rep) return; rep.t = rep.end * (+e.target.value) / 1000; drawReplay(); };
+window.addEventListener('resize', () => drawReplay());
+window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => drawReplay());
 
 // 今の時刻から「次に走るレース」（last なら「最後に始まったレース」）の番号を見積もる。レースは JST 9/12/15/18/21/23時で、番号は1日に12ずつ進む
 // （10/27 9時 = R2864）。見積もりがずれても findOpen が先へ探して受付中のレースに合わせる
