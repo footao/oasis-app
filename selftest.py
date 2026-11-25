@@ -1014,6 +1014,41 @@ def regression_tests():
           and '* (rr ** V_EXP).mean(1, keepdims=True)' in _src and 'PHASE_K' not in _src
           and 'DT[h] *= mR; T[h] += DT[h];' in _model_js and 'phk' not in _model_js,
           f'直近120R {len(_q)}区間: 秒×rating×疲労÷場の平均 = 中央 {float(_np.median(_q)):.3f}・ずれの中央 {100*float(_np.median(_np.abs(_np.log(_q/6.0)))):.2f}%')
+    # P57: スタミナ消費 = FAT_C × clamp(rating ÷ 場の平均, 0.85, 1.15)（効果なしの区間で実データと一致）
+    _bad = _n = 0
+    for r in _rows[-120:]:
+        _tls = [h.get('timeline') or [] for h in r['horses']]
+        if not all(_tls) or len(set(map(len, _tls))) != 1: continue
+        for k in range(1, len(_tls[0])):
+            _sg = [tl[k] for tl in _tls]
+            if not all(x.get('rating') for x in _sg): continue
+            _m = sum(x['rating'] for x in _sg) / len(_sg)
+            for x in _sg:
+                if x.get('stamina_cost') is None or x.get('activated_passives'): continue
+                _n += 1
+                _bad += abs(x['stamina_cost'] - rs_mod.FAT_C[r['distance']] * min(1.15, max(0.85, x['rating'] / _m))) > 0.01
+    check('P57 スタミナ消費は FAT_C × clamp(rating ÷ 場の平均)（Python と JS の両方）',
+          _n > 1000 and _bad / _n < 0.01 and rs_mod.COST_EXACT
+          and "c = np.clip(FAT_C[d] * rr / rr.mean(1, keepdims=True), L['lo'], L['hi'])" in open(rs_mod.__file__, encoding='utf-8').read()
+          and 'C[h] = clampC(fatC * RW[h] / mW); Sv[h] -= C[h] * cmS[h][k] * CMU[h];' in _model_js,
+          f'直近120R 効果なしの {_n} 区間で式とずれたのは {_bad}（{100 * _bad / max(_n, 1):.2f}%）')
+    # P58: 区間の乱数は一様 ±1.5%（秒×rating×疲労÷(6×場の平均) − 1 が ±1.5% に収まり、尖度が一様分布の 1.8）
+    _e = []
+    for r in _rows[-120:]:
+        _tls = [h.get('timeline') or [] for h in r['horses']]
+        if not all(_tls) or len(set(map(len, _tls))) != 1: continue
+        for k in range(1, len(_tls[0])):
+            _sg = [tl[k] for tl in _tls]
+            if not all(x.get('rating') and x.get('fatigue_modifier') for x in _sg): continue
+            _m = sum(x['rating'] for x in _sg) / len(_sg)
+            _e += [(x['elapsed'] - tl[k - 1]['elapsed']) * x['rating'] * x['fatigue_modifier'] / (6 * _m) - 1 for tl, x in zip(_tls, _sg)]
+    _e = _np.array(_e); _e = _e[_np.abs(_e) < 0.1]
+    _ku = float(_np.mean((_e - _e.mean()) ** 4) / _e.var() ** 2) if len(_e) else 0
+    check('P58 区間の乱数は一様 ±1.5%（Python と JS の両方）',
+          len(_e) > 1000 and abs(float(_np.percentile(_e, 99.5)) - 0.015) < 0.002 and _ku < 2.1 and rs_mod.SEG_UNI == 0.015
+          and '(1 + SEG_UNI * nzv * (2 * rng.random((NS, H)) - 1))' in open(rs_mod.__file__, encoding='utf-8').read()
+          and '(1 + S.seg_uni * x.nz * (2 * randn.u() - 1))' in _model_js,
+          f'直近120R {len(_e)}区間: 99.5%点 {100 * float(_np.percentile(_e, 99.5)):.2f}%・尖度 {_ku:.2f}（一様 1.8・正規 3）')
     # P56: 二の脚（中盤開始後200m）は中盤の最初の2区間だけ。短距離 2/4・マイル 2/6・中距離 2/8・長距離 2/10
     _sg = dict(item_type='equipment', effect_key='gear_second_gear', effect_value=8.0, effect_label='二の脚', effect_description='中盤開始後200mのスピードが8%上昇')
     _sgv = {d: rs_mod.horse_profile(dict(speed=100.0, power=100.0, stamina=100.0, equipment=_sg), d, '芝', oc.default_spec(), False)['fx'] for d in rs_mod.NSEG}

@@ -270,7 +270,7 @@ const OasisModel = (() => {
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
     let spare = null;
-    return () => {                            // Box-Muller
+    const g = () => {                         // Box-Muller
       if (spare !== null) { const v = spare; spare = null; return v; }
       let u = 0, v = 0, sq = 0;
       do { u = u32() * 2 - 1; v = u32() * 2 - 1; sq = u * u + v * v; }
@@ -279,6 +279,8 @@ const OasisModel = (() => {
       spare = v * m;
       return u * m;
     };
+    g.u = u32;                                // 一様乱数 [0,1)（区間の乱数用）
+    return g;
   }
 
   // --- モンテカルロ（Python: simulate_trifecta）---
@@ -939,10 +941,11 @@ const OasisModel = (() => {
     // ゲームの疲労補正の式（Python: FAT_EXACT）。x = 区間の始めのスタミナ ÷ (距離の定数 × 残り区間数)
     const fatC = S.fat_c ? S.fat_c[dist] : null;
     const fatX = x => (x >= 1 ? Math.min(1.03, 1 + 0.02 * (x - 1)) : Math.max(0.65, 0.65 + 0.35 * x));
+    const cEx = !!(S.cost_exact && fatC);
     const randn = makeRng(seed == null ? 1 : seed);
     const NS = nSim || S.n_sim || 8000;
     const win = new Float64Array(H), combo = new Map(), T = new Float64Array(H);
-    const C = new Float64Array(H), ON = new Uint8Array(H), Sv = new Float64Array(H), S0 = new Float64Array(H), DT = new Float64Array(H), RR = new Float64Array(H);
+    const C = new Float64Array(H), ON = new Uint8Array(H), Sv = new Float64Array(H), S0 = new Float64Array(H), DT = new Float64Array(H), RR = new Float64Array(H), RW = new Float64Array(H), CMU = new Float64Array(H);
     const HZ = new Float64Array(H).fill(1), RU = new Uint8Array(H), RF = new Float64Array(H);
     const RK = new Int32Array(H), RKP = new Int32Array(H), DROP = new Int32Array(H);
     const LOW = [new Uint8Array(H), new Uint8Array(H), new Uint8Array(H)];
@@ -1026,14 +1029,24 @@ const OasisModel = (() => {
           let f0 = fatC ? fatX(Sv[h] / (fatC * (nseg - k))) : fat((Sv[h] - C[h] * remS[h][k]) / S0[h]);
           if (f0 < 1) f0 = 1 - (1 - f0) * x.relief;           // 苦痛慣れ・粘り腰
           const f = Math.pow(f0, S.f_exp);
-          DT[h] = HZ[h] / (rv * f * (1 + S.seg_noise * x.nz * randn()));
+          // 区間の乱数: 一様 ±seg_uni（Python: SEG_UNI）。無ければ正規 sd seg_noise
+          DT[h] = S.seg_uni ? HZ[h] / (rv * f) * (1 + S.seg_uni * x.nz * (2 * randn.u() - 1))
+                            : HZ[h] / (rv * f * (1 + S.seg_noise * x.nz * randn()));
           RR[h] = rv;
+          if (cEx) { RW[h] = rRaw; CMU[h] = cmul; continue; }   // 消費は全頭の rating が出てから（下）
           if (rcK) C[h] = clampC(Math.exp(rcK[pi] + UR[h]) * rRaw);
           else if (cMode === 'clampdyn') {                     // 発動中の効果で上がった実効ステぶん消費も増える
             const r = (st[0] * wcv[0] * mul[0] + st[1] * wcv[1] * mul[1] + st[2] * wcv[2] * mul[2]) / crw[h][pi];
             C[h] = clampC(RF[h] * x.c0 * r * RM[h]);
           }
           Sv[h] -= C[h] * cmS[h][k] * cmul;
+        }
+        // 消費 = FAT_C × clamp(rating ÷ 全頭の rating の平均, 0.85, 1.15) × 消費の倍率（Python: COST_EXACT）
+        if (cEx) {
+          let mW = 0;
+          for (let h = 0; h < H; h++) mW += RW[h];
+          mW /= H;
+          for (let h = 0; h < H; h++) { C[h] = clampC(fatC * RW[h] / mW); Sv[h] -= C[h] * cmS[h][k] * CMU[h]; }
         }
         // 1区間の時間は場の平均 rating 比（ゲームは 6 × 全頭の rating の平均 ÷ 自分の rating）。全頭の区間が終わってから進める（Python と同じ）
         let mR = 0;

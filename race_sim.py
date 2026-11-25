@@ -56,6 +56,11 @@ V_EXP, F_EXP = 1.0, 1.0
 # 10/1〜11/20 の全区間で 6.000・ずれ sd 0.86%（＝区間の乱数そのもの・発動中の効果込みの rating でも同じ）。距離やフェーズの
 # 「定数」に見えていたのは場の平均 rating の差で、長距離が 11/4 ごろに変わって見えたのもスタミナ型の馬が増えたため（11/21）
 SEG_NOISE = 0.0119
+# 11/25: 区間の乱数は正規分布ではなく一様分布 ±1.5%（10/1〜11/24 の 49,465区間: sd 0.87%・尖度 1.80（一様は1.8）・
+# 99.9%点 +1.52%・ヒストグラムが平ら）。安定の加護は幅を狭める（nz）。正規 sd 1.19% だと序盤の追い抜きを多く見ていた
+# （k=2 で順位が下がる 予想 0.074〜0.095 → 実際 0.039〜0.068）。前向き 10/2〜11/25 323R（HORSE_SD 0.004）:
+# 3連単LL 0.295→0.284・単勝LL 0.084→0.082・再生 +7,101→+7,128万
+SEG_UNI = 0.015       # 0 なら SEG_NOISE の正規分布に戻る
 # 1頭ごとの調子のぶれはレース中の速さに掛ける（ゴールタイムにだけ掛けると、レース中は全馬が実際より
 # 固まって走り、競り合い・先頭の判定がずれる）。前向き197R（採取ミス除く・先頭判定込み）:
 #   ゴールに 0.006: 単勝LL 0.266 / 3連単LL 1.005 → レース中に 0.004: 0.243 / 0.948（0.006 で 0.256/0.981、0.008 で悪化）
@@ -69,7 +74,9 @@ HORSE_IN_RACE = True
 # 11/21 夜: 0.0075 → 0.005。0.0075 は長距離の読み違い（場の平均 rating を入れていなかった）も吸っていた。場の平均を入れて
 # 前向き 10/25〜11/20 157R: 0.0075 / 0.005 / 0.003 で 3連単LL 0.467 / 0.410 / 0.397・本命 予想87.5 / 94.1 / 98.5 → 実際 95 / 95 / 94
 # ・再生 +2,869 / +2,969 / +2,982万。予想と実際が合う 0.005 にする（旧 B: 3連単LL 0.598・再生 +2,806万・単勝LL 0.113→0.106）
-HORSE_SD = 0.005
+# 11/24: 0.005 → 0.004。消費をゲームの式にしたら、0.006 / 0.005 / 0.004 / 0.003 で 3連単LL 0.342 / 0.314 / 0.294 / 0.282・
+# 本命 予想191.6 / 197.7 / 203.4 / 208.4 → 実際 208 / 209 / 209 / 209（315R）。0.004 で 75%以上の帯も 予想170.8→実際172 と合う
+HORSE_SD = 0.004
 COST_SD_H_K = 0.5     # 馬ごとの消費の乱数を、レース内のばらつきから出した値の半分にする（同じ設定の馬は消費がほぼ一定。10/21）
 LOWST_LABELS = {'血走り', '骨砕き', '紅蓮点火', '深淵反転', '禍福転倒', '星海反転'}
 LEAD_LABELS = {'首位の呪い', '王冠過給', '先導祈願', '原海戴冠'}
@@ -141,6 +148,12 @@ LEAD_COST_UP = 1.047
 # 同じレース・フェーズの馬どうしで消費÷rating のずれは sd 0.15〜0.7%（ステから出す今までの式は 4.5〜5%）。順位の効きも rating の代わりだった。
 # 前向き315R: 10月 単勝LL −0.019±0.014・3連単LL −0.024±0.032 / 賭けの再生 10/2〜10/27 +3,591万 → +3,822万
 RC_COST = True
+# 11/24: 消費はレースの乱数ではなく場の平均で決まっていた。ゲームの式は
+#   消費 = FAT_C[距離] × clamp(rating ÷ その区間の全頭の rating の平均, 0.85, 1.15) × 消費の倍率（省エネ・首位の呪いなど。clamp の後）
+# 9/15〜11/23 の効果なしの区間 37,610 で誤差 0.01 超は 0.16%（省エネの加護の区間は 0%）。今までの「レースの乱数」はこの平均の違いだった。
+# 前向き 10/2〜11/24 315R（HORSE_SD 0.004 と合わせて）: 残りスタミナの予想のずれ sd 3.1→1.0・終盤のバテの当たり 97.9→99.8%・
+# 3連単LL 0.371→0.294・本命 204→209/237・単勝LL 0.102→0.085・再生 +6,763→+7,059万。ういえれ（天嵐決闘・スタミナ56）のバテの見すぎが消える
+COST_EXACT = True
 RC_HORSE_SD = 0.04      # 馬ごとの消費のぶれ（実測は 0.2〜0.7% だが、rating の予想の外れを吸収させる。0.005 / 0.02 / 0.04 で 0.04 が最良）
 
 
@@ -795,8 +808,8 @@ class RaceSim:
                 'cost_sd_r': self.cost_sd_r if COST_COMMON else 0.0, 'cost_mu_n': self.cost_mu_n,
                 'cost_sd_h': self.cost_sd_h if COST_COMMON else self.cost_sd,
                 'fqx': [float(x) for x in self.FQX], 'fqy': [float(x) for x in self.FQY],
-                'fat_c': FAT_C if FAT_EXACT else None,
-                'v_exp': V_EXP, 'f_exp': F_EXP, 'seg_noise': SEG_NOISE, 'horse_sd': self.horse_sd,
+                'fat_c': FAT_C if FAT_EXACT else None, 'cost_exact': bool(COST_EXACT and FAT_EXACT),
+                'v_exp': V_EXP, 'f_exp': F_EXP, 'seg_noise': SEG_NOISE, 'seg_uni': SEG_UNI, 'horse_sd': self.horse_sd,
                 'horse_in_race': HORSE_IN_RACE,
                 'n_sim': self.n_sim, 'lowst_labels': sorted(LOWST_LABELS), 'lead_labels': sorted(LEAD_LABELS),
                 'lead_duty': LEAD_DUTY, 'lowst_duty': LOWST_DUTY, 'lowst_t': LOWST_T,
@@ -936,12 +949,15 @@ class RaceSim:
                     cmul = cmul * np.where(a_, pc[None, :, j], 1.0)
             rr = np.maximum(np.einsum('nhj,hj->nh', mult, st[:, pi, :] * self.W[(d, pi)][0][None, :])
                             + self.W[(d, pi)][1], 1.0)
-            dt = hz / (rr ** V_EXP * f ** F_EXP * (1 + SEG_NOISE * nzv * rng.standard_normal((NS, H)))) * (rr ** V_EXP).mean(1, keepdims=True)   # 場の平均 rating 比（JS と同じ順）
+            nse = (1 + SEG_UNI * nzv * (2 * rng.random((NS, H)) - 1)) if SEG_UNI else 1 / (1 + SEG_NOISE * nzv * rng.standard_normal((NS, H)))
+            dt = hz / (rr ** V_EXP * f ** F_EXP) * nse * (rr ** V_EXP).mean(1, keepdims=True)   # 場の平均 rating 比（JS と同じ順）
             T += dt
             if detail:
                 ph_dt[pi] += dt
                 fmin = np.minimum(fmin, f)
-            if rcp:                                                          # 消費はこの区間の rating に比例（発動中の効果込み）
+            if COST_EXACT and FAT_EXACT:                                     # ゲームの式（場の平均 rating 比・clamp）
+                c = np.clip(FAT_C[d] * rr / rr.mean(1, keepdims=True), L['lo'], L['hi'])
+            elif rcp:                                                        # 消費はこの区間の rating に比例（発動中の効果込み）
                 c = np.clip(np.exp(rc_lk[pi] + rc_u) * rr, L['lo'], L['hi'])
             elif COST_DYNAMIC:                                               # 発動中の効果で上がった実効ステぶん消費も増える
                 c = np.clip(rf * np.einsum('nhj,hj->nh', mult, st[:, pi, :] * wc[None, :]), L['lo'], L['hi'])
